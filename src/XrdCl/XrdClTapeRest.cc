@@ -23,7 +23,10 @@
 /******************************************************************************/
 
 #include "XrdVersion.hh"
+#include "XrdCl/XrdClConstants.hh"
+#include "XrdCl/XrdClCurlUtil.hh"
 #include "XrdCl/XrdClDefaultEnv.hh"
+#include "XrdCl/XrdClLog.hh"
 #include "XrdCl/XrdClUtils.hh"
 #include "XrdCl/XrdClTapeRest.hh"
 #include "XrdCl/XrdClURL.hh"
@@ -34,15 +37,10 @@
 #include <cstdlib>
 #include <exception>
 #include <fstream>
-#include <mutex>
 #include <sstream>
 #include <string>
 
 #include <curl/curl.h>
-
-#ifndef _WIN32
-#include <unistd.h>
-#endif
 
 namespace
 {
@@ -81,43 +79,6 @@ std::string GetEnvString(const std::string &key,
     env->GetString(key, value);
   }
   return value;
-}
-
-int GetEnvInt(const std::string &key, const std::string &shellKey,
-              int defaultValue)
-{
-  XrdCl::Env *env = XrdCl::DefaultEnv::GetEnv();
-  if(!env) return defaultValue;
-
-  int value = defaultValue;
-  if(!env->GetInt(key, value))
-  {
-    env->ImportInt(key, shellKey);
-    env->GetInt(key, value);
-  }
-  return value;
-}
-
-bool FileIsReadable(const std::string &path)
-{
-  if(path.empty()) return false;
-#ifdef _WIN32
-  std::ifstream file(path);
-  return file.good();
-#else
-  return access(path.c_str(), R_OK) == 0;
-#endif
-}
-
-std::string DefaultProxyPath()
-{
-#ifdef _WIN32
-  return "";
-#else
-  std::ostringstream path;
-  path << "/tmp/x509up_u" << geteuid();
-  return path.str();
-#endif
 }
 
 std::string CollapseSlashes(const std::string &path)
@@ -212,43 +173,6 @@ std::string ReadBearerToken()
   return TrimCopy(value);
 }
 
-std::pair<std::string, std::string>
-ResolveX509Credentials(const XrdCl::TapeRestOptions &options)
-{
-  if(!options.cert.empty())
-  {
-    return {options.cert, options.key.empty() ? options.cert : options.key};
-  }
-
-  const int disableX509 =
-    GetEnvInt("HttpDisableX509", "XRD_HTTPDISABLEX509", 0);
-  if(disableX509) return {"", options.key};
-
-  const std::string clientCert =
-    GetEnvString("HttpClientCertFile", "XRD_HTTPCLIENTCERTFILE");
-  if(!clientCert.empty())
-  {
-    const std::string clientKey =
-      GetEnvString("HttpClientKeyFile", "XRD_HTTPCLIENTKEYFILE");
-    return {clientCert, clientKey.empty() ? clientCert : clientKey};
-  }
-
-  const std::string proxy = GetEnvString("X509UserProxy", "X509_USER_PROXY");
-  if(FileIsReadable(proxy)) return {proxy, proxy};
-
-  const std::string defaultProxy = DefaultProxyPath();
-  if(FileIsReadable(defaultProxy)) return {defaultProxy, defaultProxy};
-
-  const std::string envCert = GetEnvString("X509UserCert", "X509_USER_CERT");
-  const std::string envKey = GetEnvString("X509UserKey", "X509_USER_KEY");
-  if(!envCert.empty())
-  {
-    return {envCert, options.key.empty() ? envKey : options.key};
-  }
-
-  return {"", options.key};
-}
-
 size_t CurlWriteCallback(char *data, size_t size, size_t nmemb, void *userp)
 {
   const size_t bytes = size * nmemb;
@@ -262,7 +186,9 @@ HttpResponse HttpRequest(const std::string &method, const std::string &url,
                          const XrdCl::TapeRestOptions &options)
 {
   HttpResponse response;
-  CURL *curl = curl_easy_init();
+  XrdCl::Env *env = XrdCl::DefaultEnv::GetEnv();
+  CURL *curl = XrdCl::CurlUtil::CreateCurlHandle(
+    "XrdCl/" XrdVERSION, options.verbosity >= 3, env);
   if(!curl)
   {
     response.error = "unable to initialize curl";
@@ -283,44 +209,29 @@ HttpResponse HttpRequest(const std::string &method, const std::string &url,
   }
 
   curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-  curl_easy_setopt(curl, CURLOPT_USERAGENT, "XrdCl/" XrdVERSION);
   curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, errorBuffer);
   curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, CurlWriteCallback);
   curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response.body);
   curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
   curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
 
-  const std::string caFile = GetEnvString("HttpCertFile", "XRD_HTTPCERTFILE");
-  if(!caFile.empty())
-  {
-    curl_easy_setopt(curl, CURLOPT_CAINFO, caFile.c_str());
-  }
-
-  const std::string caDir = GetEnvString("HttpCertDir", "XRD_HTTPCERTDIR");
-  if(!caDir.empty())
-  {
-    curl_easy_setopt(curl, CURLOPT_CAPATH, caDir.c_str());
-  }
-
-  if(options.verbosity >= 3)
-  {
-    curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
-  }
-
   if(options.timeout >= 0)
   {
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, options.timeout);
   }
 
-  const auto credentials = ResolveX509Credentials(options);
-  if(!credentials.first.empty())
+  XrdCl::CurlUtil::X509Credentials credentials;
+  if(!options.cert.empty())
   {
-    curl_easy_setopt(curl, CURLOPT_SSLCERT, credentials.first.c_str());
+    credentials.cert = options.cert;
+    credentials.key = options.key.empty() ? options.cert : options.key;
   }
-  if(!credentials.second.empty())
+  else if(XrdCl::CurlUtil::UseClientX509(env))
   {
-    curl_easy_setopt(curl, CURLOPT_SSLKEY, credentials.second.c_str());
+    credentials = XrdCl::CurlUtil::GetClientX509Credentials(env);
   }
+  XrdCl::CurlUtil::ApplyClientX509Credentials(
+    curl, credentials, XrdCl::DefaultEnv::GetLog(), XrdCl::TlsMsg);
 
   if(method == "POST")
   {
@@ -683,12 +594,6 @@ XrdCl::TapeRestArchiveInfo ArchiveInfoFromJson(const Json *item,
   return result;
 }
 
-void EnsureCurlInitialized()
-{
-  static std::once_flag once;
-  std::call_once(once, [] { curl_global_init(CURL_GLOBAL_DEFAULT); });
-}
-
 }
 
 namespace XrdCl
@@ -696,7 +601,12 @@ namespace XrdCl
   TapeRestClient::TapeRestClient( const TapeRestOptions &options ):
     pOptions( options )
   {
-    EnsureCurlInitialized();
+    XrdCl::Log *log = XrdCl::DefaultEnv::GetLog();
+    if(log)
+    {
+      XrdCl::CurlUtil::ConfigureX509Env(
+        XrdCl::DefaultEnv::GetEnv(), *log, XrdCl::TlsMsg);
+    }
   }
 
   TapeRestClient::~TapeRestClient()

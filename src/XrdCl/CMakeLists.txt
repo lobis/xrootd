@@ -7,6 +7,7 @@ find_package(CURL REQUIRED)
 add_library(XrdCl SHARED
   XrdClLog.cc                    XrdClLog.hh
   XrdClUtils.cc                  XrdClUtils.hh
+  XrdClCurlUtil.cc               XrdClCurlUtil.hh
                                  XrdClOptimizers.hh
                                  XrdClConstants.hh
   XrdClEnv.cc                    XrdClEnv.hh

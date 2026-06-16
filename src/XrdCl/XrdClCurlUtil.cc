@@ -32,11 +32,18 @@
 
 #include <cerrno>
 #include <cstdlib>
+#include <mutex>
 
 #include <unistd.h>
 
 namespace
 {
+  void EnsureCurlInitialized()
+  {
+    static std::once_flag once;
+    std::call_once( once, [] { curl_global_init( CURL_GLOBAL_DEFAULT ); } );
+  }
+
   void SetIfEmpty( XrdCl::Env *env, XrdCl::Log &log,
                    const std::string &optName, const std::string &envName,
                    uint64_t logTopic )
@@ -211,13 +218,14 @@ namespace CurlUtil
     SetIfEmpty( env, log, "HttpClientKeyFile",
                 "XRD_HTTPCLIENTKEYFILE", logTopic );
 
-    int disableProxy = 0;
+    int disableX509 = 0;
     env->PutInt( "HttpDisableX509", 0 );
     env->ImportInt( "HttpDisableX509", "XRD_HTTPDISABLEX509" );
+    env->GetInt( "HttpDisableX509", disableX509 );
 
     std::string filename;
     char *filenameChar;
-    if( !disableProxy &&
+    if( !disableX509 &&
         (!env->GetString( "HttpClientCertFile", filename ) || filename.empty()) )
     {
       if( (filenameChar = getenv( "X509_USER_PROXY" )) )
@@ -235,6 +243,20 @@ namespace CurlUtil
                    filename.c_str() );
         env->PutString( "HttpClientCertFile", filename );
         env->PutString( "HttpClientKeyFile", filename );
+      }
+    }
+    if( !disableX509 &&
+        (!env->GetString( "HttpClientCertFile", filename ) || filename.empty()) )
+    {
+      filenameChar = getenv( "X509_USER_CERT" );
+      if( filenameChar && *filenameChar )
+      {
+        env->PutString( "HttpClientCertFile", filenameChar );
+        filenameChar = getenv( "X509_USER_KEY" );
+        if( filenameChar && *filenameChar )
+        {
+          env->PutString( "HttpClientKeyFile", filenameChar );
+        }
       }
     }
     if( (!env->GetString( "HttpCertDir", filename ) || filename.empty()) &&
@@ -322,6 +344,7 @@ namespace CurlUtil
 
   CURL *CreateCurlHandle( const char *userAgent, bool verbose, Env *env )
   {
+    EnsureCurlInitialized();
     CURL *curl = curl_easy_init();
     if( !curl ) return curl;
 
