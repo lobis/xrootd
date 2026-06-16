@@ -17,3 +17,16 @@ Functions
 .. autofunction:: XRootD.client.EnvGetDefault
 .. autofunction:: XRootD.client.SetLogLevel
 .. autofunction:: XRootD.client.SetLogMask
+.. autofunction:: XRootD.client.AuthContext
+
+Classes
+*******
+
+.. autoclass:: XRootD.client.EnvContext
+   :members:
+
+.. note::
+
+   ``EnvContext`` restores previous values when the context exits, but the
+   underlying XRootD client environment is global. Avoid overlapping contexts
+   with different values in different threads.
