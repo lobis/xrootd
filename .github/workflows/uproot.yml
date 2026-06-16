@@ -60,6 +60,24 @@ jobs:
         ./genversion.sh >| VERSION
         python -m pip wheel --use-pep517 --verbose --wheel-dir wheelhouse .
 
+    - name: Build XRootD server
+      run: |
+        cmake -S . -B build/server \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_INSTALL_PREFIX="$PWD/xrootd-install" \
+          -DENABLE_PYTHON=0 \
+          -DENABLE_TESTS=0 \
+          -DENABLE_FUSE=0 \
+          -DENABLE_HTTP=0 \
+          -DENABLE_VOMS=0 \
+          -DENABLE_SCITOKENS=0 \
+          -DENABLE_MACAROONS=0 \
+          -DENABLE_XRDOSSARC=0
+        cmake --build build/server
+        cmake --install build/server
+        echo "$PWD/xrootd-install/bin" >> "$GITHUB_PATH"
+        echo "LD_LIBRARY_PATH=$PWD/xrootd-install/lib:${LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+
     - name: Check out uproot tests
       run: |
         if [ -z "${UPROOT_REF}" ]; then
@@ -87,6 +105,8 @@ jobs:
     - name: Install local XRootD wheel
       run: |
         python -m pip install --force-reinstall --no-deps wheelhouse/xrootd-*.whl
+        command -v xrootd
+        xrootd -v
         python -m pip show xrootd
         python -c 'import XRootD; print(XRootD)'
         python -c 'from XRootD import client; print(client.FileSystem("root://localhost"))'
