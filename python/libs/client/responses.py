@@ -155,6 +155,63 @@ class XRootDStatus(Struct):
   def __str__(self):
     return self.message
 
+class TapeRestEndpoint(Struct):
+  """WLCG Tape REST API endpoint selected through discovery.
+
+  :var      uri: Base URI of the selected Tape REST API endpoint
+  :var  version: Endpoint API version
+  :var sitename: Storage site name advertised by discovery
+  """
+  def __init__(self, endpoint):
+    super(TapeRestEndpoint, self).__init__(endpoint)
+
+class TapeRestArchiveInfo(Struct):
+  """Archive locality information for a file.
+
+  :var      url: Original URL requested by the caller
+  :var     path: Storage path sent to the Tape REST API
+  :var locality: Locality reported by the Tape REST API
+  :var    error: Per-path error reported by the service, if any
+  """
+  def __init__(self, info):
+    super(TapeRestArchiveInfo, self).__init__(info)
+
+class TapeRestStageResponse(Struct):
+  """Response returned after submitting a Tape REST stage request.
+
+  :var requestId: Server-side stage request identifier
+  """
+  def __init__(self, response):
+    super(TapeRestStageResponse, self).__init__(response)
+
+class TapeRestStageFileStatus(Struct):
+  """Status of one file in a Tape REST stage request.
+
+  :var       path: Storage path submitted in the stage request
+  :var     onDisk: Whether the file is available on disk, if reported
+  :var      state: Stage processing state, if reported
+  :var      error: File-specific error, if reported
+  :var  startedAt: Stage start timestamp, if reported
+  :var finishedAt: Terminal-state timestamp, if reported
+  """
+  def __init__(self, status):
+    super(TapeRestStageFileStatus, self).__init__(status)
+
+class TapeRestStageStatus(Struct):
+  """Status of a Tape REST stage request.
+
+  :var          id: Server-side stage request identifier
+  :var   createdAt: Request creation timestamp, if reported
+  :var   startedAt: Request start timestamp, if reported
+  :var completedAt: Request completion timestamp, if reported
+  :var       files: Per-file stage statuses
+  """
+  def __init__(self, status):
+    status = dict(status)
+    status['files'] = [TapeRestStageFileStatus(f)
+                       for f in status.get('files', [])]
+    super(TapeRestStageStatus, self).__init__(status)
+
 class ProtocolInfo(Struct):
   """Protocol information for a server.
 
