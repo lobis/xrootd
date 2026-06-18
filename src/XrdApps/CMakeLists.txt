@@ -37,8 +37,22 @@ target_link_libraries(xrdreplay
   ${CMAKE_THREAD_LIBS_INIT}
 )
 
+add_executable(xrd XrdCli.cc ../XrdCl/XrdClCopy.cc)
+set_target_properties(xrd PROPERTIES
+  CXX_STANDARD 17
+  CXX_STANDARD_REQUIRED TRUE
+)
+target_compile_definitions(xrd PRIVATE XRDCP_NO_MAIN)
+target_link_libraries(xrd PRIVATE
+  XrdCl
+  XrdUtils
+  XrdAppUtils
+  ZLIB::ZLIB
+)
+
 install(
   TARGETS
+    xrd
     xrdreplay
     XrdAppUtils
     ${XrdClProxyPlugin}
