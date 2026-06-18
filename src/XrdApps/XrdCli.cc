@@ -44,6 +44,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <limits.h>
 #include <memory>
 #include <sstream>
@@ -53,7 +54,7 @@
 #include <thread>
 #include <vector>
 
-#include <CLI/CLI.hpp>
+#include <getopt.h>
 #include <zlib.h>
 
 #ifndef _WIN32
@@ -88,6 +89,17 @@ struct ArchivePollOptions
   int pollingTimeout = 0;
 };
 
+struct ClientOptions
+{
+  int timeout = -1;
+  unsigned int verbosity = 0;
+  std::string cert;
+  std::string key;
+  std::string logFile;
+  bool ipv4 = false;
+  bool ipv6 = false;
+};
+
 enum class ArchivePollState
 {
   Ready,
@@ -118,6 +130,15 @@ int NotImplemented(std::string_view name)
   std::cerr << "xrd " << name
             << ": command is not implemented yet\n";
   return 2;
+}
+
+const Command *FindCommand(std::string_view name)
+{
+  for(const auto &command : kCommands)
+  {
+    if(command.name == name) return &command;
+  }
+  return nullptr;
 }
 
 bool IsCopyCommand(const char *command)
@@ -808,6 +829,339 @@ int RunArchivePoll(const ArchivePollOptions &options,
   return 0;
 }
 
+void PrintVersion()
+{
+  std::cout << "xrd " << XrdVERSION << '\n';
+}
+
+void PrintMainHelp()
+{
+  std::cout
+    << "XRootD command-line client.\n\n"
+    << "Usage: xrd [OPTIONS] COMMAND [ARGS]...\n\n"
+    << "Options:\n"
+    << "  -h, --help       Show this message and exit\n"
+    << "      --version    Show version information and exit\n\n"
+    << "Commands:\n";
+
+  for(const auto &command : kCommands)
+  {
+    std::cout << "  " << std::left << std::setw(13) << command.name
+              << command.description << '\n';
+  }
+}
+
+void PrintCommonOptionsHelp()
+{
+  std::cout
+    << "  -h, --help                 Show this message and exit\n"
+    << "  -V, --version              Output version information and exit\n"
+    << "  -v, --verbose              Enable verbose client logging\n"
+    << "  -D, --definition VALUE     Accept a GFAL parameter override\n"
+    << "  -t, --timeout SECONDS      Maximum operation time in seconds\n"
+    << "  -E, --cert PATH            Accept a user certificate path\n"
+    << "      --key PATH             Accept a user private key path\n"
+    << "  -4                         Accept the GFAL IPv4-only flag\n"
+    << "  -6                         Accept the GFAL IPv6-only flag\n"
+    << "  -C, --client-info INFO     Accept custom client information\n"
+    << "      --log-file PATH        Write XRootD client logs to a file\n";
+}
+
+void PrintArchivePollHelp()
+{
+  std::cout
+    << "Perform an archive polling operation on the given URL\n\n"
+    << "Usage: xrd archivepoll [OPTIONS] [surl]\n\n"
+    << "Options:\n";
+  PrintCommonOptionsHelp();
+  std::cout
+    << "      --polling-timeout SECONDS  Timeout for the polling operation\n"
+    << "      --from-file PATH           Read site URLs from a file\n";
+}
+
+void PrintStatHelp()
+{
+  std::cout
+    << "Display extended information about a file or directory\n\n"
+    << "Usage: xrd stat [OPTIONS] file\n\n"
+    << "Options:\n";
+  PrintCommonOptionsHelp();
+}
+
+void PrintSumHelp()
+{
+  std::cout
+    << "Calculate a file checksum\n\n"
+    << "Usage: xrd sum [OPTIONS] file checksum_type\n\n"
+    << "Options:\n";
+  PrintCommonOptionsHelp();
+  std::cout
+    << "\nArguments:\n"
+    << "  file              File URL to use for checksum calculation\n"
+    << "  checksum_type     Checksum algorithm to use\n";
+}
+
+void PrintCommandHelp(std::string_view name)
+{
+  if(name == "archivepoll") PrintArchivePollHelp();
+  else if(name == "stat") PrintStatHelp();
+  else if(name == "sum") PrintSumHelp();
+  else if(const auto *command = FindCommand(name))
+  {
+    std::cout << command->description << "\n\n"
+              << "Usage: xrd " << command->name << " [ARGS]...\n";
+  }
+}
+
+bool ParseIntegerOption(std::string_view command, const char *optionName,
+                        const char *value, int &target)
+{
+  if(value == nullptr || *value == '\0')
+  {
+    std::cerr << "xrd " << command << ": option " << optionName
+              << " requires an argument\n";
+    return false;
+  }
+
+  char *end = nullptr;
+  errno = 0;
+  const long parsed = std::strtol(value, &end, 10);
+  if(errno != 0 || end == value || *end != '\0'
+     || parsed < std::numeric_limits<int>::min()
+     || parsed > std::numeric_limits<int>::max())
+  {
+    std::cerr << "xrd " << command << ": invalid value for "
+              << optionName << ": '" << value << "'\n";
+    return false;
+  }
+
+  target = static_cast<int>(parsed);
+  return true;
+}
+
+enum LongOptionCode
+{
+  KeyOption = 1000,
+  LogFileOption,
+  PollingTimeoutOption,
+  FromFileOption
+};
+
+enum class ParseStatus
+{
+  Continue,
+  Exit,
+  Error
+};
+
+ParseStatus HandleCommonOption(int option, int currentArg,
+                               std::string_view command,
+                               ClientOptions &options, char **argv)
+{
+  switch(option)
+  {
+  case 'h':
+    PrintCommandHelp(command);
+    return ParseStatus::Exit;
+  case 'V':
+    PrintVersion();
+    return ParseStatus::Exit;
+  case 'v':
+    ++options.verbosity;
+    return ParseStatus::Continue;
+  case 'D':
+  case 'C':
+    return ParseStatus::Continue;
+  case 't':
+    return ParseIntegerOption(command, "--timeout", optarg, options.timeout)
+      ? ParseStatus::Continue : ParseStatus::Error;
+  case 'E':
+    options.cert = optarg ? optarg : "";
+    return ParseStatus::Continue;
+  case '4':
+    options.ipv4 = true;
+    return ParseStatus::Continue;
+  case '6':
+    options.ipv6 = true;
+    return ParseStatus::Continue;
+  case KeyOption:
+    options.key = optarg ? optarg : "";
+    return ParseStatus::Continue;
+  case LogFileOption:
+    options.logFile = optarg ? optarg : "";
+    return ParseStatus::Continue;
+  case ':':
+    std::cerr << "xrd " << command << ": option requires an argument: "
+              << argv[currentArg] << '\n';
+    return ParseStatus::Error;
+  case '?':
+  default:
+    std::cerr << "xrd " << command << ": unrecognized option: "
+              << argv[currentArg] << '\n';
+    return ParseStatus::Error;
+  }
+}
+
+int ParseArchivePollCommand(int argc, char **argv)
+{
+  ClientOptions clientOptions;
+  ArchivePollOptions options;
+  std::string url;
+  std::string fromFile;
+
+  static const option longOptions[] = {
+    {"help", no_argument, nullptr, 'h'},
+    {"version", no_argument, nullptr, 'V'},
+    {"verbose", no_argument, nullptr, 'v'},
+    {"definition", required_argument, nullptr, 'D'},
+    {"timeout", required_argument, nullptr, 't'},
+    {"cert", required_argument, nullptr, 'E'},
+    {"key", required_argument, nullptr, KeyOption},
+    {"client-info", required_argument, nullptr, 'C'},
+    {"log-file", required_argument, nullptr, LogFileOption},
+    {"polling-timeout", required_argument, nullptr, PollingTimeoutOption},
+    {"from-file", required_argument, nullptr, FromFileOption},
+    {nullptr, 0, nullptr, 0}
+  };
+
+  optind = 2;
+  opterr = 0;
+  while(true)
+  {
+    const int option =
+      getopt_long(argc, argv, ":hVvD:t:E:46C:", longOptions, nullptr);
+    if(option == -1) break;
+
+    if(option == PollingTimeoutOption)
+    {
+      if(!ParseIntegerOption("archivepoll", "--polling-timeout", optarg,
+                             options.pollingTimeout))
+      {
+        return 64;
+      }
+      continue;
+    }
+    if(option == FromFileOption)
+    {
+      fromFile = optarg ? optarg : "";
+      continue;
+    }
+
+    const auto status =
+      HandleCommonOption(option, optind - 1, "archivepoll",
+                         clientOptions, argv);
+    if(status == ParseStatus::Exit) return 0;
+    if(status == ParseStatus::Error) return 64;
+  }
+
+  if(argc - optind > 1)
+  {
+    std::cerr << "xrd archivepoll: expected at most one URL\n";
+    return 64;
+  }
+  if(optind < argc) url = argv[optind];
+
+  options.timeout = clientOptions.timeout;
+  const int loadResult = LoadArchivePollUrls(url, fromFile, options.urls);
+  if(loadResult != 0) return loadResult;
+
+  return RunArchivePoll(options, clientOptions.verbosity,
+                        clientOptions.logFile, clientOptions.cert,
+                        clientOptions.key, clientOptions.ipv4,
+                        clientOptions.ipv6);
+}
+
+int ParseStatCommand(int argc, char **argv)
+{
+  ClientOptions clientOptions;
+
+  static const option longOptions[] = {
+    {"help", no_argument, nullptr, 'h'},
+    {"version", no_argument, nullptr, 'V'},
+    {"verbose", no_argument, nullptr, 'v'},
+    {"definition", required_argument, nullptr, 'D'},
+    {"timeout", required_argument, nullptr, 't'},
+    {"cert", required_argument, nullptr, 'E'},
+    {"key", required_argument, nullptr, KeyOption},
+    {"client-info", required_argument, nullptr, 'C'},
+    {"log-file", required_argument, nullptr, LogFileOption},
+    {nullptr, 0, nullptr, 0}
+  };
+
+  optind = 2;
+  opterr = 0;
+  while(true)
+  {
+    const int option =
+      getopt_long(argc, argv, ":hVvD:t:E:46C:", longOptions, nullptr);
+    if(option == -1) break;
+
+    const auto status =
+      HandleCommonOption(option, optind - 1, "stat", clientOptions, argv);
+    if(status == ParseStatus::Exit) return 0;
+    if(status == ParseStatus::Error) return 64;
+  }
+
+  if(argc - optind != 1)
+  {
+    std::cerr << "xrd stat: expected one file URL\n";
+    return 64;
+  }
+
+  StatOptions options;
+  options.path = argv[optind];
+  options.timeout = clientOptions.timeout;
+  return RunStat(options, clientOptions.verbosity, clientOptions.logFile,
+                 clientOptions.cert, clientOptions.key, clientOptions.ipv4,
+                 clientOptions.ipv6);
+}
+
+int ParseSumCommand(int argc, char **argv)
+{
+  ClientOptions clientOptions;
+
+  static const option longOptions[] = {
+    {"help", no_argument, nullptr, 'h'},
+    {"version", no_argument, nullptr, 'V'},
+    {"verbose", no_argument, nullptr, 'v'},
+    {"definition", required_argument, nullptr, 'D'},
+    {"timeout", required_argument, nullptr, 't'},
+    {"cert", required_argument, nullptr, 'E'},
+    {"key", required_argument, nullptr, KeyOption},
+    {"client-info", required_argument, nullptr, 'C'},
+    {"log-file", required_argument, nullptr, LogFileOption},
+    {nullptr, 0, nullptr, 0}
+  };
+
+  optind = 2;
+  opterr = 0;
+  while(true)
+  {
+    const int option =
+      getopt_long(argc, argv, ":hVvD:t:E:46C:", longOptions, nullptr);
+    if(option == -1) break;
+
+    const auto status =
+      HandleCommonOption(option, optind - 1, "sum", clientOptions, argv);
+    if(status == ParseStatus::Exit) return 0;
+    if(status == ParseStatus::Error) return 64;
+  }
+
+  if(argc - optind != 2)
+  {
+    std::cerr << "xrd sum: expected one file URL and checksum type\n";
+    return 64;
+  }
+
+  SumOptions options;
+  options.path = argv[optind];
+  options.checkSumType = argv[optind + 1];
+  options.timeout = clientOptions.timeout;
+  return RunSum(options, clientOptions.verbosity, clientOptions.logFile,
+                clientOptions.cert, clientOptions.key, clientOptions.ipv4,
+                clientOptions.ipv6);
+}
+
 }
 
 int main(int argc, char **argv)
@@ -817,215 +1171,44 @@ int main(int argc, char **argv)
     return RunCopyCommand(argc, argv);
   }
 
-  CLI::App app{"XRootD command-line client."};
-  app.name("xrd");
-  app.set_help_flag("-h,--help", "Show this message and exit");
-  bool showVersion = false;
-  app.add_flag("--version", showVersion, "Show version information and exit");
-
-  int exitCode = 0;
-  std::string statPath;
-  int statTimeout = -1;
-  unsigned int statVerbosity = 0;
-  bool statVersion = false;
-  bool statIPv4 = false;
-  bool statIPv6 = false;
-  std::string statDefinition;
-  std::string statCert;
-  std::string statKey;
-  std::string statClientInfo;
-  std::string statLogFile;
-  std::string sumPath;
-  std::string sumCheckSumType;
-  int sumTimeout = -1;
-  unsigned int sumVerbosity = 0;
-  bool sumVersion = false;
-  bool sumIPv4 = false;
-  bool sumIPv6 = false;
-  std::string sumDefinition;
-  std::string sumCert;
-  std::string sumKey;
-  std::string sumClientInfo;
-  std::string sumLogFile;
-  std::string archivePollUrl;
-  int archivePollTimeout = -1;
-  unsigned int archivePollVerbosity = 0;
-  bool archivePollVersion = false;
-  bool archivePollIPv4 = false;
-  bool archivePollIPv6 = false;
-  std::string archivePollDefinition;
-  std::string archivePollCert;
-  std::string archivePollKey;
-  std::string archivePollClientInfo;
-  std::string archivePollLogFile;
-  int archivePollPollingTimeout = 0;
-  std::string archivePollFromFile;
-
-  for(const auto &command : kCommands)
+  if(argc == 1)
   {
-    auto *subcommand = app.add_subcommand(
-      std::string(command.name), std::string(command.description));
-
-    if(command.name == "archivepoll")
-    {
-      subcommand->add_option("surl", archivePollUrl,
-        "Site URL to query for archival status");
-      subcommand->add_flag("-V,--version", archivePollVersion,
-        "Output version information and exit");
-      subcommand->add_flag("-v,--verbose", archivePollVerbosity,
-        "Enable verbose client logging");
-      subcommand->add_option("-D,--definition", archivePollDefinition,
-        "Accept a GFAL parameter override");
-      subcommand->add_option("-t,--timeout", archivePollTimeout,
-        "Maximum operation time in seconds");
-      subcommand->add_option("-E,--cert", archivePollCert,
-        "Accept a user certificate path");
-      subcommand->add_option("--key", archivePollKey,
-        "Accept a user private key path");
-      subcommand->add_flag("-4", archivePollIPv4,
-        "Accept the GFAL IPv4-only flag");
-      subcommand->add_flag("-6", archivePollIPv6,
-        "Accept the GFAL IPv6-only flag");
-      subcommand->add_option("-C,--client-info", archivePollClientInfo,
-        "Accept custom client information");
-      subcommand->add_option("--log-file", archivePollLogFile,
-        "Write client logs to a file");
-      subcommand->add_option("--polling-timeout",
-        archivePollPollingTimeout, "Timeout for the polling operation");
-      subcommand->add_option("--from-file", archivePollFromFile,
-        "Read site URLs from a file");
-      subcommand->callback([&] {
-        if(archivePollVersion)
-        {
-          std::cout << "xrd " << XrdVERSION << '\n';
-          exitCode = 0;
-          return;
-        }
-
-        ArchivePollOptions options;
-        options.timeout = archivePollTimeout;
-        options.pollingTimeout = archivePollPollingTimeout;
-        exitCode = LoadArchivePollUrls(archivePollUrl, archivePollFromFile,
-                                       options.urls);
-        if(exitCode != 0) return;
-
-        exitCode = RunArchivePoll(options, archivePollVerbosity,
-                                  archivePollLogFile, archivePollCert,
-                                  archivePollKey, archivePollIPv4,
-                                  archivePollIPv6);
-      });
-    }
-    else if(command.name == "stat")
-    {
-      subcommand->add_option("file", statPath,
-        "URL of the file or directory to stat");
-      subcommand->add_flag("-V,--version", statVersion,
-        "Output version information and exit");
-      subcommand->add_flag("-v,--verbose", statVerbosity,
-        "Enable verbose client logging");
-      subcommand->add_option("-D,--definition", statDefinition,
-        "Accept a GFAL parameter override");
-      subcommand->add_option("-t,--timeout", statTimeout,
-        "Maximum operation time in seconds");
-      subcommand->add_option("-E,--cert", statCert,
-        "Accept a user certificate path");
-      subcommand->add_option("--key", statKey,
-        "Accept a user private key path");
-      subcommand->add_flag("-4", statIPv4,
-        "Accept the GFAL IPv4-only flag");
-      subcommand->add_flag("-6", statIPv6,
-        "Accept the GFAL IPv6-only flag");
-      subcommand->add_option("-C,--client-info", statClientInfo,
-        "Accept custom client information");
-      subcommand->add_option("--log-file", statLogFile,
-        "Write XRootD client logs to a file");
-      subcommand->callback([&] {
-        if(statVersion)
-        {
-          std::cout << "xrd " << XrdVERSION << '\n';
-          exitCode = 0;
-          return;
-        }
-        if(statPath.empty())
-        {
-          std::cerr << "xrd stat: expected one file URL\n";
-          exitCode = 64;
-          return;
-        }
-        StatOptions options;
-        options.path = statPath;
-        options.timeout = statTimeout;
-        exitCode = RunStat(options, statVerbosity, statLogFile, statCert,
-                           statKey, statIPv4, statIPv6);
-      });
-    }
-    else if(command.name == "sum")
-    {
-      subcommand->add_option("file", sumPath,
-        "File URL to use for checksum calculation");
-      subcommand->add_option("checksum_type", sumCheckSumType,
-        "Checksum algorithm to use");
-      subcommand->add_flag("-V,--version", sumVersion,
-        "Output version information and exit");
-      subcommand->add_flag("-v,--verbose", sumVerbosity,
-        "Enable verbose client logging");
-      subcommand->add_option("-D,--definition", sumDefinition,
-        "Accept a GFAL parameter override");
-      subcommand->add_option("-t,--timeout", sumTimeout,
-        "Maximum operation time in seconds");
-      subcommand->add_option("-E,--cert", sumCert,
-        "Accept a user certificate path");
-      subcommand->add_option("--key", sumKey,
-        "Accept a user private key path");
-      subcommand->add_flag("-4", sumIPv4,
-        "Accept the GFAL IPv4-only flag");
-      subcommand->add_flag("-6", sumIPv6,
-        "Accept the GFAL IPv6-only flag");
-      subcommand->add_option("-C,--client-info", sumClientInfo,
-        "Accept custom client information");
-      subcommand->add_option("--log-file", sumLogFile,
-        "Write XRootD client logs to a file");
-      subcommand->callback([&] {
-        if(sumVersion)
-        {
-          std::cout << "xrd " << XrdVERSION << '\n';
-          exitCode = 0;
-          return;
-        }
-        if(sumPath.empty() || sumCheckSumType.empty())
-        {
-          std::cerr << "xrd sum: expected one file URL and checksum type\n";
-          exitCode = 64;
-          return;
-        }
-        SumOptions options;
-        options.path = sumPath;
-        options.checkSumType = sumCheckSumType;
-        options.timeout = sumTimeout;
-        exitCode = RunSum(options, sumVerbosity, sumLogFile, sumCert,
-                          sumKey, sumIPv4, sumIPv6);
-      });
-    }
-    else
-    {
-      subcommand->allow_extras();
-      subcommand->callback([&exitCode, name = command.name] {
-        exitCode = NotImplemented(name);
-      });
-    }
-  }
-
-  CLI11_PARSE(app, argc, argv);
-
-  if(showVersion)
-  {
-    std::cout << "xrd " << XrdVERSION << '\n';
+    PrintMainHelp();
     return 0;
   }
 
-  if(app.get_subcommands().empty())
+  const std::string_view firstArg = argv[1];
+  if(firstArg == "-h" || firstArg == "--help")
   {
-    std::cout << app.help();
+    PrintMainHelp();
+    return 0;
   }
-  return exitCode;
+  if(firstArg == "--version")
+  {
+    PrintVersion();
+    return 0;
+  }
+
+  const Command *command = FindCommand(firstArg);
+  if(!command)
+  {
+    std::cerr << "xrd: unknown command '" << firstArg << "'\n";
+    return 64;
+  }
+
+  if(firstArg == "archivepoll") return ParseArchivePollCommand(argc, argv);
+  if(firstArg == "stat") return ParseStatCommand(argc, argv);
+  if(firstArg == "sum") return ParseSumCommand(argc, argv);
+
+  if(argc > 2)
+  {
+    const std::string_view secondArg = argv[2];
+    if(secondArg == "-h" || secondArg == "--help")
+    {
+      PrintCommandHelp(firstArg);
+      return 0;
+    }
+  }
+
+  return NotImplemented(command->name);
 }

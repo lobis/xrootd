@@ -33,7 +33,6 @@ BuildRequires:	gcc-c++
 BuildRequires:	gdb
 BuildRequires:	which
 BuildRequires:	make
-BuildRequires:	cmake(CLI11) >= 1.8.0
 BuildRequires:	pkgconfig
 BuildRequires:	fuse-devel
 BuildRequires:	krb5-devel
