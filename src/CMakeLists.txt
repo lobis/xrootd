@@ -86,6 +86,7 @@ if( NOT XRDCL_ONLY )
   target_link_libraries(XrdServer
     PRIVATE
     XrdUtils
+    XrdCryptoLite
     ${CMAKE_DL_LIBS}
     ${CMAKE_THREAD_LIBS_INIT}
     ${ATOMIC_LIBRARY}
@@ -123,4 +124,5 @@ if( NOT XRDCL_ONLY )
   add_subdirectory( XrdHttpCors )
   add_subdirectory( XrdCeph )
   add_subdirectory( XrdSciTokens )
+  add_subdirectory( XrdOssMirage )
 endif()
