@@ -32,6 +32,7 @@ set_target_properties(XrdUtils
 target_link_libraries(XrdUtils
   PRIVATE
     OpenSSL::SSL
+    ZLIB::ZLIB
     ${CMAKE_THREAD_LIBS_INIT}
     ${CMAKE_DL_LIBS}
     ${SOCKET_LIBRARY}
@@ -86,6 +87,7 @@ if( NOT XRDCL_ONLY )
   target_link_libraries(XrdServer
     PRIVATE
     XrdUtils
+    XrdCryptoLite
     ${CMAKE_DL_LIBS}
     ${CMAKE_THREAD_LIBS_INIT}
     ${ATOMIC_LIBRARY}
@@ -123,4 +125,5 @@ if( NOT XRDCL_ONLY )
   add_subdirectory( XrdHttpCors )
   add_subdirectory( XrdCeph )
   add_subdirectory( XrdSciTokens )
+  add_subdirectory( XrdOssMirage )
 endif()
