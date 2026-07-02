@@ -111,19 +111,19 @@ do
 done
 
 set +e
-not_impl_err=$("${XRD}" cat "${file}" 2>&1 >/dev/null)
+not_impl_err=$("${XRD}" token "${file}" 2>&1 >/dev/null)
 not_impl_rc=$?
 set -e
 
 if [[ ${not_impl_rc} -ne 2 ]]; then
-  echo "xrd cat exit code was ${not_impl_rc}, expected 2" >&2
+  echo "xrd token exit code was ${not_impl_rc}, expected 2" >&2
   echo "${not_impl_err}" >&2
   exit 1
 fi
 
-if ! grep -F -- "xrd cat: command is not implemented yet" \
+if ! grep -F -- "xrd token: command is not implemented yet" \
   <<< "${not_impl_err}" >/dev/null; then
-  echo "xrd cat did not print the not implemented error" >&2
+  echo "xrd token did not print the not implemented error" >&2
   echo "${not_impl_err}" >&2
   exit 1
 fi

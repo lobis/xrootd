@@ -126,8 +126,11 @@ mechanical options for how the CLI reaches it:
   #2836 already routes tape operations through (same path the Python
   `TapeClient` uses) — no new linkage at all.
 
-Option (b) keeps `xrd` a pure `XrdCl` consumer and is the default plan unless
-it proves too awkward for `bringonline` progress reporting.
+**Resolved (2026-07-02): option (b).** The `xrd-cli-v2` branch is built on
+top of the #2836 branch; `XrdClTapeRest.*`, the curl dependency on XrdCl core,
+and the `taperest` Python bindings are dropped, and `xrd archivepoll` issues
+`Query(Opaque, "tape.archiveinfo\n<urls>")` through `XrdCl::FileSystem`,
+matching the Python `TapeClient`.
 
 ---
 
@@ -200,16 +203,16 @@ Status legend: ✅ done · 🚧 partial · 📋 planned · ❓ open question
 |---|---|---|---|
 | `stat` | ✅ | `FileSystem::Stat`, local `stat(2)` | keep gfal2 field layout; mode synthesis for backends without one |
 | `sum` | ✅ | `Query(Checksum)`, local XrdCks/zlib | checksum-type name normalization (ADLER32 vs adler32); remote-first, local fallback |
-| `archivepoll` | ✅/❓ | Tape REST archiveinfo | works, but re-plumb per §3.3; `--polling-timeout` loop already implemented |
+| `archivepoll` | ✅ | `Query(Opaque, tape.archiveinfo)` via XrdClHttp (#2836) | re-plumbed onto the #2836 plumbing; `--polling-timeout` loop implemented |
 | `copy` (`cp`) | 🚧 | `RunXrdCp` | **largest work item.** Needs gfal-copy→xrdcp flag translation: `-f`→`--force`, `-p`→`--parents`, `-K alg[:val]`→`--cksum`, `--checksum-mode`, `-r`→`--recursive`, `--from-file`, `--dry-run`, chained destinations (src→dst1→dst2, gfal-only: loop), `--copy-mode pull/push/streamed`→`--tpc [only] delegate`-family, `--just-copy`, `--abort-on-failure` (multi-source), accept-and-warn: `-n/--nbstreams`(→`--streams`? verify semantics), `--tcp-buffersize`, spacetokens, `--scitag`, `--evict` (xrdcp supports evict on xroot). Progress-bar parity is *not* required (gfal2 shows one; xrdcp's differs — treat as cosmetic). |
-| `ls` | 📋 | `FileSystem::DirList` (+`Stat` for files) | gfal `-l` long format is the spec; `DirList` on a file must fall back to single-entry stat (same quirk fsspec had); `-a/-H/--time-style` per reference doc |
-| `cat` | 📋 | `File::Open/Read` | `-b/--bytes` range flag; SIGPIPE-safe streaming; multiple files |
+| `ls` | ✅ | `FileSystem::DirList` (+`Stat` for files) | gfal `-l` long format implemented (incl. `--full-time`→long-iso quirk); `--xattr`/`--color` accepted, not implemented yet |
+| `cat` | ✅ | `File::Open/Read` | multiple files, SIGPIPE ignored (EPIPE exit like gfal); `-b/--bytes` accepted no-op |
 | `save` | 📋 | `File::Open(Write)/Write` | stdin→file; overwrite semantics per gfal2 |
 | `rm` | 📋 | `FileSystem::Rm/RmDir` | `-r` recursive (client-side walk), `--from-file`, `--just-delete`, `--bulk` (sequential is fine — gfal repo shipped that), `--dry-run` |
 | `mkdir` | 📋 | `FileSystem::MkDir` | `-p` (MkDirFlags::MakePath), `-m MODE`; EEXIST behavior differences per backend documented in gfal repo |
 | `rename` | 📋 | `FileSystem::Mv` | backend-native move only; never copy+delete fallback |
 | `chmod` | 📋 | `FileSystem::ChMod` | HTTP: no-op with warning (no POSIX mode) — matches gfal repo decision |
-| `xattr` | 📋 | `FileSystem::ListXAttr/GetXAttr/SetXAttr` | `file [attr]` get, `file attr=value` set; HTTP backend support is limited — clear error |
+| `xattr` | 🚧 | `FileSystem::ListXAttr/GetXAttr` (+local xattr syscalls) | get/list done (`name = value` + blank line format); set (`attr=value`) deferred to Phase 2; HTTP backend support is limited — clear error |
 | `bringonline` | 📋 | Tape REST stage (#2836 client) | `--staging-metadata`, `--desired-request-time`, `--poll`; async token printed like gfal2 |
 | `evict` | 📋 | Tape REST release | positional order `file [token]` (gfal repo fixed this order — follow it) |
 | `token` | 📋/❓ | HTTPS macaroon request | gfal repo has the full request-construction recipe (`docs/http-tpc-token-trace.md`); needs curl → must live behind `XrdClHttp` or use its helpers, not in the CLI |
@@ -222,12 +225,13 @@ Each phase = one or more reviewable commits on this branch (or follow-up PRs
 if upstream prefers slicing); a phase is "done" when its commands pass their
 shell tests + the flag audit.
 
-- **Phase 0 — foundation (mostly done).** CLI11 scaffold, packaging, man
-  page, CI. *Remaining:* factor `AddCommonOptions`, central exit-code helper,
-  vendor the gfal2 help reference, add `docs/xrd-cli-plan.md` (this file).
-- **Phase 1 — read-only commands.** `ls`, `cat`, `xattr` (get/list). These
-  unlock daily-driver usage and exercise the DirList/File paths against both
-  xroot and HTTP backends.
+- **Phase 0 — foundation (done except audit tooling).** CLI11 scaffold,
+  packaging, man page, CI, `AddCommonOptions`/`BeginCommand` factoring.
+  *Remaining:* central exit-code helper, vendor the gfal2 help reference +
+  flag-audit CI job.
+- **Phase 1 — read-only commands (done).** `ls`, `cat`, `xattr` (get/list)
+  implemented with local shell tests; server-backed integration tests against
+  xroot and HTTP backends still pending (ring 2).
 - **Phase 2 — mutating commands.** `mkdir`, `rm`, `rename`, `chmod`, `save`,
   `xattr` (set).
 - **Phase 3 — copy compatibility.** The flag-translation layer over
@@ -291,11 +295,9 @@ copy semantics → tape stubs.
 
 ## 9. Open questions (tracked, with current lean)
 
-1. **Tape REST unification** (§3.3) — lean: adopt #2836, drop
-   `XrdClTapeRest.*` and the `CURL REQUIRED` on XrdCl core. *Blocks Phase 4.*
-2. **`xrd` name collision** — upstream may bikeshed the binary name (`xrd` is
-   also a historical admin tool name in some sites). Decide early with
-   maintainers; everything else is rename-safe.
+1. ~~**Tape REST unification** (§3.3)~~ — **resolved**: #2836 adopted,
+   `XrdClTapeRest.*` and the `CURL REQUIRED` on XrdCl core dropped.
+2. ~~**`xrd` name collision**~~ — **resolved**: the binary name is `xrd`.
 3. **Where does `token` HTTP code live** — XrdClHttp helper vs CLI-private.
    Lean: XrdClHttp helper (curl already there, reusable by others).
 4. **`-n/--nbstreams` mapping** — xrdcp `--streams` changes semantics
