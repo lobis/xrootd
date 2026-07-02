@@ -57,6 +57,10 @@
 #include <thread>
 #include <vector>
 
+#if defined(__APPLE__) || defined(__linux__)
+#include <sys/xattr.h>
+#endif
+
 #include <CLI/CLI.hpp>
 #include <zlib.h>
 
@@ -98,6 +102,12 @@ struct SumOptions
 struct CatOptions
 {
   std::vector<std::string> paths;
+};
+
+struct XAttrOptions
+{
+  std::string path;
+  std::string attribute;
 };
 
 struct ArchivePollOptions
@@ -971,6 +981,202 @@ int RunLs(const LsOptions &options)
   return RunLocalLs(options.path, options.path, options);
 }
 
+void PrintXAttrError(int err)
+{
+  std::cerr << "xrd xattr error: " << err << " (" << std::strerror(err)
+            << ") - errno reported by local system call "
+            << std::strerror(err) << '\n';
+}
+
+#if defined(__APPLE__) || defined(__linux__)
+int LocalListXAttrNames(const std::string &path,
+                        std::vector<std::string> &names)
+{
+#ifdef __APPLE__
+  ssize_t size = ::listxattr(path.c_str(), nullptr, 0, 0);
+#else
+  ssize_t size = ::listxattr(path.c_str(), nullptr, 0);
+#endif
+  if(size < 0) return errno;
+  if(size == 0) return 0;
+
+  std::vector<char> buffer(static_cast<std::size_t>(size));
+#ifdef __APPLE__
+  size = ::listxattr(path.c_str(), buffer.data(), buffer.size(), 0);
+#else
+  size = ::listxattr(path.c_str(), buffer.data(), buffer.size());
+#endif
+  if(size < 0) return errno;
+
+  std::size_t start = 0;
+  for(std::size_t i = 0; i < static_cast<std::size_t>(size); ++i)
+  {
+    if(buffer[i] == '\0')
+    {
+      if(i > start) names.emplace_back(&buffer[start], i - start);
+      start = i + 1;
+    }
+  }
+  return 0;
+}
+
+int LocalGetXAttr(const std::string &path, const std::string &name,
+                  std::string &value)
+{
+#ifdef __APPLE__
+  ssize_t size = ::getxattr(path.c_str(), name.c_str(), nullptr, 0, 0, 0);
+#else
+  ssize_t size = ::getxattr(path.c_str(), name.c_str(), nullptr, 0);
+#endif
+  if(size < 0) return errno;
+  if(size == 0)
+  {
+    value.clear();
+    return 0;
+  }
+
+  std::vector<char> buffer(static_cast<std::size_t>(size));
+#ifdef __APPLE__
+  size = ::getxattr(path.c_str(), name.c_str(), buffer.data(),
+                    buffer.size(), 0, 0);
+#else
+  size = ::getxattr(path.c_str(), name.c_str(), buffer.data(),
+                    buffer.size());
+#endif
+  if(size < 0) return errno;
+  value.assign(buffer.data(), static_cast<std::size_t>(size));
+  return 0;
+}
+
+int RunLocalXAttr(const std::string &localPath, const XAttrOptions &options)
+{
+  struct stat statBuffer;
+  if(::stat(localPath.c_str(), &statBuffer) != 0)
+  {
+    const int err = errno;
+    PrintXAttrError(err);
+    return err;
+  }
+
+  if(!options.attribute.empty())
+  {
+    std::string value;
+    const int err = LocalGetXAttr(localPath, options.attribute, value);
+    if(err != 0)
+    {
+      PrintXAttrError(err);
+      return err;
+    }
+    std::cout << value << '\n';
+    return 0;
+  }
+
+  std::vector<std::string> names;
+  const int err = LocalListXAttrNames(localPath, names);
+  if(err != 0)
+  {
+    PrintXAttrError(err);
+    return err;
+  }
+
+  for(const auto &name : names)
+  {
+    std::string value;
+    if(LocalGetXAttr(localPath, name, value) == 0)
+    {
+      std::cout << name << " = " << value << "\n\n";
+    }
+    else
+    {
+      std::cout << name << " FAILED: " << std::strerror(errno) << "\n\n";
+    }
+  }
+  return 0;
+}
+#else
+int RunLocalXAttr(const std::string &, const XAttrOptions &)
+{
+  std::cerr << "xrd xattr: extended attributes are not supported "
+            << "on this platform\n";
+  return ENOTSUP;
+}
+#endif
+
+int RunRemoteXAttr(const std::string &path, const XAttrOptions &options)
+{
+  XrdCl::URL url(path);
+  if(!url.IsValid())
+  {
+    std::cerr << "xrd xattr: invalid URL '" << path << "'\n";
+    return 64;
+  }
+
+  if(url.IsLocalFile())
+  {
+    return RunLocalXAttr(url.GetPath(), options);
+  }
+
+  XrdCl::FileSystem fs(FileSystemURL(url));
+  const std::string fsPath = url.GetPathWithParams();
+
+  if(!options.attribute.empty())
+  {
+    std::vector<XrdCl::XAttr> result;
+    XrdCl::XRootDStatus status =
+      fs.GetXAttr(fsPath, {options.attribute}, result);
+    if(!status.IsOK() || result.empty())
+    {
+      std::cerr << "xrd xattr: unable to get attribute '"
+                << options.attribute << "' of '" << path
+                << "': " << status.ToStr() << '\n';
+      return status.GetShellCode();
+    }
+    if(!result.front().status.IsOK())
+    {
+      std::cerr << "xrd xattr: unable to get attribute '"
+                << options.attribute << "' of '" << path
+                << "': " << result.front().status.ToStr() << '\n';
+      return result.front().status.GetShellCode();
+    }
+    std::cout << result.front().value << '\n';
+    return 0;
+  }
+
+  std::vector<XrdCl::XAttr> attrs;
+  XrdCl::XRootDStatus status = fs.ListXAttr(fsPath, attrs);
+  if(!status.IsOK())
+  {
+    std::cerr << "xrd xattr: unable to list attributes of '" << path
+              << "': " << status.ToStr() << '\n';
+    return status.GetShellCode();
+  }
+
+  for(const auto &attr : attrs)
+  {
+    if(attr.status.IsOK())
+    {
+      std::cout << attr.name << " = " << attr.value << "\n\n";
+    }
+    else
+    {
+      std::cout << attr.name << " FAILED: " << attr.status.ToStr() << "\n\n";
+    }
+  }
+  return 0;
+}
+
+int RunXAttr(const XAttrOptions &options)
+{
+  if(options.attribute.find('=') != std::string::npos)
+  {
+    std::cerr << "xrd xattr: setting attributes is not implemented yet\n";
+    return 2;
+  }
+
+  if(HasScheme(options.path)) return RunRemoteXAttr(options.path, options);
+  return RunLocalXAttr(options.path, options);
+}
+
 int WriteToStdout(const char *data, std::size_t size)
 {
   if(std::fwrite(data, 1, size, stdout) != size)
@@ -1374,6 +1580,8 @@ int main(int argc, char **argv)
   app.add_flag("--version", showVersion, "Show version information and exit");
 
   int exitCode = 0;
+  CommonOptions xattrCommon;
+  XAttrOptions xattrOptions;
   CommonOptions catCommon;
   CatOptions catOptions;
   bool catBytes = false;
@@ -1417,6 +1625,24 @@ int main(int argc, char **argv)
         if(exitCode != 0) return;
 
         exitCode = RunArchivePoll(options);
+      });
+    }
+    else if(command.name == "xattr")
+    {
+      subcommand->add_option("file", xattrOptions.path,
+        "URL of the file or directory");
+      subcommand->add_option("attribute", xattrOptions.attribute,
+        "Attribute to retrieve; use key=value to set");
+      AddCommonOptions(subcommand, xattrCommon);
+      subcommand->callback([&] {
+        if(!BeginCommand("xattr", xattrCommon, exitCode)) return;
+        if(xattrOptions.path.empty())
+        {
+          std::cerr << "xrd xattr: expected one file URL\n";
+          exitCode = 64;
+          return;
+        }
+        exitCode = RunXAttr(xattrOptions);
       });
     }
     else if(command.name == "cat")
