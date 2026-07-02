@@ -61,7 +61,7 @@
 #include <sys/xattr.h>
 #endif
 
-#include <CLI/CLI.hpp>
+#include <getopt.h>
 #include <zlib.h>
 
 #ifndef _WIN32
@@ -1311,28 +1311,111 @@ struct CommonOptions
   std::string logFile;
 };
 
-void AddCommonOptions(CLI::App *subcommand, CommonOptions &options)
+// Codes for long options without a short equivalent.
+enum LongOptionCode
 {
-  subcommand->add_flag("-V,--version", options.version,
-    "Output version information and exit");
-  subcommand->add_flag("-v,--verbose", options.verbosity,
-    "Enable verbose client logging");
-  subcommand->add_option("-D,--definition", options.definition,
-    "Accept a GFAL parameter override");
-  subcommand->add_option("-t,--timeout", options.timeout,
-    "Maximum operation time in seconds");
-  subcommand->add_option("-E,--cert", options.cert,
-    "Accept a user certificate path");
-  subcommand->add_option("--key", options.key,
-    "Accept a user private key path");
-  subcommand->add_flag("-4", options.ipv4,
-    "Accept the GFAL IPv4-only flag");
-  subcommand->add_flag("-6", options.ipv6,
-    "Accept the GFAL IPv6-only flag");
-  subcommand->add_option("-C,--client-info", options.clientInfo,
-    "Accept custom client information");
-  subcommand->add_option("--log-file", options.logFile,
-    "Write XRootD client logs to a file");
+  kOptKey = 1000,
+  kOptLogFile,
+  kOptTimeStyle,
+  kOptFullTime,
+  kOptColor,
+  kOptXAttrQuery,
+  kOptPollingTimeout,
+  kOptFromFile
+};
+
+// Short options shared by every subcommand.
+const char kCommonShortOptions[] = "hVvD:t:E:46C:";
+
+// Build a getopt_long option table: the shared options, the command-specific
+// ones, and the terminating entry.
+std::vector<struct option> MakeLongOptions(
+  std::initializer_list<struct option> extra = {})
+{
+  std::vector<struct option> options = {
+    {"help",        no_argument,       nullptr, 'h'},
+    {"version",     no_argument,       nullptr, 'V'},
+    {"verbose",     no_argument,       nullptr, 'v'},
+    {"definition",  required_argument, nullptr, 'D'},
+    {"timeout",     required_argument, nullptr, 't'},
+    {"cert",        required_argument, nullptr, 'E'},
+    {"key",         required_argument, nullptr, kOptKey},
+    {"client-info", required_argument, nullptr, 'C'},
+    {"log-file",    required_argument, nullptr, kOptLogFile},
+  };
+  options.insert(options.end(), extra);
+  options.push_back({nullptr, 0, nullptr, 0});
+  return options;
+}
+
+void ResetOptionParsing()
+{
+#ifndef __GLIBC__
+  optreset = 1;
+#endif
+  optind = 1;
+}
+
+int CommandLineError(const std::string &name)
+{
+  std::cerr << "Run 'xrd " << name << " --help' for usage.\n";
+  return 2;
+}
+
+bool ParseIntOption(const std::string &name, const char *argument,
+                    const char *value, int &result)
+{
+  char *end = nullptr;
+  const long number = std::strtol(value, &end, 10);
+  if(end == value || *end != '\0')
+  {
+    std::cerr << "xrd " << name << ": invalid value '" << value
+              << "' for " << argument << '\n';
+    return false;
+  }
+  result = static_cast<int>(number);
+  return true;
+}
+
+// Handle an option shared by every subcommand; returns false when the
+// option is not one of the common set. Sets parseError on a bad value.
+bool HandleCommonOption(const std::string &name, int opt,
+                        CommonOptions &options, bool &parseError)
+{
+  switch(opt)
+  {
+    case 'V': options.version = true; return true;
+    case 'v': ++options.verbosity; return true;
+    case 'D': options.definition = optarg; return true;
+    case 't':
+      parseError = !ParseIntOption(name, "--timeout", optarg,
+                                   options.timeout);
+      return true;
+    case 'E': options.cert = optarg; return true;
+    case '4': options.ipv4 = true; return true;
+    case '6': options.ipv6 = true; return true;
+    case 'C': options.clientInfo = optarg; return true;
+    case kOptKey: options.key = optarg; return true;
+    case kOptLogFile: options.logFile = optarg; return true;
+    default: return false;
+  }
+}
+
+void PrintCommonOptionsHelp()
+{
+  std::cout <<
+    "Common options:\n"
+    "  -h, --help                Show this message and exit\n"
+    "  -V, --version             Output version information and exit\n"
+    "  -v, --verbose             Enable verbose client logging\n"
+    "  -D, --definition <value>  Accept a GFAL parameter override\n"
+    "  -t, --timeout <seconds>   Maximum operation time in seconds\n"
+    "  -E, --cert <path>         Accept a user certificate path\n"
+    "      --key <path>          Accept a user private key path\n"
+    "  -4                        Accept the GFAL IPv4-only flag\n"
+    "  -6                        Accept the GFAL IPv6-only flag\n"
+    "  -C, --client-info <info>  Accept custom client information\n"
+    "      --log-file <path>     Write XRootD client logs to a file\n";
 }
 
 // Handle --version and apply the common client options. Returns false when
@@ -1564,6 +1647,384 @@ int RunArchivePoll(const ArchivePollOptions &options)
   return 0;
 }
 
+int CommandStat(int argc, char **argv)
+{
+  CommonOptions common;
+  const auto longOptions = MakeLongOptions();
+
+  ResetOptionParsing();
+  int opt;
+  bool parseError = false;
+  while((opt = getopt_long(argc, argv, kCommonShortOptions,
+                           longOptions.data(), nullptr)) != -1)
+  {
+    if(opt == 'h')
+    {
+      std::cout << "Usage: xrd stat [options] <file>\n\n"
+                   "Display extended information about a file or "
+                   "directory.\n\n"
+                   "Arguments:\n"
+                   "  file  URL of the file or directory to stat\n\n";
+      PrintCommonOptionsHelp();
+      return 0;
+    }
+    if(HandleCommonOption("stat", opt, common, parseError))
+    {
+      if(parseError) return 2;
+      continue;
+    }
+    return CommandLineError("stat");
+  }
+
+  int exitCode = 0;
+  if(!BeginCommand("stat", common, exitCode)) return exitCode;
+
+  if(argc - optind != 1)
+  {
+    std::cerr << "xrd stat: expected one file URL\n";
+    return 64;
+  }
+
+  StatOptions options;
+  options.path = argv[optind];
+  return RunStat(options);
+}
+
+int CommandSum(int argc, char **argv)
+{
+  CommonOptions common;
+  const auto longOptions = MakeLongOptions();
+
+  ResetOptionParsing();
+  int opt;
+  bool parseError = false;
+  while((opt = getopt_long(argc, argv, kCommonShortOptions,
+                           longOptions.data(), nullptr)) != -1)
+  {
+    if(opt == 'h')
+    {
+      std::cout << "Usage: xrd sum [options] <file> <checksum_type>\n\n"
+                   "Calculate a file checksum.\n\n"
+                   "Arguments:\n"
+                   "  file           File URL to use for checksum "
+                   "calculation\n"
+                   "  checksum_type  Checksum algorithm to use\n\n";
+      PrintCommonOptionsHelp();
+      return 0;
+    }
+    if(HandleCommonOption("sum", opt, common, parseError))
+    {
+      if(parseError) return 2;
+      continue;
+    }
+    return CommandLineError("sum");
+  }
+
+  int exitCode = 0;
+  if(!BeginCommand("sum", common, exitCode)) return exitCode;
+
+  if(argc - optind != 2)
+  {
+    std::cerr << "xrd sum: expected one file URL and checksum type\n";
+    return 64;
+  }
+
+  SumOptions options;
+  options.path = argv[optind];
+  options.checkSumType = argv[optind + 1];
+  return RunSum(options);
+}
+
+int CommandArchivePoll(int argc, char **argv)
+{
+  CommonOptions common;
+  int pollingTimeout = 0;
+  std::string fromFile;
+  const auto longOptions = MakeLongOptions({
+    {"polling-timeout", required_argument, nullptr, kOptPollingTimeout},
+    {"from-file",       required_argument, nullptr, kOptFromFile},
+  });
+
+  ResetOptionParsing();
+  int opt;
+  bool parseError = false;
+  while((opt = getopt_long(argc, argv, kCommonShortOptions,
+                           longOptions.data(), nullptr)) != -1)
+  {
+    if(opt == 'h')
+    {
+      std::cout << "Usage: xrd archivepoll [options] [surl]\n\n"
+                   "Perform an archive polling operation on the given "
+                   "URL.\n\n"
+                   "Arguments:\n"
+                   "  surl  Site URL to query for archival status\n\n"
+                   "Options:\n"
+                   "      --polling-timeout <seconds>  Timeout for the "
+                   "polling operation\n"
+                   "      --from-file <path>           Read site URLs from "
+                   "a file\n\n";
+      PrintCommonOptionsHelp();
+      return 0;
+    }
+    if(opt == kOptPollingTimeout)
+    {
+      if(!ParseIntOption("archivepoll", "--polling-timeout", optarg,
+                         pollingTimeout))
+      {
+        return 2;
+      }
+      continue;
+    }
+    if(opt == kOptFromFile)
+    {
+      fromFile = optarg;
+      continue;
+    }
+    if(HandleCommonOption("archivepoll", opt, common, parseError))
+    {
+      if(parseError) return 2;
+      continue;
+    }
+    return CommandLineError("archivepoll");
+  }
+
+  if(argc - optind > 1)
+  {
+    std::cerr << "xrd archivepoll: expected at most one site URL\n";
+    return 64;
+  }
+
+  int exitCode = 0;
+  if(!BeginCommand("archivepoll", common, exitCode)) return exitCode;
+
+  ArchivePollOptions options;
+  options.timeout = common.timeout;
+  options.pollingTimeout = pollingTimeout;
+  const std::string url = optind < argc ? argv[optind] : "";
+  exitCode = LoadArchivePollUrls(url, fromFile, options.urls);
+  if(exitCode != 0) return exitCode;
+
+  return RunArchivePoll(options);
+}
+
+int CommandLs(int argc, char **argv)
+{
+  CommonOptions common;
+  LsOptions options;
+  bool fullTime = false;
+  std::vector<std::string> xattrs;
+  std::string color = "auto";
+  const auto longOptions = MakeLongOptions({
+    {"all",            no_argument,       nullptr, 'a'},
+    {"long",           no_argument,       nullptr, 'l'},
+    {"directory",      no_argument,       nullptr, 'd'},
+    {"human-readable", no_argument,       nullptr, 'H'},
+    {"xattr",          required_argument, nullptr, kOptXAttrQuery},
+    {"time-style",     required_argument, nullptr, kOptTimeStyle},
+    {"full-time",      no_argument,       nullptr, kOptFullTime},
+    {"color",          required_argument, nullptr, kOptColor},
+  });
+  const std::string shortOptions = std::string(kCommonShortOptions) + "aldH";
+
+  ResetOptionParsing();
+  int opt;
+  bool parseError = false;
+  while((opt = getopt_long(argc, argv, shortOptions.c_str(),
+                           longOptions.data(), nullptr)) != -1)
+  {
+    switch(opt)
+    {
+      case 'h':
+        std::cout <<
+          "Usage: xrd ls [options] <file>\n\n"
+          "List directory contents or file information.\n\n"
+          "Arguments:\n"
+          "  file  URL of the file or directory to list\n\n"
+          "Options:\n"
+          "  -a, --all              Display hidden files\n"
+          "  -l, --long             Use a long listing format\n"
+          "  -d, --directory        List directory entries instead of "
+          "contents\n"
+          "  -H, --human-readable   With -l, print sizes in human readable "
+          "format\n"
+          "      --xattr <attr>     Query additional attributes (accepted, "
+          "not implemented yet)\n"
+          "      --time-style <style>  Time style: full-iso, long-iso, iso, "
+          "or locale\n"
+          "      --full-time        Same as --time-style=full-iso\n"
+          "      --color <when>     Print colored entries with -l "
+          "(accepted, not implemented yet)\n\n";
+        PrintCommonOptionsHelp();
+        return 0;
+      case 'a': options.all = true; continue;
+      case 'l': options.longFormat = true; continue;
+      case 'd': options.directory = true; continue;
+      case 'H': options.humanReadable = true; continue;
+      case kOptXAttrQuery: xattrs.push_back(optarg); continue;
+      case kOptTimeStyle:
+        options.timeStyle = optarg;
+        if(options.timeStyle != "full-iso" && options.timeStyle != "long-iso"
+           && options.timeStyle != "iso" && options.timeStyle != "locale")
+        {
+          std::cerr << "xrd ls: invalid --time-style '" << optarg << "'\n";
+          return 2;
+        }
+        continue;
+      case kOptFullTime: fullTime = true; continue;
+      case kOptColor:
+        color = optarg;
+        if(color != "always" && color != "never" && color != "auto")
+        {
+          std::cerr << "xrd ls: invalid --color '" << optarg << "'\n";
+          return 2;
+        }
+        continue;
+      default:
+        if(HandleCommonOption("ls", opt, common, parseError))
+        {
+          if(parseError) return 2;
+          continue;
+        }
+        return CommandLineError("ls");
+    }
+  }
+
+  int exitCode = 0;
+  if(!BeginCommand("ls", common, exitCode)) return exitCode;
+
+  if(argc - optind != 1)
+  {
+    std::cerr << "xrd ls: expected one file URL\n";
+    return 64;
+  }
+
+  if(!xattrs.empty())
+  {
+    std::cerr << "xrd ls: --xattr is not implemented yet, "
+              << "the attributes are ignored\n";
+  }
+  // gfal2-util's --full-time output uses the long-iso format.
+  if(fullTime) options.timeStyle = "long-iso";
+  options.path = argv[optind];
+  return RunLs(options);
+}
+
+int CommandCat(int argc, char **argv)
+{
+  CommonOptions common;
+  const auto longOptions = MakeLongOptions({
+    {"bytes", no_argument, nullptr, 'b'},
+  });
+  const std::string shortOptions = std::string(kCommonShortOptions) + "b";
+
+  ResetOptionParsing();
+  int opt;
+  bool parseError = false;
+  while((opt = getopt_long(argc, argv, shortOptions.c_str(),
+                           longOptions.data(), nullptr)) != -1)
+  {
+    if(opt == 'h')
+    {
+      std::cout <<
+        "Usage: xrd cat [options] <file> [<file> ...]\n\n"
+        "Concatenate files and print them on the standard output.\n\n"
+        "Arguments:\n"
+        "  file  URLs of the files to print\n\n"
+        "Options:\n"
+        "  -b, --bytes  Handle file contents as bytes "
+        "(compatibility flag)\n\n";
+      PrintCommonOptionsHelp();
+      return 0;
+    }
+    if(opt == 'b') continue;
+    if(HandleCommonOption("cat", opt, common, parseError))
+    {
+      if(parseError) return 2;
+      continue;
+    }
+    return CommandLineError("cat");
+  }
+
+  int exitCode = 0;
+  if(!BeginCommand("cat", common, exitCode)) return exitCode;
+
+  if(optind >= argc)
+  {
+    std::cerr << "xrd cat: expected at least one file URL\n";
+    return 64;
+  }
+
+  CatOptions options;
+  for(int i = optind; i < argc; ++i)
+  {
+    options.paths.push_back(argv[i]);
+  }
+  return RunCat(options);
+}
+
+int CommandXAttr(int argc, char **argv)
+{
+  CommonOptions common;
+  const auto longOptions = MakeLongOptions();
+
+  ResetOptionParsing();
+  int opt;
+  bool parseError = false;
+  while((opt = getopt_long(argc, argv, kCommonShortOptions,
+                           longOptions.data(), nullptr)) != -1)
+  {
+    if(opt == 'h')
+    {
+      std::cout <<
+        "Usage: xrd xattr [options] <file> [attribute]\n\n"
+        "Show or set file attributes.\n\n"
+        "Arguments:\n"
+        "  file       URL of the file or directory\n"
+        "  attribute  Attribute to retrieve; use key=value to set\n\n";
+      PrintCommonOptionsHelp();
+      return 0;
+    }
+    if(HandleCommonOption("xattr", opt, common, parseError))
+    {
+      if(parseError) return 2;
+      continue;
+    }
+    return CommandLineError("xattr");
+  }
+
+  int exitCode = 0;
+  if(!BeginCommand("xattr", common, exitCode)) return exitCode;
+
+  const int positionals = argc - optind;
+  if(positionals < 1 || positionals > 2)
+  {
+    std::cerr << "xrd xattr: expected one file URL "
+              << "and an optional attribute\n";
+    return 64;
+  }
+
+  XAttrOptions options;
+  options.path = argv[optind];
+  if(positionals == 2) options.attribute = argv[optind + 1];
+  return RunXAttr(options);
+}
+
+void PrintMainHelp()
+{
+  std::cout << "Usage: xrd <command> [options]\n\n"
+               "XRootD command-line client.\n\n"
+               "Commands:\n";
+  for(const auto &command : kCommands)
+  {
+    std::cout << "  " << LeftJustify(std::string(command.name), 13)
+              << command.description << '\n';
+  }
+  std::cout << "\nOptions:\n"
+               "  -h, --help     Show this message and exit\n"
+               "      --version  Show version information and exit\n\n"
+               "Run 'xrd <command> --help' for command-specific options.\n";
+}
+
 }
 
 int main(int argc, char **argv)
@@ -1573,196 +2034,51 @@ int main(int argc, char **argv)
     return RunCopyCommand(argc, argv);
   }
 
-  CLI::App app{"XRootD command-line client."};
-  app.name("xrd");
-  app.set_help_flag("-h,--help", "Show this message and exit");
-  bool showVersion = false;
-  app.add_flag("--version", showVersion, "Show version information and exit");
-
-  int exitCode = 0;
-  CommonOptions xattrCommon;
-  XAttrOptions xattrOptions;
-  CommonOptions catCommon;
-  CatOptions catOptions;
-  bool catBytes = false;
-  CommonOptions lsCommon;
-  LsOptions lsOptions;
-  bool lsFullTime = false;
-  std::vector<std::string> lsXAttrs;
-  std::string lsColor = "auto";
-  CommonOptions statCommon;
-  std::string statPath;
-  CommonOptions sumCommon;
-  std::string sumPath;
-  std::string sumCheckSumType;
-  CommonOptions archivePollCommon;
-  std::string archivePollUrl;
-  int archivePollPollingTimeout = 0;
-  std::string archivePollFromFile;
-
-  for(const auto &command : kCommands)
+  if(argc < 2)
   {
-    auto *subcommand = app.add_subcommand(
-      std::string(command.name), std::string(command.description));
-
-    if(command.name == "archivepoll")
-    {
-      subcommand->add_option("surl", archivePollUrl,
-        "Site URL to query for archival status");
-      AddCommonOptions(subcommand, archivePollCommon);
-      subcommand->add_option("--polling-timeout",
-        archivePollPollingTimeout, "Timeout for the polling operation");
-      subcommand->add_option("--from-file", archivePollFromFile,
-        "Read site URLs from a file");
-      subcommand->callback([&] {
-        if(!BeginCommand("archivepoll", archivePollCommon, exitCode)) return;
-
-        ArchivePollOptions options;
-        options.timeout = archivePollCommon.timeout;
-        options.pollingTimeout = archivePollPollingTimeout;
-        exitCode = LoadArchivePollUrls(archivePollUrl, archivePollFromFile,
-                                       options.urls);
-        if(exitCode != 0) return;
-
-        exitCode = RunArchivePoll(options);
-      });
-    }
-    else if(command.name == "xattr")
-    {
-      subcommand->add_option("file", xattrOptions.path,
-        "URL of the file or directory");
-      subcommand->add_option("attribute", xattrOptions.attribute,
-        "Attribute to retrieve; use key=value to set");
-      AddCommonOptions(subcommand, xattrCommon);
-      subcommand->callback([&] {
-        if(!BeginCommand("xattr", xattrCommon, exitCode)) return;
-        if(xattrOptions.path.empty())
-        {
-          std::cerr << "xrd xattr: expected one file URL\n";
-          exitCode = 64;
-          return;
-        }
-        exitCode = RunXAttr(xattrOptions);
-      });
-    }
-    else if(command.name == "cat")
-    {
-      subcommand->add_option("file", catOptions.paths,
-        "URLs of the files to print");
-      AddCommonOptions(subcommand, catCommon);
-      subcommand->add_flag("-b,--bytes", catBytes,
-        "Handle file contents as bytes (compatibility flag)");
-      subcommand->callback([&] {
-        if(!BeginCommand("cat", catCommon, exitCode)) return;
-        if(catOptions.paths.empty())
-        {
-          std::cerr << "xrd cat: expected at least one file URL\n";
-          exitCode = 64;
-          return;
-        }
-        exitCode = RunCat(catOptions);
-      });
-    }
-    else if(command.name == "ls")
-    {
-      subcommand->add_option("file", lsOptions.path,
-        "URL of the file or directory to list");
-      AddCommonOptions(subcommand, lsCommon);
-      subcommand->add_flag("-a,--all", lsOptions.all,
-        "Display hidden files");
-      subcommand->add_flag("-l,--long", lsOptions.longFormat,
-        "Use a long listing format");
-      subcommand->add_flag("-d,--directory", lsOptions.directory,
-        "List directory entries instead of contents");
-      subcommand->add_flag("-H,--human-readable", lsOptions.humanReadable,
-        "With -l, print sizes in human readable format");
-      subcommand->add_option("--xattr", lsXAttrs,
-        "Query additional attributes (accepted, not implemented yet)");
-      subcommand->add_option("--time-style", lsOptions.timeStyle,
-        "Time style")
-        ->check(CLI::IsMember({"full-iso", "long-iso", "iso", "locale"}));
-      subcommand->add_flag("--full-time", lsFullTime,
-        "Same as --time-style=full-iso");
-      subcommand->add_option("--color", lsColor,
-        "Print colored entries with -l (accepted, not implemented yet)")
-        ->check(CLI::IsMember({"always", "never", "auto"}));
-      subcommand->callback([&] {
-        if(!BeginCommand("ls", lsCommon, exitCode)) return;
-        if(lsOptions.path.empty())
-        {
-          std::cerr << "xrd ls: expected one file URL\n";
-          exitCode = 64;
-          return;
-        }
-        if(!lsXAttrs.empty())
-        {
-          std::cerr << "xrd ls: --xattr is not implemented yet, "
-                    << "the attributes are ignored\n";
-        }
-        // gfal2-util's --full-time output uses the long-iso format.
-        if(lsFullTime) lsOptions.timeStyle = "long-iso";
-        exitCode = RunLs(lsOptions);
-      });
-    }
-    else if(command.name == "stat")
-    {
-      subcommand->add_option("file", statPath,
-        "URL of the file or directory to stat");
-      AddCommonOptions(subcommand, statCommon);
-      subcommand->callback([&] {
-        if(!BeginCommand("stat", statCommon, exitCode)) return;
-        if(statPath.empty())
-        {
-          std::cerr << "xrd stat: expected one file URL\n";
-          exitCode = 64;
-          return;
-        }
-        StatOptions options;
-        options.path = statPath;
-        exitCode = RunStat(options);
-      });
-    }
-    else if(command.name == "sum")
-    {
-      subcommand->add_option("file", sumPath,
-        "File URL to use for checksum calculation");
-      subcommand->add_option("checksum_type", sumCheckSumType,
-        "Checksum algorithm to use");
-      AddCommonOptions(subcommand, sumCommon);
-      subcommand->callback([&] {
-        if(!BeginCommand("sum", sumCommon, exitCode)) return;
-        if(sumPath.empty() || sumCheckSumType.empty())
-        {
-          std::cerr << "xrd sum: expected one file URL and checksum type\n";
-          exitCode = 64;
-          return;
-        }
-        SumOptions options;
-        options.path = sumPath;
-        options.checkSumType = sumCheckSumType;
-        exitCode = RunSum(options);
-      });
-    }
-    else
-    {
-      subcommand->allow_extras();
-      subcommand->callback([&exitCode, name = command.name] {
-        exitCode = NotImplemented(name);
-      });
-    }
+    PrintMainHelp();
+    return 0;
   }
 
-  CLI11_PARSE(app, argc, argv);
-
-  if(showVersion)
+  const std::string_view command = argv[1];
+  if(command == "-h" || command == "--help")
+  {
+    PrintMainHelp();
+    return 0;
+  }
+  if(command == "-V" || command == "--version")
   {
     std::cout << "xrd " << XrdVERSION << '\n';
     return 0;
   }
 
-  if(app.get_subcommands().empty())
+  // Give getopt an argv[0] carrying the full command name so its error
+  // messages read "xrd <command>: ...".
+  std::string programName = std::string("xrd ") + std::string(command);
+  std::vector<char *> subArgs;
+  subArgs.reserve(static_cast<std::size_t>(argc));
+  subArgs.push_back(programName.data());
+  for(int i = 2; i < argc; ++i)
   {
-    std::cout << app.help();
+    subArgs.push_back(argv[i]);
   }
-  return exitCode;
+  subArgs.push_back(nullptr);
+  const int subArgc = static_cast<int>(subArgs.size()) - 1;
+  char **subArgv = subArgs.data();
+
+  if(command == "stat") return CommandStat(subArgc, subArgv);
+  if(command == "sum") return CommandSum(subArgc, subArgv);
+  if(command == "archivepoll") return CommandArchivePoll(subArgc, subArgv);
+  if(command == "ls") return CommandLs(subArgc, subArgv);
+  if(command == "cat") return CommandCat(subArgc, subArgv);
+  if(command == "xattr") return CommandXAttr(subArgc, subArgv);
+
+  for(const auto &entry : kCommands)
+  {
+    if(command == entry.name) return NotImplemented(entry.name);
+  }
+
+  std::cerr << "xrd: unknown command '" << command << "'\n"
+            << "Run 'xrd --help' for the command list.\n";
+  return 2;
 }

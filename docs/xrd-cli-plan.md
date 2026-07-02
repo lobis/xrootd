@@ -40,7 +40,7 @@ The `xrd-cli` branch currently contains:
 
 | Piece | State |
 |---|---|
-| `src/XrdApps/XrdCli.cc` — CLI11-based `xrd` binary | scaffold + 3 implemented commands |
+| `src/XrdApps/XrdCli.cc` — `xrd` binary (getopt_long parsing) | scaffold + 3 implemented commands |
 | `xrd stat` | implemented (local + remote via `XrdCl::FileSystem::Stat`), tested (`tests/XrdApps/xrd-stat.sh`) |
 | `xrd sum` | implemented (remote `Query(Checksum)` + local calculation via `XrdCks`/zlib) |
 | `xrd archivepoll` | implemented against `XrdCl::TapeRestClient` (discovery + `archiveinfo`) |
@@ -151,7 +151,7 @@ are explicitly out of scope here).
 
 | Flag | Behavior in `xrd` |
 |---|---|
-| `-h, --help` | CLI11 help |
+| `-h, --help` | per-command help text |
 | `-V, --version` | version and exit |
 | `-v, --verbose` | repeatable; maps to XrdCl log levels (`-v`→Info, `-vv`→Debug, `-vvv`→Dump) |
 | `-t, --timeout` | operation timeout, default 1800 s (gfal2 default) |
@@ -189,9 +189,9 @@ that bar.
 
 ### 4.5 Language & dependencies
 
-C++17, CLI11 (already vendored via build dep), `XrdCl` + `XrdClHttp` only.
-No curl in `XrdCl` core (§3.3), no new hard deps in the client package beyond
-what the branch already negotiated.
+C++17, `XrdCl` + `XrdClHttp` only. Argument parsing uses plain
+`getopt_long` — the reviewer rejected an external CLI library (CLI11), so
+the tool has no new dependencies at all. No curl in `XrdCl` core (§3.3).
 
 ---
 
@@ -225,7 +225,8 @@ Each phase = one or more reviewable commits on this branch (or follow-up PRs
 if upstream prefers slicing); a phase is "done" when its commands pass their
 shell tests + the flag audit.
 
-- **Phase 0 — foundation (done except audit tooling).** CLI11 scaffold,
+- **Phase 0 — foundation (done except audit tooling).** CLI scaffold
+  (getopt_long, no external parser),
   packaging, man page, CI, `AddCommonOptions`/`BeginCommand` factoring.
   *Remaining:* central exit-code helper, vendor the gfal2 help reference +
   flag-audit CI job.
