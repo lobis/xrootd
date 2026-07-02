@@ -682,38 +682,82 @@ void ApplyClientOptions(int timeout, const std::string &cert,
   }
 }
 
-int RunStat(const StatOptions &options, unsigned int verbosity = 0,
-            const std::string &logFile = "", const std::string &cert = "",
-            const std::string &key = "", bool ipv4 = false,
-            bool ipv6 = false)
+// Options accepted by every xrd subcommand, mirroring the gfal2-util common
+// flag set. gfal2/GridFTP-specific flags are accepted for compatibility and
+// otherwise ignored.
+struct CommonOptions
 {
-  if(!logFile.empty() && !XrdCl::DefaultEnv::SetLogFile(logFile))
+  int timeout = -1;
+  unsigned int verbosity = 0;
+  bool version = false;
+  bool ipv4 = false;
+  bool ipv6 = false;
+  std::string definition;
+  std::string cert;
+  std::string key;
+  std::string clientInfo;
+  std::string logFile;
+};
+
+void AddCommonOptions(CLI::App *subcommand, CommonOptions &options)
+{
+  subcommand->add_flag("-V,--version", options.version,
+    "Output version information and exit");
+  subcommand->add_flag("-v,--verbose", options.verbosity,
+    "Enable verbose client logging");
+  subcommand->add_option("-D,--definition", options.definition,
+    "Accept a GFAL parameter override");
+  subcommand->add_option("-t,--timeout", options.timeout,
+    "Maximum operation time in seconds");
+  subcommand->add_option("-E,--cert", options.cert,
+    "Accept a user certificate path");
+  subcommand->add_option("--key", options.key,
+    "Accept a user private key path");
+  subcommand->add_flag("-4", options.ipv4,
+    "Accept the GFAL IPv4-only flag");
+  subcommand->add_flag("-6", options.ipv6,
+    "Accept the GFAL IPv6-only flag");
+  subcommand->add_option("-C,--client-info", options.clientInfo,
+    "Accept custom client information");
+  subcommand->add_option("--log-file", options.logFile,
+    "Write XRootD client logs to a file");
+}
+
+// Handle --version and apply the common client options. Returns false when
+// the command was fully handled and exitCode is already set.
+bool BeginCommand(const std::string &name, const CommonOptions &options,
+                  int &exitCode)
+{
+  if(options.version)
   {
-    std::cerr << "xrd stat: unable to open log file '" << logFile << "'\n";
-    return 1;
+    std::cout << "xrd " << XrdVERSION << '\n';
+    exitCode = 0;
+    return false;
   }
 
-  SetVerbose(verbosity);
-  ApplyClientOptions(options.timeout, cert, key, ipv4, ipv6);
+  if(!options.logFile.empty()
+     && !XrdCl::DefaultEnv::SetLogFile(options.logFile))
+  {
+    std::cerr << "xrd " << name << ": unable to open log file '"
+              << options.logFile << "'\n";
+    exitCode = 1;
+    return false;
+  }
 
+  SetVerbose(options.verbosity);
+  ApplyClientOptions(options.timeout, options.cert, options.key,
+                     options.ipv4, options.ipv6);
+  return true;
+}
+
+int RunStat(const StatOptions &options)
+{
   if(HasScheme(options.path)) return RunRemoteStat(options.path);
   return RunLocalStat(options.path, options.path);
 }
 
-int RunSum(const SumOptions &options, unsigned int verbosity = 0,
-           const std::string &logFile = "", const std::string &cert = "",
-           const std::string &key = "", bool ipv4 = false,
-           bool ipv6 = false)
+int RunSum(const SumOptions &options)
 {
-  if(!logFile.empty() && !XrdCl::DefaultEnv::SetLogFile(logFile))
-  {
-    std::cerr << "xrd sum: unable to open log file '" << logFile << "'\n";
-    return 1;
-  }
-
-  SetVerbose(verbosity);
-  ApplyClientOptions(options.timeout, cert, key, ipv4, ipv6);
-
   const auto checkSumType = ToLower(options.checkSumType);
   if(HasScheme(options.path)) return RunRemoteSum(options.path, checkSumType);
   return RunLocalSum(options.path, checkSumType, options.checkSumType);
@@ -848,24 +892,8 @@ bool ParseArchiveInfoResponse(const std::string &body,
   }
 }
 
-int RunArchivePoll(const ArchivePollOptions &options,
-                   unsigned int verbosity = 0,
-                   const std::string &logFile = "",
-                   const std::string &cert = "",
-                   const std::string &key = "",
-                   bool ipv4 = false,
-                   bool ipv6 = false)
+int RunArchivePoll(const ArchivePollOptions &options)
 {
-  if(!logFile.empty() && !XrdCl::DefaultEnv::SetLogFile(logFile))
-  {
-    std::cerr << "xrd archivepoll: unable to open log file '" << logFile
-              << "'\n";
-    return 1;
-  }
-
-  SetVerbose(verbosity);
-  ApplyClientOptions(options.timeout, cert, key, ipv4, ipv6);
-
   std::string fsUrl;
   std::string error;
   if(!TapeFileSystemURL(options.urls.front(), fsUrl, error))
@@ -940,40 +968,13 @@ int main(int argc, char **argv)
   app.add_flag("--version", showVersion, "Show version information and exit");
 
   int exitCode = 0;
+  CommonOptions statCommon;
   std::string statPath;
-  int statTimeout = -1;
-  unsigned int statVerbosity = 0;
-  bool statVersion = false;
-  bool statIPv4 = false;
-  bool statIPv6 = false;
-  std::string statDefinition;
-  std::string statCert;
-  std::string statKey;
-  std::string statClientInfo;
-  std::string statLogFile;
+  CommonOptions sumCommon;
   std::string sumPath;
   std::string sumCheckSumType;
-  int sumTimeout = -1;
-  unsigned int sumVerbosity = 0;
-  bool sumVersion = false;
-  bool sumIPv4 = false;
-  bool sumIPv6 = false;
-  std::string sumDefinition;
-  std::string sumCert;
-  std::string sumKey;
-  std::string sumClientInfo;
-  std::string sumLogFile;
+  CommonOptions archivePollCommon;
   std::string archivePollUrl;
-  int archivePollTimeout = -1;
-  unsigned int archivePollVerbosity = 0;
-  bool archivePollVersion = false;
-  bool archivePollIPv4 = false;
-  bool archivePollIPv6 = false;
-  std::string archivePollDefinition;
-  std::string archivePollCert;
-  std::string archivePollKey;
-  std::string archivePollClientInfo;
-  std::string archivePollLogFile;
   int archivePollPollingTimeout = 0;
   std::string archivePollFromFile;
 
@@ -986,82 +987,31 @@ int main(int argc, char **argv)
     {
       subcommand->add_option("surl", archivePollUrl,
         "Site URL to query for archival status");
-      subcommand->add_flag("-V,--version", archivePollVersion,
-        "Output version information and exit");
-      subcommand->add_flag("-v,--verbose", archivePollVerbosity,
-        "Enable verbose client logging");
-      subcommand->add_option("-D,--definition", archivePollDefinition,
-        "Accept a GFAL parameter override");
-      subcommand->add_option("-t,--timeout", archivePollTimeout,
-        "Maximum operation time in seconds");
-      subcommand->add_option("-E,--cert", archivePollCert,
-        "Accept a user certificate path");
-      subcommand->add_option("--key", archivePollKey,
-        "Accept a user private key path");
-      subcommand->add_flag("-4", archivePollIPv4,
-        "Accept the GFAL IPv4-only flag");
-      subcommand->add_flag("-6", archivePollIPv6,
-        "Accept the GFAL IPv6-only flag");
-      subcommand->add_option("-C,--client-info", archivePollClientInfo,
-        "Accept custom client information");
-      subcommand->add_option("--log-file", archivePollLogFile,
-        "Write client logs to a file");
+      AddCommonOptions(subcommand, archivePollCommon);
       subcommand->add_option("--polling-timeout",
         archivePollPollingTimeout, "Timeout for the polling operation");
       subcommand->add_option("--from-file", archivePollFromFile,
         "Read site URLs from a file");
       subcommand->callback([&] {
-        if(archivePollVersion)
-        {
-          std::cout << "xrd " << XrdVERSION << '\n';
-          exitCode = 0;
-          return;
-        }
+        if(!BeginCommand("archivepoll", archivePollCommon, exitCode)) return;
 
         ArchivePollOptions options;
-        options.timeout = archivePollTimeout;
+        options.timeout = archivePollCommon.timeout;
         options.pollingTimeout = archivePollPollingTimeout;
         exitCode = LoadArchivePollUrls(archivePollUrl, archivePollFromFile,
                                        options.urls);
         if(exitCode != 0) return;
 
-        exitCode = RunArchivePoll(options, archivePollVerbosity,
-                                  archivePollLogFile, archivePollCert,
-                                  archivePollKey, archivePollIPv4,
-                                  archivePollIPv6);
+        exitCode = RunArchivePoll(options);
       });
     }
     else if(command.name == "stat")
     {
       subcommand->add_option("file", statPath,
         "URL of the file or directory to stat");
-      subcommand->add_flag("-V,--version", statVersion,
-        "Output version information and exit");
-      subcommand->add_flag("-v,--verbose", statVerbosity,
-        "Enable verbose client logging");
-      subcommand->add_option("-D,--definition", statDefinition,
-        "Accept a GFAL parameter override");
-      subcommand->add_option("-t,--timeout", statTimeout,
-        "Maximum operation time in seconds");
-      subcommand->add_option("-E,--cert", statCert,
-        "Accept a user certificate path");
-      subcommand->add_option("--key", statKey,
-        "Accept a user private key path");
-      subcommand->add_flag("-4", statIPv4,
-        "Accept the GFAL IPv4-only flag");
-      subcommand->add_flag("-6", statIPv6,
-        "Accept the GFAL IPv6-only flag");
-      subcommand->add_option("-C,--client-info", statClientInfo,
-        "Accept custom client information");
-      subcommand->add_option("--log-file", statLogFile,
-        "Write XRootD client logs to a file");
+      AddCommonOptions(subcommand, statCommon);
       subcommand->callback([&] {
-        if(statVersion)
-        {
-          std::cout << "xrd " << XrdVERSION << '\n';
-          exitCode = 0;
-          return;
-        }
+        if(!BeginCommand("stat", statCommon, exitCode)) return;
         if(statPath.empty())
         {
           std::cerr << "xrd stat: expected one file URL\n";
@@ -1070,9 +1020,7 @@ int main(int argc, char **argv)
         }
         StatOptions options;
         options.path = statPath;
-        options.timeout = statTimeout;
-        exitCode = RunStat(options, statVerbosity, statLogFile, statCert,
-                           statKey, statIPv4, statIPv6);
+        exitCode = RunStat(options);
       });
     }
     else if(command.name == "sum")
@@ -1081,33 +1029,9 @@ int main(int argc, char **argv)
         "File URL to use for checksum calculation");
       subcommand->add_option("checksum_type", sumCheckSumType,
         "Checksum algorithm to use");
-      subcommand->add_flag("-V,--version", sumVersion,
-        "Output version information and exit");
-      subcommand->add_flag("-v,--verbose", sumVerbosity,
-        "Enable verbose client logging");
-      subcommand->add_option("-D,--definition", sumDefinition,
-        "Accept a GFAL parameter override");
-      subcommand->add_option("-t,--timeout", sumTimeout,
-        "Maximum operation time in seconds");
-      subcommand->add_option("-E,--cert", sumCert,
-        "Accept a user certificate path");
-      subcommand->add_option("--key", sumKey,
-        "Accept a user private key path");
-      subcommand->add_flag("-4", sumIPv4,
-        "Accept the GFAL IPv4-only flag");
-      subcommand->add_flag("-6", sumIPv6,
-        "Accept the GFAL IPv6-only flag");
-      subcommand->add_option("-C,--client-info", sumClientInfo,
-        "Accept custom client information");
-      subcommand->add_option("--log-file", sumLogFile,
-        "Write XRootD client logs to a file");
+      AddCommonOptions(subcommand, sumCommon);
       subcommand->callback([&] {
-        if(sumVersion)
-        {
-          std::cout << "xrd " << XrdVERSION << '\n';
-          exitCode = 0;
-          return;
-        }
+        if(!BeginCommand("sum", sumCommon, exitCode)) return;
         if(sumPath.empty() || sumCheckSumType.empty())
         {
           std::cerr << "xrd sum: expected one file URL and checksum type\n";
@@ -1117,9 +1041,7 @@ int main(int argc, char **argv)
         SumOptions options;
         options.path = sumPath;
         options.checkSumType = sumCheckSumType;
-        options.timeout = sumTimeout;
-        exitCode = RunSum(options, sumVerbosity, sumLogFile, sumCert,
-                          sumKey, sumIPv4, sumIPv6);
+        exitCode = RunSum(options);
       });
     }
     else
