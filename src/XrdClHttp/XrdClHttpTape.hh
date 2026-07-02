@@ -33,8 +33,24 @@
 
 namespace XrdClHttp
 {
+  class HeaderCallout;
+
+  // Options shared by all Tape REST helper calls.
+  //
+  // Storage URLs passed to the helpers are translated into HTTP(S) discovery
+  // endpoints; root:// and xroot:// URLs are assumed to serve the discovery
+  // document over HTTPS on the default port (443), so any xroot port present
+  // in the URL is dropped.
+  struct TapeOptions
+  {
+    int timeout = -1;                        //!< Total per-request timeout in
+                                             //!< seconds (-1 for no timeout)
+    HeaderCallout *headerCallout = nullptr;  //!< Optional callout used to
+                                             //!< amend outgoing HTTP headers
+  };
+
   XrdCl::XRootDStatus TapeDiscover( const std::string &url,
-                                    int timeout,
+                                    const TapeOptions &options,
                                     std::string &uri,
                                     std::string &version,
                                     std::string &sitename );
@@ -43,33 +59,37 @@ namespace XrdClHttp
   XrdCl::XRootDStatus TapeStage(
     const std::string &url,
     const std::vector<std::array<std::string, 4>> &files,
-    int timeout,
+    const TapeOptions &options,
     std::string &requestId );
 
   XrdCl::XRootDStatus TapeStageStatus( const std::string &url,
                                        const std::string &requestId,
-                                       int timeout,
+                                       const TapeOptions &options,
                                        std::string &responseJson );
 
   XrdCl::XRootDStatus TapeStageCancel(
       const std::string &url,
       const std::string &requestId,
       const std::vector<std::string> &paths,
-      int timeout );
+      const TapeOptions &options );
 
   XrdCl::XRootDStatus TapeStageDelete( const std::string &url,
                                        const std::string &requestId,
-                                       int timeout );
+                                       const TapeOptions &options );
 
   XrdCl::XRootDStatus TapeRelease( const std::string &url,
                                    const std::string &requestId,
                                    const std::vector<std::string> &paths,
-                                   int timeout );
+                                   const TapeOptions &options );
 
   XrdCl::XRootDStatus TapeArchiveInfo(
     const std::vector<std::string> &urls,
-    int timeout,
+    const TapeOptions &options,
     std::string &responseJson );
+
+  // Drop all cached Tape REST discovery results, forcing the next helper
+  // call to repeat endpoint discovery.
+  void TapeClearDiscoveryCache();
 }
 
 #endif // XRDCLHTTP_TAPE_HH

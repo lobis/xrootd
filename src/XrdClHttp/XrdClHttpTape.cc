@@ -24,6 +24,7 @@
 
 #include "XrdClHttpTape.hh"
 
+#include "XrdClHttpHeaderCallout.hh"
 #include "XrdClHttpUtil.hh"
 
 #include "XrdCl/XrdClConstants.hh"
@@ -37,12 +38,17 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <cstdlib>
 #include <exception>
 #include <fstream>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <string>
+#include <unordered_map>
+
+#include <unistd.h>
 
 #include <curl/curl.h>
 
@@ -77,16 +83,69 @@ enum class TapeLocality
   Unknown
 };
 
-struct TapeOptions
-{
-  int timeout = -1;
-};
+using XrdClHttp::TapeOptions;
 
 struct TapeEndpoint
 {
   std::string uri;
   std::string version;
   std::string sitename;
+};
+
+// Cache of Tape REST endpoints discovered per storage endpoint
+// (scheme://host:port), so clients polling a stage request do not repeat
+// the discovery round trip on every call.
+class TapeEndpointCache
+{
+  public:
+    static TapeEndpointCache &Instance()
+    {
+      static TapeEndpointCache instance;
+      return instance;
+    }
+
+    bool Get(const std::string &storageEndpoint, TapeEndpoint &endpoint)
+    {
+      const auto now = std::chrono::steady_clock::now();
+      std::lock_guard<std::mutex> lock(pMutex);
+      const auto it = pEntries.find(storageEndpoint);
+      if(it == pEntries.end()) return false;
+      if(it->second.expiry < now)
+      {
+        pEntries.erase(it);
+        return false;
+      }
+      endpoint = it->second.endpoint;
+      return true;
+    }
+
+    void Put(const std::string &storageEndpoint, const TapeEndpoint &endpoint)
+    {
+      const auto expiry = std::chrono::steady_clock::now() + kEntryLifetime;
+      std::lock_guard<std::mutex> lock(pMutex);
+      pEntries[storageEndpoint] = Entry{endpoint, expiry};
+    }
+
+    void Clear()
+    {
+      std::lock_guard<std::mutex> lock(pMutex);
+      pEntries.clear();
+    }
+
+  private:
+    TapeEndpointCache() = default;
+
+    struct Entry
+    {
+      TapeEndpoint endpoint;
+      std::chrono::steady_clock::time_point expiry;
+    };
+
+    static constexpr std::chrono::steady_clock::duration kEntryLifetime =
+      std::chrono::minutes(5);
+
+    std::mutex pMutex;
+    std::unordered_map<std::string, Entry> pEntries;
 };
 
 struct TapeArchiveInfo
@@ -364,6 +423,19 @@ bool UrlEndpointAndPath(const std::string &input, std::string &endpoint,
   return true;
 }
 
+std::string ReadTokenFromFile(const std::string &tokenFile)
+{
+  std::ifstream in(tokenFile);
+  if(!in) return "";
+
+  std::string value;
+  std::getline(in, value);
+  return TrimCopy(value);
+}
+
+// Locate a bearer token following the WLCG Bearer Token Discovery
+// specification: BEARER_TOKEN, BEARER_TOKEN_FILE, then the well-known
+// per-user token files.
 std::string ReadBearerToken()
 {
   std::string token = GetEnvString("BearerToken", "BEARER_TOKEN");
@@ -371,14 +443,16 @@ std::string ReadBearerToken()
 
   const std::string tokenFile =
     GetEnvString("BearerTokenFile", "BEARER_TOKEN_FILE");
-  if(tokenFile.empty()) return "";
+  if(!tokenFile.empty()) return ReadTokenFromFile(tokenFile);
 
-  std::ifstream in(tokenFile);
-  if(!in) return "";
-
-  std::string value;
-  std::getline(in, value);
-  return TrimCopy(value);
+  const std::string tokenFileName = "bt_u" + std::to_string(geteuid());
+  const char *runtimeDir = std::getenv("XDG_RUNTIME_DIR");
+  if(runtimeDir && *runtimeDir)
+  {
+    token = ReadTokenFromFile(std::string(runtimeDir) + "/" + tokenFileName);
+    if(!token.empty()) return token;
+  }
+  return ReadTokenFromFile("/tmp/" + tokenFileName);
 }
 
 size_t CurlWriteCallback(char *data, size_t size, size_t nmemb, void *userp)
@@ -401,10 +475,34 @@ bool AppendCurlHeader(CurlHeaders &headers, const std::string &header)
   return true;
 }
 
-HttpResponse HttpRequest(const std::string &method, const std::string &url,
-                         const std::string &body,
-                         const TapeOptions &options)
+// Scheme, host, and port of a URL; used to decide whether credentials may
+// be forwarded when following an HTTP redirect. XrdCl::URL substitutes the
+// default port for http/https URLs without an explicit one.
+std::string UrlOrigin(const std::string &input)
 {
+  XrdCl::URL url(input);
+  if(!url.IsValid() || url.GetHostName().empty()) return "";
+
+  std::ostringstream out;
+  out << ToLower(url.GetProtocol()) << "://" << ToLower(url.GetHostName())
+      << ":" << url.GetPort();
+  return out.str();
+}
+
+bool IsRedirectStatus(long statusCode)
+{
+  return statusCode == 301 || statusCode == 302 || statusCode == 303
+    || statusCode == 307 || statusCode == 308;
+}
+
+HttpResponse PerformHttpRequest(const std::string &method,
+                                const std::string &url,
+                                const std::string &body,
+                                const TapeOptions &options,
+                                bool includeToken,
+                                std::string &redirectUrl)
+{
+  redirectUrl.clear();
   HttpResponse response;
   XrdCl::Env *env = XrdCl::DefaultEnv::GetEnv();
   CurlHandle curl(XrdClHttp::GetHandle(false), curl_easy_cleanup);
@@ -417,18 +515,37 @@ HttpResponse HttpRequest(const std::string &method, const std::string &url,
   char errorBuffer[CURL_ERROR_SIZE];
   errorBuffer[0] = '\0';
 
-  CurlHeaders headers(nullptr, curl_slist_free_all);
-  if(!AppendCurlHeader(headers, "Accept: application/json"))
+  XrdClHttp::HeaderCallout::HeaderList headerList;
+  headerList.emplace_back("Accept", "application/json");
+  if(method == "POST")
   {
-    response.error = "unable to allocate HTTP headers";
-    return response;
+    headerList.emplace_back("Content-Type", "application/json");
+  }
+  if(includeToken)
+  {
+    const std::string token = ReadBearerToken();
+    if(!token.empty())
+    {
+      headerList.emplace_back("Authorization", "Bearer " + token);
+    }
   }
 
-  const std::string token = ReadBearerToken();
-  if(!token.empty())
+  if(options.headerCallout)
   {
-    const std::string header = "Authorization: Bearer " + token;
-    if(!AppendCurlHeader(headers, header))
+    auto calloutHeaders =
+      options.headerCallout->GetHeaders(method, url, headerList);
+    if(!calloutHeaders)
+    {
+      response.error = "header callout failed for " + url;
+      return response;
+    }
+    headerList = *calloutHeaders;
+  }
+
+  CurlHeaders headers(nullptr, curl_slist_free_all);
+  for(const auto &header : headerList)
+  {
+    if(!AppendCurlHeader(headers, header.first + ": " + header.second))
     {
       response.error = "unable to allocate HTTP headers";
       return response;
@@ -440,16 +557,15 @@ HttpResponse HttpRequest(const std::string &method, const std::string &url,
   curl_easy_setopt(curl.get(), CURLOPT_WRITEFUNCTION, CurlWriteCallback);
   curl_easy_setopt(curl.get(), CURLOPT_WRITEDATA, &response.body);
   curl_easy_setopt(curl.get(), CURLOPT_HTTPHEADER, headers.get());
-  curl_easy_setopt(curl.get(), CURLOPT_FOLLOWLOCATION, 1L);
-  curl_easy_setopt(curl.get(), CURLOPT_MAXREDIRS, 8L);
+  // Redirects are followed manually in HttpRequest so credentials can be
+  // withheld from other origins.
+  curl_easy_setopt(curl.get(), CURLOPT_FOLLOWLOCATION, 0L);
   curl_easy_setopt(curl.get(), CURLOPT_NOSIGNAL, 1L);
 #if CURL_AT_LEAST_VERSION(7, 85, 0)
   curl_easy_setopt(curl.get(), CURLOPT_PROTOCOLS_STR, "https,http");
-  curl_easy_setopt(curl.get(), CURLOPT_REDIR_PROTOCOLS_STR, "https,http");
 #else
   const long protocols = CURLPROTO_HTTP | CURLPROTO_HTTPS;
   curl_easy_setopt(curl.get(), CURLOPT_PROTOCOLS, protocols);
-  curl_easy_setopt(curl.get(), CURLOPT_REDIR_PROTOCOLS, protocols);
 #endif
 
   if(options.timeout >= 0)
@@ -464,12 +580,6 @@ HttpResponse HttpRequest(const std::string &method, const std::string &url,
 
   if(method == "POST")
   {
-    if(!AppendCurlHeader(headers, "Content-Type: application/json"))
-    {
-      response.error = "unable to allocate HTTP headers";
-      return response;
-    }
-    curl_easy_setopt(curl.get(), CURLOPT_HTTPHEADER, headers.get());
     curl_easy_setopt(curl.get(), CURLOPT_POST, 1L);
     curl_easy_setopt(curl.get(), CURLOPT_POSTFIELDS, body.c_str());
     curl_easy_setopt(curl.get(), CURLOPT_POSTFIELDSIZE,
@@ -484,9 +594,58 @@ HttpResponse HttpRequest(const std::string &method, const std::string &url,
   if(result != CURLE_OK)
   {
     response.error = errorBuffer[0] ? errorBuffer : curl_easy_strerror(result);
+    return response;
   }
 
   curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &response.statusCode);
+  if(IsRedirectStatus(response.statusCode))
+  {
+    char *location = nullptr;
+    curl_easy_getinfo(curl.get(), CURLINFO_REDIRECT_URL, &location);
+    if(location) redirectUrl = location;
+  }
+  return response;
+}
+
+constexpr int kMaxTapeRedirects = 8;
+
+HttpResponse HttpRequest(const std::string &method, const std::string &url,
+                         const std::string &body,
+                         const TapeOptions &options)
+{
+  const std::string origin = UrlOrigin(url);
+  std::string currentMethod = method;
+  std::string currentUrl = url;
+  std::string currentBody = body;
+
+  for(int redirects = 0; redirects <= kMaxTapeRedirects; ++redirects)
+  {
+    // Forward the bearer token only to the origin the request started at.
+    const bool includeToken = UrlOrigin(currentUrl) == origin;
+    std::string redirectUrl;
+    HttpResponse response = PerformHttpRequest(
+      currentMethod, currentUrl, currentBody, options, includeToken,
+      redirectUrl);
+
+    if(!response.error.empty() || !IsRedirectStatus(response.statusCode)
+       || redirectUrl.empty())
+    {
+      return response;
+    }
+
+    if(response.statusCode == 303
+       || (currentMethod == "POST"
+           && (response.statusCode == 301 || response.statusCode == 302)))
+    {
+      currentMethod = "GET";
+      currentBody.clear();
+    }
+    currentUrl = redirectUrl;
+    response.body.clear();
+  }
+
+  HttpResponse response;
+  response.error = "too many HTTP redirects";
   return response;
 }
 
@@ -839,6 +998,11 @@ namespace
       return ErrorStatus(errInvalidArgs, error);
     }
 
+    if(TapeEndpointCache::Instance().Get(storageEndpoint, endpoint))
+    {
+      return XRootDStatus();
+    }
+
     const std::string discoveryUrl =
       JoinUrl(storageEndpoint, "/.well-known/wlcg-tape-rest-api");
     const HttpResponse response =
@@ -911,6 +1075,7 @@ namespace
 
     selected.sitename = json["sitename"].get<std::string>();
     endpoint = selected;
+    TapeEndpointCache::Instance().Put(storageEndpoint, endpoint);
     return XRootDStatus();
   }
 
@@ -1211,13 +1376,6 @@ namespace
     return TapeLocality::Unknown;
   }
 
-  TapeOptions MakeOptions( int timeout )
-  {
-    TapeOptions options;
-    options.timeout = timeout;
-    return options;
-  }
-
   std::vector<TapeStageFile> MakeStageFiles(
     const std::vector<std::array<std::string, 4>> &entries )
   {
@@ -1282,12 +1440,12 @@ namespace
 namespace XrdClHttp
 {
   XrdCl::XRootDStatus TapeDiscover( const std::string &url,
-                                    int timeout,
+                                    const TapeOptions &options,
                                     std::string &uri,
                                     std::string &version,
                                     std::string &sitename )
   {
-    TapeClient client(MakeOptions(timeout));
+    TapeClient client(options);
     TapeEndpoint endpoint;
     XrdCl::XRootDStatus status = client.Discover(url, endpoint);
     if(status.IsOK())
@@ -1302,10 +1460,10 @@ namespace XrdClHttp
   XrdCl::XRootDStatus TapeStage(
     const std::string &url,
     const std::vector<std::array<std::string, 4>> &files,
-    int timeout,
+    const TapeOptions &options,
     std::string &requestId )
   {
-    TapeClient client(MakeOptions(timeout));
+    TapeClient client(options);
     TapeStageResponse response;
     XrdCl::XRootDStatus status =
       client.Stage(url, MakeStageFiles(files), response);
@@ -1315,10 +1473,10 @@ namespace XrdClHttp
 
   XrdCl::XRootDStatus TapeStageStatus( const std::string &url,
                                        const std::string &requestId,
-                                       int timeout,
+                                       const TapeOptions &options,
                                        std::string &responseJson )
   {
-    TapeClient client(MakeOptions(timeout));
+    TapeClient client(options);
     struct TapeStageStatus response;
     XrdCl::XRootDStatus status = client.StageStatus(url, requestId, response);
     responseJson = status.IsOK() ? StageStatusToJson(response).dump() : "{}";
@@ -1329,35 +1487,35 @@ namespace XrdClHttp
       const std::string &url,
       const std::string &requestId,
       const std::vector<std::string> &paths,
-      int timeout )
+      const TapeOptions &options )
   {
-    TapeClient client(MakeOptions(timeout));
+    TapeClient client(options);
     return client.StageCancel(url, requestId, paths);
   }
 
   XrdCl::XRootDStatus TapeStageDelete( const std::string &url,
                                        const std::string &requestId,
-                                       int timeout )
+                                       const TapeOptions &options )
   {
-    TapeClient client(MakeOptions(timeout));
+    TapeClient client(options);
     return client.StageDelete(url, requestId);
   }
 
   XrdCl::XRootDStatus TapeRelease( const std::string &url,
                                    const std::string &requestId,
                                    const std::vector<std::string> &paths,
-                                   int timeout )
+                                   const TapeOptions &options )
   {
-    TapeClient client(MakeOptions(timeout));
+    TapeClient client(options);
     return client.Release(url, requestId, paths);
   }
 
   XrdCl::XRootDStatus TapeArchiveInfo(
     const std::vector<std::string> &urls,
-    int timeout,
+    const TapeOptions &options,
     std::string &responseJson )
   {
-    TapeClient client(MakeOptions(timeout));
+    TapeClient client(options);
     std::vector<struct TapeArchiveInfo> response;
     XrdCl::XRootDStatus status = client.ArchiveInfo(urls, response);
 
@@ -1368,5 +1526,10 @@ namespace XrdClHttp
     }
     responseJson = json.dump();
     return status;
+  }
+
+  void TapeClearDiscoveryCache()
+  {
+    TapeEndpointCache::Instance().Clear();
   }
 }

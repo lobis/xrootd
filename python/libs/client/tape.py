@@ -36,6 +36,10 @@ def _to_text(value):
 class TapeClient(object):
   """Synchronous client for the WLCG Tape REST API.
 
+  ``root://`` and ``xroot://`` URLs are assumed to serve the Tape REST
+  discovery document over HTTPS on the default port (443); any xroot port
+  present in the URL is ignored.
+
   :param  timeout: Maximum HTTP operation time in seconds
                    (0 uses the XRootD default timeout)
   """

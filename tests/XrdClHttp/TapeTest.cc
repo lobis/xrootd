@@ -24,7 +24,9 @@
 
 #include "XrdClHttp/XrdClHttpTape.hh"
 #include "XrdClHttp/XrdClHttpFilesystem.hh"
+#include "XrdClHttp/XrdClHttpHeaderCallout.hh"
 #include "XrdCl/XrdClDefaultEnv.hh"
+#include "XrdCl/XrdClEnv.hh"
 #include "XrdOuc/XrdOucJson.hh"
 
 #include <gtest/gtest.h>
@@ -34,8 +36,10 @@
 #include <atomic>
 #include <cctype>
 #include <cerrno>
+#include <condition_variable>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -57,6 +61,7 @@ struct HttpRequest
   std::string method;
   std::string path;
   std::string body;
+  std::string headers;
 };
 
 class UniqueFd
@@ -109,6 +114,10 @@ class TapeHttpServer
     explicit TapeHttpServer(DiscoveryMode mode = DiscoveryMode::Valid)
       : pDiscoveryMode(mode)
     {
+      // Loopback ports may be reused across tests; make sure a cached
+      // discovery result from an earlier server does not leak in.
+      XrdClHttp::TapeClearDiscoveryCache();
+
       pListenFd.Reset(::socket(AF_INET, SOCK_STREAM, 0));
       if(!pListenFd) throw std::runtime_error("socket failed");
 
@@ -161,7 +170,12 @@ class TapeHttpServer
       return pRequests;
     }
 
-  private:
+    // Redirect POST /api/v1/stage to the given absolute URL with a 307.
+    void RedirectStageTo(const std::string &location)
+    {
+      pStageRedirectLocation = location;
+    }
+
     static std::string HeaderValue(const std::string &headers,
                                    const std::string &name)
     {
@@ -184,6 +198,7 @@ class TapeHttpServer
       return headers.substr(valueStart, valueEnd - valueStart);
     }
 
+  private:
     static HttpRequest ParseRequest(const std::string &raw)
     {
       HttpRequest request;
@@ -195,6 +210,7 @@ class TapeHttpServer
       const std::size_t bodyStart = raw.find("\r\n\r\n");
       if(bodyStart != std::string::npos)
       {
+        request.headers = raw.substr(lineEnd, bodyStart - lineEnd) + "\r\n";
         request.body = raw.substr(bodyStart + 4);
       }
       return request;
@@ -222,9 +238,11 @@ class TapeHttpServer
       return body.str();
     }
 
-    std::string ResponseBody(const HttpRequest &request, int &status) const
+    std::string ResponseBody(const HttpRequest &request, int &status,
+                             std::string &location) const
     {
       status = 200;
+      location.clear();
       if(request.method == "GET"
          && request.path == "/.well-known/wlcg-tape-rest-api")
       {
@@ -233,8 +251,20 @@ class TapeHttpServer
 
       if(request.method == "POST" && request.path == "/api/v1/stage")
       {
+        if(!pStageRedirectLocation.empty())
+        {
+          status = 307;
+          location = pStageRedirectLocation;
+          return "";
+        }
         status = 201;
         return R"({"requestId":"request-1"})";
+      }
+
+      if(request.method == "POST" && request.path == "/api/v1/stage-final")
+      {
+        status = 201;
+        return R"({"requestId":"request-redirected"})";
       }
 
       if(request.method == "GET"
@@ -273,16 +303,21 @@ class TapeHttpServer
       return R"({"title":"not found"})";
     }
 
-    static void SendResponse(int fd, int status, const std::string &body)
+    static void SendResponse(int fd, int status, const std::string &body,
+                             const std::string &location)
     {
       const char *reason = status == 201 ? "Created" :
+                           status == 307 ? "Temporary Redirect" :
                            status == 404 ? "Not Found" : "OK";
       std::ostringstream response;
       response << "HTTP/1.1 " << status << ' ' << reason << "\r\n"
                << "Content-Type: application/json\r\n"
-               << "Content-Length: " << body.size() << "\r\n"
-               << "Connection: close\r\n\r\n"
-               << body;
+               << "Content-Length: " << body.size() << "\r\n";
+      if(!location.empty())
+      {
+        response << "Location: " << location << "\r\n";
+      }
+      response << "Connection: close\r\n\r\n" << body;
       const std::string data = response.str();
       ::send(fd, data.data(), data.size(), 0);
     }
@@ -324,8 +359,9 @@ class TapeHttpServer
       }
 
       int status = 200;
-      const std::string body = ResponseBody(request, status);
-      SendResponse(fd, status, body);
+      std::string location;
+      const std::string body = ResponseBody(request, status, location);
+      SendResponse(fd, status, body, location);
     }
 
     void Serve()
@@ -352,12 +388,89 @@ class TapeHttpServer
     }
 
     DiscoveryMode pDiscoveryMode;
+    std::string pStageRedirectLocation;
     UniqueFd pListenFd;
     unsigned short pPort = 0;
     std::thread pThread;
     std::atomic<bool> pStopped{false};
     mutable std::mutex pMutex;
     std::vector<HttpRequest> pRequests;
+};
+
+// Response handler bridging the asynchronous Filesystem calls back to the
+// synchronous test flow.
+class WaitingHandler : public XrdCl::ResponseHandler
+{
+  public:
+    void HandleResponse(XrdCl::XRootDStatus *status,
+                        XrdCl::AnyObject *response) override
+    {
+      std::lock_guard<std::mutex> lock(pMutex);
+      pStatus.reset(status);
+      pResponse.reset(response);
+      pDone = true;
+      pCondition.notify_all();
+    }
+
+    XrdCl::XRootDStatus Wait()
+    {
+      std::unique_lock<std::mutex> lock(pMutex);
+      pCondition.wait(lock, [this] { return pDone; });
+      return *pStatus;
+    }
+
+    std::string Buffer()
+    {
+      std::lock_guard<std::mutex> lock(pMutex);
+      if(!pResponse) return "";
+      XrdCl::Buffer *buffer = nullptr;
+      pResponse->Get(buffer);
+      return buffer ? buffer->ToString() : "";
+    }
+
+  private:
+    std::mutex pMutex;
+    std::condition_variable pCondition;
+    bool pDone = false;
+    std::unique_ptr<XrdCl::XRootDStatus> pStatus;
+    std::unique_ptr<XrdCl::AnyObject> pResponse;
+};
+
+class TestHeaderCallout : public XrdClHttp::HeaderCallout
+{
+  public:
+    std::shared_ptr<HeaderList> GetHeaders(const std::string &verb,
+                                           const std::string &url,
+                                           const HeaderList &headers) override
+    {
+      (void)verb;
+      (void)url;
+      auto result = std::make_shared<HeaderList>(headers);
+      result->emplace_back("X-Tape-Test", "callout");
+      return result;
+    }
+};
+
+XrdClHttp::TapeOptions Opts(int timeout = 5)
+{
+  XrdClHttp::TapeOptions options;
+  options.timeout = timeout;
+  return options;
+}
+
+// Scoped bearer token injected through the XrdCl environment.
+class ScopedBearerToken
+{
+  public:
+    explicit ScopedBearerToken(const std::string &token)
+    {
+      XrdCl::DefaultEnv::GetEnv()->PutString("BearerToken", token);
+    }
+
+    ~ScopedBearerToken()
+    {
+      XrdCl::DefaultEnv::GetEnv()->PutString("BearerToken", "");
+    }
 };
 
 const HttpRequest *FindRequest(const std::vector<HttpRequest> &requests,
@@ -389,7 +502,7 @@ TEST(TapeRestApi, DiscoversSupportedEndpoint)
   std::string version;
   std::string sitename;
   const auto status = XrdClHttp::TapeDiscover(server.BaseUrl() + "/store/file",
-                                             5, uri, version, sitename);
+                                             Opts(), uri, version, sitename);
 
   ExpectOk(status);
   EXPECT_EQ(uri, server.BaseUrl() + "/api/v1");
@@ -409,21 +522,22 @@ TEST(TapeRestApi, RunsStageLifecycle)
 
   std::string requestId;
   ExpectOk(XrdClHttp::TapeStage(
-    url, {{{url, "", "3600", R"({"activity":"analysis"})"}}}, 5,
+    url, {{{url, "", "3600", R"({"activity":"analysis"})"}}}, Opts(),
     requestId));
   EXPECT_EQ(requestId, "request-1");
 
   std::string stageStatusJson;
-  ExpectOk(XrdClHttp::TapeStageStatus(url, requestId, 5, stageStatusJson));
+  ExpectOk(XrdClHttp::TapeStageStatus(url, requestId, Opts(),
+                                      stageStatusJson));
   const Json stageStatus = Json::parse(stageStatusJson);
   EXPECT_EQ(stageStatus["id"], "request-1");
   ASSERT_EQ(stageStatus["files"].size(), 1u);
   EXPECT_EQ(stageStatus["files"][0]["path"], "/store/file");
   EXPECT_EQ(stageStatus["files"][0]["onDisk"], true);
 
-  ExpectOk(XrdClHttp::TapeStageCancel(url, requestId, {url}, 5));
-  ExpectOk(XrdClHttp::TapeStageDelete(url, requestId, 5));
-  ExpectOk(XrdClHttp::TapeRelease(url, requestId, {url}, 5));
+  ExpectOk(XrdClHttp::TapeStageCancel(url, requestId, {url}, Opts()));
+  ExpectOk(XrdClHttp::TapeStageDelete(url, requestId, Opts()));
+  ExpectOk(XrdClHttp::TapeRelease(url, requestId, {url}, Opts()));
 
   const std::vector<HttpRequest> requests = server.Requests();
   const HttpRequest *stage = FindRequest(requests, "POST", "/api/v1/stage");
@@ -454,10 +568,13 @@ TEST(TapeRestApi, PrepareAcceptsStructuredStageEntries)
   XrdClHttp::Filesystem filesystem(
     server.BaseUrl(), nullptr, XrdCl::DefaultEnv::GetLog());
 
+  WaitingHandler handler;
   ExpectOk(filesystem.Prepare(
     {R"(xrdclhttp.tape.stage:{"path":"/store/file","diskLifetime":"7200",)"
      R"("targetedMetadata":{"activity":"analysis"}})"},
-    XrdCl::PrepareFlags::Stage, 0, nullptr, 5));
+    XrdCl::PrepareFlags::Stage, 0, &handler, 5));
+  ExpectOk(handler.Wait());
+  EXPECT_EQ(handler.Buffer(), "request-1");
 
   const std::vector<HttpRequest> requests = server.Requests();
   const HttpRequest *stage = FindRequest(requests, "POST", "/api/v1/stage");
@@ -497,7 +614,7 @@ TEST(TapeRestApi, QueriesArchiveInfo)
 
   ExpectOk(XrdClHttp::TapeArchiveInfo(
     {server.BaseUrl() + "/store/file",
-     server.BaseUrl() + "/store/missing"}, 5, responseJson));
+     server.BaseUrl() + "/store/missing"}, Opts(), responseJson));
 
   const Json response = Json::parse(responseJson);
   ASSERT_EQ(response.size(), 2u);
@@ -528,13 +645,13 @@ TEST(TapeRestApi, EncodesRequestIdsInUrls)
 
   std::string stageStatusJson;
   EXPECT_FALSE(XrdClHttp::TapeStageStatus(
-    url, requestId, 5, stageStatusJson).IsOK());
+    url, requestId, Opts(), stageStatusJson).IsOK());
   EXPECT_FALSE(XrdClHttp::TapeStageCancel(
-    url, requestId, {url}, 5).IsOK());
+    url, requestId, {url}, Opts()).IsOK());
   EXPECT_FALSE(XrdClHttp::TapeStageDelete(
-    url, requestId, 5).IsOK());
+    url, requestId, Opts()).IsOK());
   EXPECT_FALSE(XrdClHttp::TapeRelease(
-    url, requestId, {url}, 5).IsOK());
+    url, requestId, {url}, Opts()).IsOK());
 
   const std::vector<HttpRequest> requests = server.Requests();
   EXPECT_NE(FindRequest(requests, "GET",
@@ -555,7 +672,7 @@ TEST(TapeRestApi, RejectsUnsupportedDiscoveryEndpoint)
   std::string version;
   std::string sitename;
   const auto status = XrdClHttp::TapeDiscover(server.BaseUrl() + "/store/file",
-                                             5, uri, version, sitename);
+                                             Opts(), uri, version, sitename);
 
   EXPECT_FALSE(status.IsOK());
 }
@@ -568,7 +685,7 @@ TEST(TapeRestApi, RejectsDiscoveryEndpointWithUnsupportedScheme)
   std::string version;
   std::string sitename;
   const auto status = XrdClHttp::TapeDiscover(server.BaseUrl() + "/store/file",
-                                             5, uri, version, sitename);
+                                             Opts(), uri, version, sitename);
 
   EXPECT_FALSE(status.IsOK());
 }
@@ -580,7 +697,7 @@ TEST(TapeRestApi, RejectsArchiveInfoAcrossStorageEndpoints)
 
   const auto status = XrdClHttp::TapeArchiveInfo(
     {server.BaseUrl() + "/store/file",
-     "http://127.0.0.1:1/store/other"}, 5, responseJson);
+     "http://127.0.0.1:1/store/other"}, Opts(), responseJson);
 
   EXPECT_FALSE(status.IsOK());
   EXPECT_EQ(responseJson, "[]");
@@ -624,4 +741,110 @@ TEST(TapeRestApi, RejectsMalformedOpaqueTapePayloads)
   buffer.FromString("tape.stage_delete\nrequest-1\nextra");
   EXPECT_FALSE(filesystem.Query(
     XrdCl::QueryCode::Opaque, buffer, nullptr, 0).IsOK());
+}
+
+TEST(TapeRestApi, CachesDiscoveryPerEndpoint)
+{
+  TapeHttpServer server;
+  const std::string url = server.BaseUrl() + "/store/file";
+
+  std::string requestId;
+  ExpectOk(XrdClHttp::TapeStage(url, {{{url, "", "", ""}}}, Opts(),
+                                requestId));
+  std::string stageStatusJson;
+  ExpectOk(XrdClHttp::TapeStageStatus(url, requestId, Opts(),
+                                      stageStatusJson));
+
+  int discoveries = 0;
+  for(const auto &request : server.Requests())
+  {
+    if(request.path == "/.well-known/wlcg-tape-rest-api") ++discoveries;
+  }
+  EXPECT_EQ(discoveries, 1);
+}
+
+TEST(TapeRestApi, KeepsAuthorizationOnSameOriginRedirect)
+{
+  TapeHttpServer server;
+  server.RedirectStageTo(server.BaseUrl() + "/api/v1/stage-final");
+  const std::string url = server.BaseUrl() + "/store/file";
+  ScopedBearerToken token("test-token");
+
+  std::string requestId;
+  ExpectOk(XrdClHttp::TapeStage(url, {{{url, "", "", ""}}}, Opts(),
+                                requestId));
+  EXPECT_EQ(requestId, "request-redirected");
+
+  const std::vector<HttpRequest> requests = server.Requests();
+  const HttpRequest *redirected =
+    FindRequest(requests, "POST", "/api/v1/stage-final");
+  ASSERT_NE(redirected, nullptr);
+  EXPECT_EQ(TapeHttpServer::HeaderValue(redirected->headers, "authorization"),
+            "Bearer test-token");
+}
+
+TEST(TapeRestApi, DropsAuthorizationOnCrossOriginRedirect)
+{
+  TapeHttpServer target;
+  TapeHttpServer origin;
+  origin.RedirectStageTo(target.BaseUrl() + "/api/v1/stage-final");
+  const std::string url = origin.BaseUrl() + "/store/file";
+  ScopedBearerToken token("test-token");
+
+  std::string requestId;
+  ExpectOk(XrdClHttp::TapeStage(url, {{{url, "", "", ""}}}, Opts(),
+                                requestId));
+  EXPECT_EQ(requestId, "request-redirected");
+
+  const std::vector<HttpRequest> originRequests = origin.Requests();
+  const HttpRequest *stage =
+    FindRequest(originRequests, "POST", "/api/v1/stage");
+  ASSERT_NE(stage, nullptr);
+  EXPECT_EQ(TapeHttpServer::HeaderValue(stage->headers, "authorization"),
+            "Bearer test-token");
+
+  const std::vector<HttpRequest> targetRequests = target.Requests();
+  const HttpRequest *redirected =
+    FindRequest(targetRequests, "POST", "/api/v1/stage-final");
+  ASSERT_NE(redirected, nullptr);
+  EXPECT_EQ(TapeHttpServer::HeaderValue(redirected->headers, "authorization"),
+            "");
+}
+
+TEST(TapeRestApi, AppliesHeaderCallout)
+{
+  TapeHttpServer server;
+  TestHeaderCallout callout;
+  XrdClHttp::TapeOptions options = Opts();
+  options.headerCallout = &callout;
+
+  std::string uri;
+  std::string version;
+  std::string sitename;
+  ExpectOk(XrdClHttp::TapeDiscover(server.BaseUrl() + "/store/file",
+                                   options, uri, version, sitename));
+
+  const std::vector<HttpRequest> requests = server.Requests();
+  const HttpRequest *discovery =
+    FindRequest(requests, "GET", "/.well-known/wlcg-tape-rest-api");
+  ASSERT_NE(discovery, nullptr);
+  EXPECT_EQ(TapeHttpServer::HeaderValue(discovery->headers, "x-tape-test"),
+            "callout");
+}
+
+TEST(TapeRestApi, FilesystemDeliversDiscoveryAsynchronously)
+{
+  TapeHttpServer server;
+  XrdClHttp::Filesystem filesystem(
+    server.BaseUrl(), nullptr, XrdCl::DefaultEnv::GetLog());
+
+  XrdCl::Buffer buffer;
+  buffer.FromString("tape.discover");
+  WaitingHandler handler;
+  ExpectOk(filesystem.Query(XrdCl::QueryCode::Opaque, buffer, &handler, 5));
+  ExpectOk(handler.Wait());
+
+  const Json response = Json::parse(handler.Buffer());
+  EXPECT_EQ(response["uri"], server.BaseUrl() + "/api/v1");
+  EXPECT_EQ(response["sitename"], "test-site");
 }
