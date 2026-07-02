@@ -230,8 +230,12 @@ class TapeStageStatus(Struct):
     parsed = urlparse(path)
     if parsed.scheme and parsed.netloc:
       path = parsed.path or '/'
-    if path.startswith('//'):
-      path = path[1:]
+    # Match the normalization applied by the XrdClHttp Tape REST helpers:
+    # collapse duplicate slashes and force a leading slash.
+    while '//' in path:
+      path = path.replace('//', '/')
+    if not path.startswith('/'):
+      path = '/' + path
     return path
 
   def file_status(self, path):

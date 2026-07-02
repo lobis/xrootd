@@ -26,20 +26,31 @@ def _reject_line_breaks(value, name):
     raise ValueError('%s must not contain line breaks' % name)
 
 
+def _to_text(value):
+  # The pyxrootd bindings return buffer responses as bytes.
+  if isinstance(value, bytes):
+    return value.decode('utf-8')
+  return value
+
+
 class TapeClient(object):
   """Synchronous client for the WLCG Tape REST API.
 
   :param  timeout: Maximum HTTP operation time in seconds
+                   (0 uses the XRootD default timeout)
   """
 
-  def __init__(self, timeout=-1):
+  def __init__(self, timeout=0):
     self.timeout = timeout
 
   def _filesystem_url(self, url):
     parsed = urlparse(url)
     scheme = parsed.scheme.lower()
     if scheme in ('root', 'xroot'):
-      return 'https://%s' % parsed.hostname
+      host = parsed.hostname or ''
+      if ':' in host:
+        host = '[%s]' % host
+      return 'https://%s' % host
     if scheme == 'davs':
       scheme = 'https'
     elif scheme == 'dav':
@@ -127,6 +138,7 @@ class TapeClient(object):
     """
     status, endpoint = self._filesystem(url).query(
       QueryCode.OPAQUE, 'tape.discover', self.timeout)
+    endpoint = _to_text(endpoint)
     if endpoint:
       endpoint = json.loads(endpoint)
     if endpoint:
@@ -158,6 +170,7 @@ class TapeClient(object):
       self._normalize_stage_files(files, disk_lifetime, targeted_metadata),
       PrepareFlags.STAGE,
       timeout=self.timeout)
+    response = _to_text(response)
     if response:
       response = TapeStageResponse({'requestId': response})
     return XRootDStatus(status), response
@@ -167,6 +180,7 @@ class TapeClient(object):
     _reject_line_breaks(request_id, 'request_id')
     status, response = self._filesystem(url).query(
       QueryCode.PREPARE, request_id, self.timeout)
+    response = _to_text(response)
     if response:
       response = TapeStageStatus(json.loads(response))
     return XRootDStatus(status), response
@@ -208,6 +222,7 @@ class TapeClient(object):
     status, results = self._filesystem(urls[0]).query(
       QueryCode.OPAQUE, 'tape.archiveinfo\n%s' % '\n'.join(urls),
       self.timeout)
+    results = _to_text(results)
     if results:
       results = json.loads(results)
     else:

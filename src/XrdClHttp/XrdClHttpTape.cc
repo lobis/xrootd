@@ -441,6 +441,7 @@ HttpResponse HttpRequest(const std::string &method, const std::string &url,
   curl_easy_setopt(curl.get(), CURLOPT_WRITEDATA, &response.body);
   curl_easy_setopt(curl.get(), CURLOPT_HTTPHEADER, headers.get());
   curl_easy_setopt(curl.get(), CURLOPT_FOLLOWLOCATION, 1L);
+  curl_easy_setopt(curl.get(), CURLOPT_MAXREDIRS, 8L);
   curl_easy_setopt(curl.get(), CURLOPT_NOSIGNAL, 1L);
 #if CURL_AT_LEAST_VERSION(7, 85, 0)
   curl_easy_setopt(curl.get(), CURLOPT_PROTOCOLS_STR, "https,http");

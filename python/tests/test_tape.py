@@ -31,33 +31,37 @@ class FakeFileSystem(object):
 
   def query(self, query_code, arg, timeout=0):
     self.calls.append(('query', query_code, arg, timeout))
+    # The pyxrootd bindings return buffer responses as bytes.
     if query_code == QueryCode.OPAQUE and arg == 'tape.discover':
       return _status(), json.dumps({
         'uri': 'https://tape.example.org/api/v1',
         'version': 'v1',
         'sitename': 'example',
-      })
+      }).encode('utf-8')
     if query_code == QueryCode.PREPARE:
       return _status(), json.dumps({
         'id': arg,
         'createdAt': 1,
         'startedAt': 2,
         'files': [{'path': '/store/file', 'onDisk': True}],
-      })
+      }).encode('utf-8')
     if query_code == QueryCode.OPAQUE and arg.startswith('tape.archiveinfo\n'):
       return _status(), json.dumps([
         {'path': '/store/file', 'locality': 'DISK_AND_TAPE'},
         {'path': '/store/missing', 'error': 'not found'},
-      ])
+      ]).encode('utf-8')
     if query_code == QueryCode.OPAQUE and arg.startswith('tape.stage_delete\n'):
-      return _status(), ''
-    return _status(False), ''
+      return _status(), b''
+    return _status(False), b''
 
   def prepare(self, files, flags, priority=0, timeout=0):
     self.calls.append(('prepare', files, flags, priority, timeout))
+    for item in files:
+      # The pyxrootd bindings only accept str entries in the file list.
+      assert isinstance(item, str)
     if flags == PrepareFlags.STAGE:
-      return _status(), 'request-1'
-    return _status(), ''
+      return _status(), b'request-1'
+    return _status(), b''
 
 
 @pytest.fixture(autouse=True)
@@ -85,6 +89,12 @@ def test_stage_requires_files_when_url_is_string():
     client.stage('root://xrootd.example.org/store/file')
 
 
+def test_default_timeout_uses_xrootd_default():
+  # timeout=0 lets XRootD apply its default; negative values do not survive
+  # the pyxrootd bindings, which parse timeouts as unsigned integers.
+  assert tape.TapeClient().timeout == 0
+
+
 def test_stage_uses_prepare_and_returns_request_id():
   client = tape.TapeClient(timeout=7)
   status, response = client.stage(
@@ -97,6 +107,21 @@ def test_stage_uses_prepare_and_returns_request_id():
   assert FakeFileSystem.instances[0].calls == [
     ('prepare', ['/store/file'], PrepareFlags.STAGE, 0, 7),
   ]
+
+
+def test_stage_request_id_round_trips_through_stage_status():
+  client = tape.TapeClient(timeout=7)
+  status, response = client.stage(
+    'root://xrootd.example.org/store/file',
+    [{'path': '/store/file'}])
+  assert status.ok
+
+  # The request id decoded from the bytes response must be usable with the
+  # other TapeClient methods, which require text arguments.
+  status, stage_status = client.stage_status(
+    'root://xrootd.example.org/store/file', response.request_id)
+  assert status.ok
+  assert stage_status.id == 'request-1'
 
 
 def test_stage_derives_endpoint_from_file_urls():
@@ -221,6 +246,8 @@ def test_stage_status_uses_prepare_query():
   assert response.file_status('/store/file') is response.files[0]
   assert response.file_status('root://xrootd.example.org//store/file') \
     is response.files[0]
+  assert response.file_status('/store//file') is response.files[0]
+  assert response.file_status('store/file') is response.files[0]
   assert response.is_on_disk('/store/file')
   assert not response.is_on_disk('/store/missing')
   assert FakeFileSystem.instances[0].calls == [
