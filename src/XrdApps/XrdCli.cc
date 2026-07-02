@@ -27,6 +27,7 @@
 #include "XrdCl/XrdClCheckSumManager.hh"
 #include "XrdCl/XrdClCopy.hh"
 #include "XrdCl/XrdClDefaultEnv.hh"
+#include "XrdCl/XrdClFile.hh"
 #include "XrdCl/XrdClFileSystem.hh"
 #include "XrdOuc/XrdOucJson.hh"
 #include "XrdCl/XrdClURL.hh"
@@ -38,6 +39,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cmath>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -91,6 +93,11 @@ struct SumOptions
   std::string path;
   std::string checkSumType;
   int timeout = -1;
+};
+
+struct CatOptions
+{
+  std::vector<std::string> paths;
 };
 
 struct ArchivePollOptions
@@ -964,6 +971,123 @@ int RunLs(const LsOptions &options)
   return RunLocalLs(options.path, options.path, options);
 }
 
+int WriteToStdout(const char *data, std::size_t size)
+{
+  if(std::fwrite(data, 1, size, stdout) != size)
+  {
+    const int err = errno ? errno : EIO;
+    if(err != EPIPE)
+    {
+      std::cerr << "xrd cat error: " << err << " (" << std::strerror(err)
+                << ") - unable to write to standard output\n";
+    }
+    return err;
+  }
+  return 0;
+}
+
+int CatLocal(const std::string &localPath)
+{
+  std::FILE *file = std::fopen(localPath.c_str(), "rb");
+  if(!file)
+  {
+    const int err = errno;
+    std::cerr << "xrd cat error: " << err << " (" << std::strerror(err)
+              << ") - errno reported by local system call "
+              << std::strerror(err) << '\n';
+    return err;
+  }
+
+  char buffer[1 << 20];
+  int result = 0;
+  while(result == 0)
+  {
+    const std::size_t bytesRead = std::fread(buffer, 1, sizeof(buffer), file);
+    if(bytesRead > 0) result = WriteToStdout(buffer, bytesRead);
+    if(bytesRead < sizeof(buffer))
+    {
+      if(result == 0 && std::ferror(file))
+      {
+        result = errno ? errno : EIO;
+        std::cerr << "xrd cat error: " << result << " ("
+                  << std::strerror(result)
+                  << ") - errno reported by local system call "
+                  << std::strerror(result) << '\n';
+      }
+      break;
+    }
+  }
+
+  std::fclose(file);
+  return result;
+}
+
+int CatRemote(const std::string &path)
+{
+  XrdCl::File file;
+  XrdCl::XRootDStatus status = file.Open(path, XrdCl::OpenFlags::Read);
+  if(!status.IsOK())
+  {
+    std::cerr << "xrd cat: unable to open '" << path
+              << "': " << status.ToStr() << '\n';
+    return status.GetShellCode();
+  }
+
+  std::vector<char> buffer(1 << 20);
+  uint64_t offset = 0;
+  int result = 0;
+  while(result == 0)
+  {
+    uint32_t bytesRead = 0;
+    status = file.Read(offset, buffer.size(), buffer.data(), bytesRead);
+    if(!status.IsOK())
+    {
+      std::cerr << "xrd cat: unable to read '" << path
+                << "': " << status.ToStr() << '\n';
+      result = status.GetShellCode();
+      break;
+    }
+    if(bytesRead == 0) break;
+    result = WriteToStdout(buffer.data(), bytesRead);
+    offset += bytesRead;
+  }
+
+  file.Close();
+  return result;
+}
+
+int RunCat(const CatOptions &options)
+{
+#ifndef _WIN32
+  // Match standard cat semantics for consumers that stop reading early:
+  // detect EPIPE on write instead of dying on the signal.
+  std::signal(SIGPIPE, SIG_IGN);
+#endif
+
+  for(const auto &path : options.paths)
+  {
+    int result = 0;
+    if(HasScheme(path))
+    {
+      XrdCl::URL url(path);
+      if(!url.IsValid())
+      {
+        std::cerr << "xrd cat: invalid URL '" << path << "'\n";
+        return 64;
+      }
+      result = url.IsLocalFile() ? CatLocal(url.GetPath()) : CatRemote(path);
+    }
+    else
+    {
+      result = CatLocal(path);
+    }
+    if(result != 0) return result;
+  }
+
+  std::fflush(stdout);
+  return 0;
+}
+
 // Options accepted by every xrd subcommand, mirroring the gfal2-util common
 // flag set. gfal2/GridFTP-specific flags are accepted for compatibility and
 // otherwise ignored.
@@ -1250,6 +1374,9 @@ int main(int argc, char **argv)
   app.add_flag("--version", showVersion, "Show version information and exit");
 
   int exitCode = 0;
+  CommonOptions catCommon;
+  CatOptions catOptions;
+  bool catBytes = false;
   CommonOptions lsCommon;
   LsOptions lsOptions;
   bool lsFullTime = false;
@@ -1290,6 +1417,24 @@ int main(int argc, char **argv)
         if(exitCode != 0) return;
 
         exitCode = RunArchivePoll(options);
+      });
+    }
+    else if(command.name == "cat")
+    {
+      subcommand->add_option("file", catOptions.paths,
+        "URLs of the files to print");
+      AddCommonOptions(subcommand, catCommon);
+      subcommand->add_flag("-b,--bytes", catBytes,
+        "Handle file contents as bytes (compatibility flag)");
+      subcommand->callback([&] {
+        if(!BeginCommand("cat", catCommon, exitCode)) return;
+        if(catOptions.paths.empty())
+        {
+          std::cerr << "xrd cat: expected at least one file URL\n";
+          exitCode = 64;
+          return;
+        }
+        exitCode = RunCat(catOptions);
       });
     }
     else if(command.name == "ls")

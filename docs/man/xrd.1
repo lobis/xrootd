@@ -127,6 +127,14 @@ Keep polling until all files reach a terminal state or the timeout expires.
 .TP
 .B \-\-from-file \fIFILE\fR
 Read site URLs from a file, one per line.
+.SH CAT OPTIONS
+.TP
+.B file
+URLs of the files to print, concatenated in order.
+.TP
+.B \-b, \-\-bytes
+Handle file contents as bytes. Accepted for gfal2-util compatibility; xrd
+always streams raw bytes.
 .SH LS OPTIONS
 .TP
 .B file
