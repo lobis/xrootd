@@ -82,74 +82,84 @@ copy implementation and accepts the same options. Run
 .B xrd copy --help
 for the complete option list, or see
 .BR xrdcp (1).
+.SH COMMON OPTIONS
+Every subcommand accepts the following options:
+.TP
+.B \-h, \-\-help
+Show help information and exit.
+.TP
+.B \-V, \-\-version
+Output version information and exit.
+.TP
+.B \-v, \-\-verbose
+Enable verbose XRootD client logging. Repeating the option increases verbosity.
+.TP
+.B \-D, \-\-definition \fIDEFINITION\fR
+Accept a GFAL parameter override for command-line compatibility.
+.TP
+.B \-t, \-\-timeout \fITIMEOUT\fR
+Set the XRootD client request timeout in seconds.
+.TP
+.B \-E, \-\-cert \fICERT\fR
+Accept a user certificate path for GFAL command-line compatibility.
+.TP
+.B \-\-key \fIKEY\fR
+Accept a user private key path for GFAL command-line compatibility.
+.TP
+.B \-4
+Accept the GFAL IPv4-only flag for command-line compatibility.
+.TP
+.B \-6
+Accept the GFAL IPv6-only flag for command-line compatibility.
+.TP
+.B \-C, \-\-client-info \fIINFO\fR
+Accept custom client information for GFAL command-line compatibility.
+.TP
+.B \-\-log-file \fILOG_FILE\fR
+Write XRootD client logs to the given file.
+.SH ARCHIVEPOLL OPTIONS
+.TP
+.B surl
+Site URL to query for archival status.
+.TP
+.B \-\-polling-timeout \fISECONDS\fR
+Keep polling until all files reach a terminal state or the timeout expires.
+.TP
+.B \-\-from-file \fIFILE\fR
+Read site URLs from a file, one per line.
+.SH LS OPTIONS
+.TP
+.B file
+URL of the file or directory to list.
+.TP
+.B \-a, \-\-all
+Display hidden files.
+.TP
+.B \-l, \-\-long
+Use a long listing format.
+.TP
+.B \-d, \-\-directory
+List directory entries instead of contents.
+.TP
+.B \-H, \-\-human-readable
+With \-l, print sizes in human readable format (e.g., 1K 234M 2G).
+.TP
+.B \-\-xattr \fIATTR\fR
+Query additional attributes. Accepted for compatibility, not implemented yet.
+.TP
+.B \-\-time-style \fISTYLE\fR
+Time style: full-iso, long-iso, iso, or locale (the default).
+.TP
+.B \-\-full-time
+Print timestamps in the long-iso format, matching gfal2-util behavior.
+.TP
+.B \-\-color \fIWHEN\fR
+Accepted for compatibility; colored output is not implemented yet.
 .SH STAT OPTIONS
 .TP
-.B \-h, \-\-help
-Show help information and exit.
-.TP
-.B \-V, \-\-version
-Output version information and exit.
-.TP
-.B \-v, \-\-verbose
-Enable verbose XRootD client logging. Repeating the option increases verbosity.
-.TP
-.B \-D, \-\-definition \fIDEFINITION\fR
-Accept a GFAL parameter override for command-line compatibility.
-.TP
-.B \-t, \-\-timeout \fITIMEOUT\fR
-Set the XRootD client request timeout in seconds.
-.TP
-.B \-E, \-\-cert \fICERT\fR
-Accept a user certificate path for GFAL command-line compatibility.
-.TP
-.B \-\-key \fIKEY\fR
-Accept a user private key path for GFAL command-line compatibility.
-.TP
-.B \-4
-Accept the GFAL IPv4-only flag for command-line compatibility.
-.TP
-.B \-6
-Accept the GFAL IPv6-only flag for command-line compatibility.
-.TP
-.B \-C, \-\-client-info \fIINFO\fR
-Accept custom client information for GFAL command-line compatibility.
-.TP
-.B \-\-log-file \fILOG_FILE\fR
-Write XRootD client logs to the given file.
+.B file
+URL of the file or directory to stat.
 .SH SUM OPTIONS
-.TP
-.B \-h, \-\-help
-Show help information and exit.
-.TP
-.B \-V, \-\-version
-Output version information and exit.
-.TP
-.B \-v, \-\-verbose
-Enable verbose XRootD client logging. Repeating the option increases verbosity.
-.TP
-.B \-D, \-\-definition \fIDEFINITION\fR
-Accept a GFAL parameter override for command-line compatibility.
-.TP
-.B \-t, \-\-timeout \fITIMEOUT\fR
-Set the XRootD client request timeout in seconds.
-.TP
-.B \-E, \-\-cert \fICERT\fR
-Accept a user certificate path for GFAL command-line compatibility.
-.TP
-.B \-\-key \fIKEY\fR
-Accept a user private key path for GFAL command-line compatibility.
-.TP
-.B \-4
-Accept the GFAL IPv4-only flag for command-line compatibility.
-.TP
-.B \-6
-Accept the GFAL IPv6-only flag for command-line compatibility.
-.TP
-.B \-C, \-\-client-info \fIINFO\fR
-Accept custom client information for GFAL command-line compatibility.
-.TP
-.B \-\-log-file \fILOG_FILE\fR
-Write XRootD client logs to the given file.
 .TP
 .B file
 File URL to use for checksum calculation.
@@ -161,6 +171,14 @@ Checksum algorithm to use, for example
 or
 .B md5 .
 .SH OUTPUT
+The
+.B xrd ls
+output is formatted to match
+.B gfal-ls :
+entry names by default, and with
+.B \-l
+one entry per line as mode, link count, owner, group, size, date, and name.
+.P
 The
 .B xrd stat
 output is formatted to match

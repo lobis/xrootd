@@ -1,6 +1,8 @@
 if(TARGET xrd)
-  add_test(NAME XrdApps::xrd::stat
-    COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/xrd-stat.sh")
-  set_tests_properties(XrdApps::xrd::stat PROPERTIES
-    ENVIRONMENT "XRD=$<TARGET_FILE:xrd>")
+  foreach(test stat ls)
+    add_test(NAME XrdApps::xrd::${test}
+      COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/xrd-${test}.sh")
+    set_tests_properties(XrdApps::xrd::${test} PROPERTIES
+      ENVIRONMENT "XRD=$<TARGET_FILE:xrd>")
+  endforeach()
 endif()

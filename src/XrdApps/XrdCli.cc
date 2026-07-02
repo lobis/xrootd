@@ -37,10 +37,12 @@
 #include <cctype>
 #include <cerrno>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <dirent.h>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -72,6 +74,16 @@ struct StatOptions
 {
   std::string path;
   int timeout = -1;
+};
+
+struct LsOptions
+{
+  std::string path;
+  bool all = false;
+  bool longFormat = false;
+  bool directory = false;
+  bool humanReadable = false;
+  std::string timeStyle = "locale";
 };
 
 struct SumOptions
@@ -682,6 +694,276 @@ void ApplyClientOptions(int timeout, const std::string &cert,
   }
 }
 
+std::string RightJustify(const std::string &value, std::size_t width)
+{
+  if(value.size() >= width) return value;
+  return std::string(width - value.size(), ' ') + value;
+}
+
+std::string LeftJustify(const std::string &value, std::size_t width)
+{
+  if(value.size() >= width) return value;
+  return value + std::string(width - value.size(), ' ');
+}
+
+// gfal2-util prints sizes GNU-ls style: one decimal below 10, rounded up.
+std::string HumanSize(uint64_t size)
+{
+  static const char *symbols[] = {"", "K", "M", "G", "T", "P"};
+  int degree = 0;
+  double value = static_cast<double>(size);
+  while(value >= 1024.0 && degree < 5)
+  {
+    value /= 1024.0;
+    ++degree;
+  }
+
+  char buffer[32];
+  if(value < 10.0)
+  {
+    std::snprintf(buffer, sizeof(buffer), "%.1f%s",
+                  std::ceil(value * 10.0) / 10.0, symbols[degree]);
+  }
+  else
+  {
+    std::snprintf(buffer, sizeof(buffer), "%.0f%s",
+                  std::ceil(value), symbols[degree]);
+  }
+  return buffer;
+}
+
+// Timestamp formats offered by gfal2-util's --time-style option. All styles
+// use local time; full-iso appends "+0000" regardless of the timezone, which
+// matches the gfal2-util output captured on lxplus.
+std::string LsFormatTime(std::time_t seconds, const std::string &style)
+{
+  std::tm tm;
+  ::localtime_r(&seconds, &tm);
+  const bool recent =
+    std::time(nullptr) - seconds < 180ll * 24 * 60 * 60;
+
+  char buffer[64];
+  if(style == "full-iso")
+  {
+    std::strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", &tm);
+    return std::string(buffer) + ".000000 +0000";
+  }
+  if(style == "long-iso")
+  {
+    std::strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M", &tm);
+    return buffer;
+  }
+  if(style == "iso")
+  {
+    std::strftime(buffer, sizeof(buffer),
+                  recent ? "%m-%d %H:%M" : "%Y-%m-%d", &tm);
+    return buffer;
+  }
+  std::strftime(buffer, sizeof(buffer),
+                recent ? "%b %e %H:%M" : "%b %e  %Y", &tm);
+  return buffer;
+}
+
+struct LsEntry
+{
+  std::string name;
+  std::string mode;
+  uint64_t nlink = 1;
+  std::string uid = "0";
+  std::string gid = "0";
+  uint64_t size = 0;
+  std::time_t mtime = 0;
+};
+
+// Long listing format used by gfal2-util:
+// mode nlink uid gid size date name, with a trailing tab.
+void PrintLsEntry(const LsEntry &entry, const LsOptions &options)
+{
+  if(!options.longFormat)
+  {
+    std::cout << entry.name << '\n';
+    return;
+  }
+
+  const std::string sizeField = options.humanReadable
+    ? RightJustify(HumanSize(entry.size), 5)
+    : RightJustify(std::to_string(entry.size), 8);
+  const std::string date = LsFormatTime(entry.mtime, options.timeStyle);
+
+  std::cout << entry.mode << ' '
+            << RightJustify(std::to_string(entry.nlink), 3) << ' '
+            << RightJustify(entry.uid, 5) << ' '
+            << RightJustify(entry.gid, 5) << ' '
+            << sizeField << ' '
+            << LeftJustify(date, 11) << ' '
+            << entry.name << "\t\n";
+}
+
+bool LsEntryVisible(const std::string &name, const LsOptions &options)
+{
+  if(name.empty() || name == "." || name == "..") return false;
+  return options.all || name.front() != '.';
+}
+
+LsEntry LsEntryFromStat(const std::string &name, const struct stat &statBuffer)
+{
+  LsEntry entry;
+  entry.name = name;
+  entry.mode = ModeString(statBuffer.st_mode);
+  entry.nlink = statBuffer.st_nlink;
+  entry.uid = std::to_string(statBuffer.st_uid);
+  entry.gid = std::to_string(statBuffer.st_gid);
+  entry.size = static_cast<uint64_t>(statBuffer.st_size);
+  entry.mtime = statBuffer.st_mtime;
+  return entry;
+}
+
+LsEntry LsEntryFromStatInfo(const std::string &name,
+                            const XrdCl::StatInfo &info)
+{
+  LsEntry entry;
+  entry.name = name;
+  entry.mode = ModeString(info);
+  if(info.ExtendedFormat())
+  {
+    if(!info.GetOwner().empty()) entry.uid = info.GetOwner();
+    if(!info.GetGroup().empty()) entry.gid = info.GetGroup();
+  }
+  entry.size = info.GetSize();
+  entry.mtime = static_cast<std::time_t>(info.GetModTime());
+  return entry;
+}
+
+int RunLocalLs(const std::string &originalPath, const std::string &localPath,
+               const LsOptions &options)
+{
+  struct stat statBuffer;
+  if(::stat(localPath.c_str(), &statBuffer) != 0)
+  {
+    const int err = errno;
+    std::cerr << "xrd ls error: " << err << " (" << std::strerror(err)
+              << ") - errno reported by local system call "
+              << std::strerror(err) << '\n';
+    return err;
+  }
+
+  if(!S_ISDIR(statBuffer.st_mode) || options.directory)
+  {
+    PrintLsEntry(LsEntryFromStat(originalPath, statBuffer), options);
+    return 0;
+  }
+
+  DIR *dir = ::opendir(localPath.c_str());
+  if(!dir)
+  {
+    const int err = errno;
+    std::cerr << "xrd ls error: " << err << " (" << std::strerror(err)
+              << ") - errno reported by local system call "
+              << std::strerror(err) << '\n';
+    return err;
+  }
+
+  std::vector<std::string> names;
+  while(struct dirent *item = ::readdir(dir))
+  {
+    const std::string name = item->d_name;
+    if(LsEntryVisible(name, options)) names.push_back(name);
+  }
+  ::closedir(dir);
+  std::sort(names.begin(), names.end());
+
+  for(const auto &name : names)
+  {
+    LsEntry entry;
+    entry.name = name;
+    struct stat entryBuffer;
+    if(::stat((localPath + "/" + name).c_str(), &entryBuffer) == 0)
+    {
+      entry = LsEntryFromStat(name, entryBuffer);
+    }
+    PrintLsEntry(entry, options);
+  }
+  return 0;
+}
+
+int RunRemoteLs(const std::string &path, const LsOptions &options)
+{
+  XrdCl::URL url(path);
+  if(!url.IsValid())
+  {
+    std::cerr << "xrd ls: invalid URL '" << path << "'\n";
+    return 64;
+  }
+
+  if(url.IsLocalFile())
+  {
+    return RunLocalLs(path, url.GetPath(), options);
+  }
+
+  XrdCl::FileSystem fs(FileSystemURL(url));
+  XrdCl::StatInfo *rawInfo = nullptr;
+  XrdCl::XRootDStatus status = fs.Stat(url.GetPathWithParams(), rawInfo);
+  std::unique_ptr<XrdCl::StatInfo> info(rawInfo);
+
+  if(!status.IsOK())
+  {
+    std::cerr << "xrd ls: unable to list '" << path
+              << "': " << status.ToStr() << '\n';
+    return status.GetShellCode();
+  }
+
+  if(!info->TestFlags(XrdCl::StatInfo::IsDir) || options.directory)
+  {
+    PrintLsEntry(LsEntryFromStatInfo(path, *info), options);
+    return 0;
+  }
+
+  XrdCl::DirectoryList *rawList = nullptr;
+  status = fs.DirList(url.GetPathWithParams(), XrdCl::DirListFlags::Stat,
+                      rawList);
+  std::unique_ptr<XrdCl::DirectoryList> list(rawList);
+
+  if(!status.IsOK())
+  {
+    std::cerr << "xrd ls: unable to list '" << path
+              << "': " << status.ToStr() << '\n';
+    return status.GetShellCode();
+  }
+
+  std::vector<LsEntry> entries;
+  entries.reserve(list->GetSize());
+  for(auto it = list->Begin(); it != list->End(); ++it)
+  {
+    const XrdCl::DirectoryList::ListEntry *item = *it;
+    if(!item || !LsEntryVisible(item->GetName(), options)) continue;
+
+    if(const XrdCl::StatInfo *entryInfo = item->GetStatInfo())
+    {
+      entries.push_back(LsEntryFromStatInfo(item->GetName(), *entryInfo));
+    }
+    else
+    {
+      LsEntry entry;
+      entry.name = item->GetName();
+      entries.push_back(entry);
+    }
+  }
+
+  std::sort(entries.begin(), entries.end(),
+    [](const LsEntry &a, const LsEntry &b) { return a.name < b.name; });
+  for(const auto &entry : entries)
+  {
+    PrintLsEntry(entry, options);
+  }
+  return 0;
+}
+
+int RunLs(const LsOptions &options)
+{
+  if(HasScheme(options.path)) return RunRemoteLs(options.path, options);
+  return RunLocalLs(options.path, options.path, options);
+}
+
 // Options accepted by every xrd subcommand, mirroring the gfal2-util common
 // flag set. gfal2/GridFTP-specific flags are accepted for compatibility and
 // otherwise ignored.
@@ -968,6 +1250,11 @@ int main(int argc, char **argv)
   app.add_flag("--version", showVersion, "Show version information and exit");
 
   int exitCode = 0;
+  CommonOptions lsCommon;
+  LsOptions lsOptions;
+  bool lsFullTime = false;
+  std::vector<std::string> lsXAttrs;
+  std::string lsColor = "auto";
   CommonOptions statCommon;
   std::string statPath;
   CommonOptions sumCommon;
@@ -1003,6 +1290,47 @@ int main(int argc, char **argv)
         if(exitCode != 0) return;
 
         exitCode = RunArchivePoll(options);
+      });
+    }
+    else if(command.name == "ls")
+    {
+      subcommand->add_option("file", lsOptions.path,
+        "URL of the file or directory to list");
+      AddCommonOptions(subcommand, lsCommon);
+      subcommand->add_flag("-a,--all", lsOptions.all,
+        "Display hidden files");
+      subcommand->add_flag("-l,--long", lsOptions.longFormat,
+        "Use a long listing format");
+      subcommand->add_flag("-d,--directory", lsOptions.directory,
+        "List directory entries instead of contents");
+      subcommand->add_flag("-H,--human-readable", lsOptions.humanReadable,
+        "With -l, print sizes in human readable format");
+      subcommand->add_option("--xattr", lsXAttrs,
+        "Query additional attributes (accepted, not implemented yet)");
+      subcommand->add_option("--time-style", lsOptions.timeStyle,
+        "Time style")
+        ->check(CLI::IsMember({"full-iso", "long-iso", "iso", "locale"}));
+      subcommand->add_flag("--full-time", lsFullTime,
+        "Same as --time-style=full-iso");
+      subcommand->add_option("--color", lsColor,
+        "Print colored entries with -l (accepted, not implemented yet)")
+        ->check(CLI::IsMember({"always", "never", "auto"}));
+      subcommand->callback([&] {
+        if(!BeginCommand("ls", lsCommon, exitCode)) return;
+        if(lsOptions.path.empty())
+        {
+          std::cerr << "xrd ls: expected one file URL\n";
+          exitCode = 64;
+          return;
+        }
+        if(!lsXAttrs.empty())
+        {
+          std::cerr << "xrd ls: --xattr is not implemented yet, "
+                    << "the attributes are ignored\n";
+        }
+        // gfal2-util's --full-time output uses the long-iso format.
+        if(lsFullTime) lsOptions.timeStyle = "long-iso";
+        exitCode = RunLs(lsOptions);
       });
     }
     else if(command.name == "stat")
