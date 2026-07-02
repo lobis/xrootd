@@ -1,10 +1,34 @@
-/******************************************************************************//*                                                                            *//*                         X r d C l i . c c                                  *//*                                                                            *//* (c) 2026 by the XRootD Collaboration                                       *//*                                                                            *//* This file is part of the XRootD software suite.                            *//*                                                                            *//* XRootD is free software: you can redistribute it and/or modify it under    *//* the terms of the GNU Lesser General Public License as published by the     *//* Free Software Foundation, either version 3 of the License, or (at your     *//* option) any later version.                                                 *//*                                                                            *//* XRootD is distributed in the hope that it will be useful, but WITHOUT      *//* ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or      *//* FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Lesser General Public       *//* License for more details.                                                  *//*                                                                            *//* You should have received a copy of the GNU Lesser General Public License   *//* along with XRootD in a file called COPYING.LESSER (LGPL license) and file  *//* COPYING (GPL license).  If not, see <http://www.gnu.org/licenses/>.        *//*                                                                            *//******************************************************************************/
+/******************************************************************************/
+/*                                                                            */
+/*                         X r d C l i . c c                                  */
+/*                                                                            */
+/* (c) 2026 by the XRootD Collaboration                                       */
+/*                                                                            */
+/* This file is part of the XRootD software suite.                            */
+/*                                                                            */
+/* XRootD is free software: you can redistribute it and/or modify it under    */
+/* the terms of the GNU Lesser General Public License as published by the     */
+/* Free Software Foundation, either version 3 of the License, or (at your     */
+/* option) any later version.                                                 */
+/*                                                                            */
+/* XRootD is distributed in the hope that it will be useful, but WITHOUT      */
+/* ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or      */
+/* FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Lesser General Public       */
+/* License for more details.                                                  */
+/*                                                                            */
+/* You should have received a copy of the GNU Lesser General Public License   */
+/* along with XRootD in a file called COPYING.LESSER (LGPL license) and file  */
+/* COPYING (GPL license).  If not, see <http://www.gnu.org/licenses/>.        */
+/*                                                                            */
+/******************************************************************************/
 
 #include "XrdVersion.hh"
 #include "XrdCl/XrdClBuffer.hh"
 #include "XrdCl/XrdClCheckSumManager.hh"
+#include "XrdCl/XrdClCopy.hh"
 #include "XrdCl/XrdClDefaultEnv.hh"
 #include "XrdCl/XrdClFileSystem.hh"
+#include "XrdOuc/XrdOucJson.hh"
 #include "XrdCl/XrdClURL.hh"
 #include "XrdCl/XrdClXRootDResponses.hh"
 #include "XrdCks/XrdCksCalc.hh"
@@ -12,17 +36,22 @@
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits.h>
 #include <memory>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <sys/stat.h>
+#include <thread>
+#include <vector>
 
 #include <CLI/CLI.hpp>
 #include <zlib.h>
@@ -33,6 +62,12 @@
 
 namespace
 {
+struct Command
+{
+  std::string_view name;
+  std::string_view description;
+};
+
 struct StatOptions
 {
   std::string path;
@@ -45,6 +80,70 @@ struct SumOptions
   std::string checkSumType;
   int timeout = -1;
 };
+
+struct ArchivePollOptions
+{
+  std::vector<std::string> urls;
+  int timeout = -1;
+  int pollingTimeout = 0;
+};
+
+enum class ArchivePollState
+{
+  Ready,
+  Queued,
+  Failed
+};
+
+constexpr Command kCommands[] = {
+  {"archivepoll", "Perform an archive polling operation on the given URL"},
+  {"bringonline", "Perform a staging operation on the given URL"},
+  {"cat", "Concatenate a file and print it on the standard output"},
+  {"chmod", "Change file permissions"},
+  {"copy", "Copy files"},
+  {"evict", "Evict a file from a disk buffer"},
+  {"ls", "List directory contents or file information"},
+  {"mkdir", "Make directories"},
+  {"rename", "Rename files or directories"},
+  {"rm", "Remove files or directories"},
+  {"save", "Read from standard input and write to a file"},
+  {"stat", "Display extended information about a file or directory"},
+  {"sum", "Calculate a file checksum"},
+  {"token", "Retrieve an SE-issued token for a path"},
+  {"xattr", "Show or set file attributes"},
+};
+
+int NotImplemented(std::string_view name)
+{
+  std::cerr << "xrd " << name
+            << ": command is not implemented yet\n";
+  return 2;
+}
+
+bool IsCopyCommand(const char *command)
+{
+  return command && std::string_view(command) == "copy";
+}
+
+int RunCopyCommand(int argc, char **argv)
+{
+  std::string programName = "xrd copy";
+  std::vector<char *> copyArgs;
+  copyArgs.reserve(static_cast<std::size_t>(argc) + 1);
+  copyArgs.push_back(programName.data());
+  for(int i = 2; i < argc; ++i)
+  {
+    copyArgs.push_back(argv[i]);
+  }
+  copyArgs.push_back(nullptr);
+
+#ifndef _WIN32
+  optind = 1;
+#endif
+
+  return XrdCl::RunXrdCp(static_cast<int>(copyArgs.size() - 1),
+                         copyArgs.data());
+}
 
 std::string ToLower(std::string value)
 {
@@ -65,6 +164,16 @@ void SetEnvironment(const char *name, const std::string &value)
 bool HasScheme(const std::string &path)
 {
   return path.find("://") != std::string::npos;
+}
+
+std::string Trim(const std::string &value)
+{
+  const auto begin = std::find_if_not(value.begin(), value.end(),
+    [](unsigned char c) { return std::isspace(c); });
+  const auto end = std::find_if_not(value.rbegin(), value.rend(),
+    [](unsigned char c) { return std::isspace(c); }).base();
+  if(begin >= end) return "";
+  return std::string(begin, end);
 }
 
 std::string LocalDisplayPath(const std::string &localPath)
@@ -194,6 +303,66 @@ XrdCl::URL FileSystemURL(XrdCl::URL url)
   url.SetPath("");
   url.SetParams(XrdCl::URL::ParamsMap{});
   return url;
+}
+
+// One entry of the JSON array returned by the XrdClHttp Tape REST
+// "tape.archiveinfo" opaque query.
+struct ArchivePollResult
+{
+  std::string url;
+  std::string path;
+  std::string locality;
+  std::string error;
+};
+
+ArchivePollState ArchivePollStateFromLocality(const std::string &locality)
+{
+  if(locality == "TAPE" || locality == "DISK_AND_TAPE")
+  {
+    return ArchivePollState::Ready;
+  }
+  if(locality == "DISK" || locality == "UNAVAILABLE")
+  {
+    return ArchivePollState::Queued;
+  }
+  return ArchivePollState::Failed;
+}
+
+std::string ArchivePollFailureMessage(const ArchivePollResult &result)
+{
+  if(!result.error.empty())
+  {
+    return "[Tape REST API] " + result.error;
+  }
+
+  return "[Tape REST API] File locality reported as " + result.locality
+    + " (path=" + result.path + ")";
+}
+
+int PrintArchivePollResults(
+  const std::vector<ArchivePollResult> &results)
+{
+  int terminal = 0;
+  for(const auto &result : results)
+  {
+    const auto state = ArchivePollStateFromLocality(result.locality);
+    if(state == ArchivePollState::Ready)
+    {
+      ++terminal;
+      std::cout << result.url << " READY\n";
+    }
+    else if(state == ArchivePollState::Queued)
+    {
+      std::cout << result.url << " QUEUED\n";
+    }
+    else
+    {
+      ++terminal;
+      std::cout << result.url << " => FAILED: "
+                << ArchivePollFailureMessage(result) << '\n';
+    }
+  }
+  return terminal;
 }
 
 int RunLocalStat(const std::string &originalPath, const std::string &localPath)
@@ -550,11 +719,220 @@ int RunSum(const SumOptions &options, unsigned int verbosity = 0,
   return RunLocalSum(options.path, checkSumType, options.checkSumType);
 }
 
+int LoadArchivePollUrls(const std::string &url, const std::string &fromFile,
+                        std::vector<std::string> &urls)
+{
+  if(!fromFile.empty() && !url.empty())
+  {
+    std::cerr << "xrd archivepoll: could not combine --from-file with a URL "
+              << "in the positional arguments\n";
+    return 1;
+  }
+
+  if(!fromFile.empty())
+  {
+    std::ifstream input(fromFile);
+    if(!input)
+    {
+      std::cerr << "xrd archivepoll: unable to open '" << fromFile << "'\n";
+      return 1;
+    }
+
+    std::string line;
+    while(std::getline(input, line))
+    {
+      line = Trim(line);
+      if(!line.empty()) urls.push_back(line);
+    }
+  }
+  else if(!url.empty())
+  {
+    urls.push_back(url);
+  }
+
+  if(urls.empty())
+  {
+    std::cerr << "xrd archivepoll: missing URL\n";
+    return 1;
+  }
+
+  return 0;
+}
+
+// Storage URLs are translated to the HTTP(S) endpoint serving the WLCG Tape
+// REST API; the operations themselves are provided by the XrdClHttp client
+// plugin through FileSystem::Query. root:// and xroot:// URLs are assumed to
+// serve the API over HTTPS on the default port.
+bool TapeFileSystemURL(const std::string &input, std::string &fsUrl,
+                       std::string &error)
+{
+  XrdCl::URL url(input);
+  if(!url.IsValid() || url.GetHostName().empty())
+  {
+    error = "invalid URL '" + input + "'";
+    return false;
+  }
+
+  std::string protocol = ToLower(url.GetProtocol());
+  bool useUrlPort = true;
+  if(protocol == "root" || protocol == "xroot")
+  {
+    protocol = "https";
+    useUrlPort = false;
+  }
+  else if(protocol == "davs") protocol = "https";
+  else if(protocol == "dav") protocol = "http";
+
+  if(protocol != "http" && protocol != "https")
+  {
+    error = "unsupported URL protocol '" + url.GetProtocol()
+      + "' for the Tape REST API";
+    return false;
+  }
+
+  std::ostringstream out;
+  out << protocol << "://" << url.GetHostName();
+  if(useUrlPort && url.GetPort() > 0) out << ":" << url.GetPort();
+  fsUrl = out.str();
+  return true;
+}
+
+bool ParseArchiveInfoResponse(const std::string &body,
+                              std::vector<ArchivePollResult> &results,
+                              std::string &error)
+{
+  results.clear();
+  try
+  {
+    const nlohmann::json json = nlohmann::json::parse(body);
+    if(!json.is_array())
+    {
+      error = "archiveinfo response is not a JSON array";
+      return false;
+    }
+
+    results.reserve(json.size());
+    for(const auto &item : json)
+    {
+      if(!item.is_object())
+      {
+        error = "archiveinfo response contains a non-object entry";
+        return false;
+      }
+
+      ArchivePollResult result;
+      if(item.contains("url") && item["url"].is_string())
+      {
+        result.url = item["url"].get<std::string>();
+      }
+      if(item.contains("path") && item["path"].is_string())
+      {
+        result.path = item["path"].get<std::string>();
+      }
+      if(item.contains("locality") && item["locality"].is_string())
+      {
+        result.locality = item["locality"].get<std::string>();
+      }
+      if(item.contains("error") && item["error"].is_string())
+      {
+        result.error = item["error"].get<std::string>();
+      }
+      results.push_back(result);
+    }
+    return true;
+  }
+  catch(const std::exception &ex)
+  {
+    error = "malformed archiveinfo response: " + std::string(ex.what());
+    return false;
+  }
+}
+
+int RunArchivePoll(const ArchivePollOptions &options,
+                   unsigned int verbosity = 0,
+                   const std::string &logFile = "",
+                   const std::string &cert = "",
+                   const std::string &key = "",
+                   bool ipv4 = false,
+                   bool ipv6 = false)
+{
+  if(!logFile.empty() && !XrdCl::DefaultEnv::SetLogFile(logFile))
+  {
+    std::cerr << "xrd archivepoll: unable to open log file '" << logFile
+              << "'\n";
+    return 1;
+  }
+
+  SetVerbose(verbosity);
+  ApplyClientOptions(options.timeout, cert, key, ipv4, ipv6);
+
+  std::string fsUrl;
+  std::string error;
+  if(!TapeFileSystemURL(options.urls.front(), fsUrl, error))
+  {
+    std::cerr << "xrd archivepoll: " << error << '\n';
+    return 1;
+  }
+
+  std::string queryArg = "tape.archiveinfo";
+  for(const auto &url : options.urls)
+  {
+    queryArg += "\n" + url;
+  }
+
+  int terminal = 0;
+  int wait = options.pollingTimeout;
+  int sleep = 1;
+
+  while(true)
+  {
+    XrdCl::FileSystem filesystem{XrdCl::URL(fsUrl)};
+    XrdCl::Buffer arg;
+    arg.FromString(queryArg);
+    XrdCl::Buffer *responseBuffer = nullptr;
+    XrdCl::XRootDStatus status = filesystem.Query(
+      XrdCl::QueryCode::Opaque, arg, responseBuffer,
+      static_cast<time_t>(options.timeout));
+    std::unique_ptr<XrdCl::Buffer> response(responseBuffer);
+
+    if(!status.IsOK())
+    {
+      std::cerr << "xrd archivepoll: " << status.GetErrorMessage() << '\n';
+      return 1;
+    }
+
+    std::vector<ArchivePollResult> results;
+    if(!ParseArchiveInfoResponse(response ? response->ToString() : "",
+                                 results, error))
+    {
+      std::cerr << "xrd archivepoll: " << error << '\n';
+      return 1;
+    }
+
+    terminal = PrintArchivePollResults(results);
+    if(terminal == static_cast<int>(options.urls.size()) || wait <= 0)
+    {
+      break;
+    }
+
+    std::cout << "Archiving ongoing, sleep " << sleep << " seconds...\n";
+    wait -= sleep;
+    std::this_thread::sleep_for(std::chrono::seconds(sleep));
+    sleep = std::min(sleep * 2, 300);
+  }
+
+  return 0;
+}
 
 }
 
 int main(int argc, char **argv)
 {
+  if(argc > 1 && IsCopyCommand(argv[1]))
+  {
+    return RunCopyCommand(argc, argv);
+  }
+
   CLI::App app{"XRootD command-line client."};
   app.name("xrd");
   app.set_help_flag("-h,--help", "Show this message and exit");
@@ -573,52 +951,6 @@ int main(int argc, char **argv)
   std::string statKey;
   std::string statClientInfo;
   std::string statLogFile;
-
-  auto *stat = app.add_subcommand("stat",
-    "Display extended information about a file or directory");
-  stat->add_option("file", statPath,
-    "URL of the file or directory to stat");
-  stat->add_flag("-V,--version", statVersion,
-    "Output version information and exit");
-  stat->add_flag("-v,--verbose", statVerbosity,
-    "Enable verbose client logging");
-  stat->add_option("-D,--definition", statDefinition,
-    "Accept a GFAL parameter override");
-  stat->add_option("-t,--timeout", statTimeout,
-    "Maximum operation time in seconds");
-  stat->add_option("-E,--cert", statCert,
-    "Accept a user certificate path");
-  stat->add_option("--key", statKey,
-    "Accept a user private key path");
-  stat->add_flag("-4", statIPv4,
-    "Accept the GFAL IPv4-only flag");
-  stat->add_flag("-6", statIPv6,
-    "Accept the GFAL IPv6-only flag");
-  stat->add_option("-C,--client-info", statClientInfo,
-    "Accept custom client information");
-  stat->add_option("--log-file", statLogFile,
-    "Write XRootD client logs to a file");
-  stat->callback([&] {
-    if(statVersion)
-    {
-      std::cout << "xrd " << XrdVERSION << '\n';
-      exitCode = 0;
-      return;
-    }
-    if(statPath.empty())
-    {
-      std::cerr << "xrd stat: expected one file URL\n";
-      exitCode = 64;
-      return;
-    }
-    StatOptions options;
-    options.path = statPath;
-    options.timeout = statTimeout;
-    exitCode = RunStat(options, statVerbosity, statLogFile, statCert,
-                       statKey, statIPv4, statIPv6);
-  });
-
-
   std::string sumPath;
   std::string sumCheckSumType;
   int sumTimeout = -1;
@@ -631,52 +963,173 @@ int main(int argc, char **argv)
   std::string sumKey;
   std::string sumClientInfo;
   std::string sumLogFile;
+  std::string archivePollUrl;
+  int archivePollTimeout = -1;
+  unsigned int archivePollVerbosity = 0;
+  bool archivePollVersion = false;
+  bool archivePollIPv4 = false;
+  bool archivePollIPv6 = false;
+  std::string archivePollDefinition;
+  std::string archivePollCert;
+  std::string archivePollKey;
+  std::string archivePollClientInfo;
+  std::string archivePollLogFile;
+  int archivePollPollingTimeout = 0;
+  std::string archivePollFromFile;
 
-  auto *sum = app.add_subcommand("sum", "Calculate a file checksum");
-  sum->add_option("file", sumPath,
-    "File URL to use for checksum calculation");
-  sum->add_option("checksum_type", sumCheckSumType,
-    "Checksum algorithm to use");
-  sum->add_flag("-V,--version", sumVersion,
-    "Output version information and exit");
-  sum->add_flag("-v,--verbose", sumVerbosity,
-    "Enable verbose client logging");
-  sum->add_option("-D,--definition", sumDefinition,
-    "Accept a GFAL parameter override");
-  sum->add_option("-t,--timeout", sumTimeout,
-    "Maximum operation time in seconds");
-  sum->add_option("-E,--cert", sumCert,
-    "Accept a user certificate path");
-  sum->add_option("--key", sumKey,
-    "Accept a user private key path");
-  sum->add_flag("-4", sumIPv4,
-    "Accept the GFAL IPv4-only flag");
-  sum->add_flag("-6", sumIPv6,
-    "Accept the GFAL IPv6-only flag");
-  sum->add_option("-C,--client-info", sumClientInfo,
-    "Accept custom client information");
-  sum->add_option("--log-file", sumLogFile,
-    "Write XRootD client logs to a file");
-  sum->callback([&] {
-    if(sumVersion)
+  for(const auto &command : kCommands)
+  {
+    auto *subcommand = app.add_subcommand(
+      std::string(command.name), std::string(command.description));
+
+    if(command.name == "archivepoll")
     {
-      std::cout << "xrd " << XrdVERSION << '\n';
-      exitCode = 0;
-      return;
+      subcommand->add_option("surl", archivePollUrl,
+        "Site URL to query for archival status");
+      subcommand->add_flag("-V,--version", archivePollVersion,
+        "Output version information and exit");
+      subcommand->add_flag("-v,--verbose", archivePollVerbosity,
+        "Enable verbose client logging");
+      subcommand->add_option("-D,--definition", archivePollDefinition,
+        "Accept a GFAL parameter override");
+      subcommand->add_option("-t,--timeout", archivePollTimeout,
+        "Maximum operation time in seconds");
+      subcommand->add_option("-E,--cert", archivePollCert,
+        "Accept a user certificate path");
+      subcommand->add_option("--key", archivePollKey,
+        "Accept a user private key path");
+      subcommand->add_flag("-4", archivePollIPv4,
+        "Accept the GFAL IPv4-only flag");
+      subcommand->add_flag("-6", archivePollIPv6,
+        "Accept the GFAL IPv6-only flag");
+      subcommand->add_option("-C,--client-info", archivePollClientInfo,
+        "Accept custom client information");
+      subcommand->add_option("--log-file", archivePollLogFile,
+        "Write client logs to a file");
+      subcommand->add_option("--polling-timeout",
+        archivePollPollingTimeout, "Timeout for the polling operation");
+      subcommand->add_option("--from-file", archivePollFromFile,
+        "Read site URLs from a file");
+      subcommand->callback([&] {
+        if(archivePollVersion)
+        {
+          std::cout << "xrd " << XrdVERSION << '\n';
+          exitCode = 0;
+          return;
+        }
+
+        ArchivePollOptions options;
+        options.timeout = archivePollTimeout;
+        options.pollingTimeout = archivePollPollingTimeout;
+        exitCode = LoadArchivePollUrls(archivePollUrl, archivePollFromFile,
+                                       options.urls);
+        if(exitCode != 0) return;
+
+        exitCode = RunArchivePoll(options, archivePollVerbosity,
+                                  archivePollLogFile, archivePollCert,
+                                  archivePollKey, archivePollIPv4,
+                                  archivePollIPv6);
+      });
     }
-    if(sumPath.empty() || sumCheckSumType.empty())
+    else if(command.name == "stat")
     {
-      std::cerr << "xrd sum: expected one file URL and checksum type\n";
-      exitCode = 64;
-      return;
+      subcommand->add_option("file", statPath,
+        "URL of the file or directory to stat");
+      subcommand->add_flag("-V,--version", statVersion,
+        "Output version information and exit");
+      subcommand->add_flag("-v,--verbose", statVerbosity,
+        "Enable verbose client logging");
+      subcommand->add_option("-D,--definition", statDefinition,
+        "Accept a GFAL parameter override");
+      subcommand->add_option("-t,--timeout", statTimeout,
+        "Maximum operation time in seconds");
+      subcommand->add_option("-E,--cert", statCert,
+        "Accept a user certificate path");
+      subcommand->add_option("--key", statKey,
+        "Accept a user private key path");
+      subcommand->add_flag("-4", statIPv4,
+        "Accept the GFAL IPv4-only flag");
+      subcommand->add_flag("-6", statIPv6,
+        "Accept the GFAL IPv6-only flag");
+      subcommand->add_option("-C,--client-info", statClientInfo,
+        "Accept custom client information");
+      subcommand->add_option("--log-file", statLogFile,
+        "Write XRootD client logs to a file");
+      subcommand->callback([&] {
+        if(statVersion)
+        {
+          std::cout << "xrd " << XrdVERSION << '\n';
+          exitCode = 0;
+          return;
+        }
+        if(statPath.empty())
+        {
+          std::cerr << "xrd stat: expected one file URL\n";
+          exitCode = 64;
+          return;
+        }
+        StatOptions options;
+        options.path = statPath;
+        options.timeout = statTimeout;
+        exitCode = RunStat(options, statVerbosity, statLogFile, statCert,
+                           statKey, statIPv4, statIPv6);
+      });
     }
-    SumOptions options;
-    options.path = sumPath;
-    options.checkSumType = sumCheckSumType;
-    options.timeout = sumTimeout;
-    exitCode = RunSum(options, sumVerbosity, sumLogFile, sumCert,
-                      sumKey, sumIPv4, sumIPv6);
-  });
+    else if(command.name == "sum")
+    {
+      subcommand->add_option("file", sumPath,
+        "File URL to use for checksum calculation");
+      subcommand->add_option("checksum_type", sumCheckSumType,
+        "Checksum algorithm to use");
+      subcommand->add_flag("-V,--version", sumVersion,
+        "Output version information and exit");
+      subcommand->add_flag("-v,--verbose", sumVerbosity,
+        "Enable verbose client logging");
+      subcommand->add_option("-D,--definition", sumDefinition,
+        "Accept a GFAL parameter override");
+      subcommand->add_option("-t,--timeout", sumTimeout,
+        "Maximum operation time in seconds");
+      subcommand->add_option("-E,--cert", sumCert,
+        "Accept a user certificate path");
+      subcommand->add_option("--key", sumKey,
+        "Accept a user private key path");
+      subcommand->add_flag("-4", sumIPv4,
+        "Accept the GFAL IPv4-only flag");
+      subcommand->add_flag("-6", sumIPv6,
+        "Accept the GFAL IPv6-only flag");
+      subcommand->add_option("-C,--client-info", sumClientInfo,
+        "Accept custom client information");
+      subcommand->add_option("--log-file", sumLogFile,
+        "Write XRootD client logs to a file");
+      subcommand->callback([&] {
+        if(sumVersion)
+        {
+          std::cout << "xrd " << XrdVERSION << '\n';
+          exitCode = 0;
+          return;
+        }
+        if(sumPath.empty() || sumCheckSumType.empty())
+        {
+          std::cerr << "xrd sum: expected one file URL and checksum type\n";
+          exitCode = 64;
+          return;
+        }
+        SumOptions options;
+        options.path = sumPath;
+        options.checkSumType = sumCheckSumType;
+        options.timeout = sumTimeout;
+        exitCode = RunSum(options, sumVerbosity, sumLogFile, sumCert,
+                          sumKey, sumIPv4, sumIPv6);
+      });
+    }
+    else
+    {
+      subcommand->allow_extras();
+      subcommand->callback([&exitCode, name = command.name] {
+        exitCode = NotImplemented(name);
+      });
+    }
+  }
 
   CLI11_PARSE(app, argc, argv);
 
