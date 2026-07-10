@@ -13,6 +13,8 @@ add_subdirectory(XrdPosix)
 
 add_subdirectory(XrdHttpTests)
 
+add_subdirectory(XrdMacaroons)
+
 add_subdirectory(XrdOucTests)
 
 add_subdirectory(XrdThrottleTests)
@@ -24,6 +26,8 @@ add_subdirectory(XrdHttpTpc)
 add_subdirectory(XrdPfcTests)
 
 add_subdirectory(XrdXrootdTests)
+
+add_subdirectory(XrdOssMirageTests)
 
 if(NOT ENABLE_SERVER_TESTS)
   return()
