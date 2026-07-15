@@ -135,12 +135,12 @@ bats::on_failure() {
     assert_output --partial dash
 }
 
-@test "xattr accepts gfal read-only list and get shorthand" {
+@test "xattr preserves explicit native list and get forms" {
     run "$XRDFS" "$TEST_ENDPOINT" xattr /data/first.txt list
     assert_success
     local list_output=$output
 
-    run "$XRDFS" xattr "$TEST_FILE"
+    run "$XRDFS" xattr "$TEST_FILE" list
     assert_success
     assert_output "$list_output"
     assert_output --partial 'user.test="fixture"'
@@ -149,7 +149,7 @@ bats::on_failure() {
     assert_success
     local get_output=$output
 
-    run "$XRDFS" xattr "$TEST_FILE" user.test
+    run "$XRDFS" xattr "$TEST_FILE" get user.test
     assert_success
     assert_output "$get_output"
 }
@@ -161,6 +161,76 @@ bats::on_failure() {
     run "$XRDFS" xattr "$TEST_FILE" get link
     assert_success
     assert_output --partial 'link="https://example.org/resource"'
+}
+
+@test "xattr preserves native set and delete forms" {
+    run "$XRDFS" xattr "$TEST_FILE" set user.roundtrip=value=with=equals
+    assert_success
+
+    run "$XRDFS" xattr "$TEST_FILE" get user.roundtrip
+    assert_success
+    assert_output --partial 'user.roundtrip="value=with=equals"'
+
+    run "$XRDFS" xattr "$TEST_FILE" del user.roundtrip
+    assert_success
+
+    run "$XRDFS" xattr "$TEST_FILE" get user.roundtrip
+    assert_failure
+}
+
+@test "xattr shorthand maps gfal virtual attributes to native queries" {
+    run "$XRDFS" "$TEST_ENDPOINT" query checksum /data/first.txt
+    assert_success
+    local checksum=$output
+
+    run "$XRDFS" xattr "$TEST_FILE" xroot.cksum
+    assert_success
+    assert_output "$checksum"
+
+    run "$XRDFS" xattr "$TEST_FILE" user.checksum.adler32
+    assert_success
+    assert_output "${checksum#* }"
+
+    run "$XRDFS" xattr "$TEST_FILE" user.status
+    assert_success
+    assert_output ONLINE
+
+    run "$XRDFS" xattr "$TEST_FILE"
+    assert_success
+    assert_output --partial "xroot.cksum = $checksum"
+    assert_output --partial 'xroot.space = '
+    assert_output --partial 'xroot.xattr '
+    assert_output --partial 'spacetoken = { "totalsize": '
+    assert_output --partial '"unusedsize": '
+    assert_output --partial '"usedsize": '
+    assert_output --partial '"guaranteedsize": '
+}
+
+@test "xattr shorthand falls back to native attributes and handles reserved names" {
+    run "$XRDFS" xattr "$TEST_FILE" user.test
+    assert_success
+    assert_output fixture
+
+    for attribute in list get set del; do
+        run "$XRDFS" xattr "$TEST_FILE" set "$attribute=reserved-$attribute"
+        assert_success
+
+        run "$XRDFS" xattr "$TEST_FILE" -- "$attribute"
+        assert_success
+        assert_output "reserved-$attribute"
+    done
+}
+
+@test "xattr rejects a checksum attribute without an algorithm" {
+    run "$XRDFS" xattr "$TEST_FILE" user.checksum.
+    assert_failure
+    assert_output --partial 'Checksum type cannot be empty'
+}
+
+@test "xattr rejects an option delimiter without an attribute" {
+    run "$XRDFS" xattr "$TEST_FILE" --
+    assert_failure
+    assert_output --partial 'Invalid arguments'
 }
 
 @test "sum maps gfal positional arguments to the native checksum query" {
