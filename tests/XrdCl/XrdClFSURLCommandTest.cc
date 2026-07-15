@@ -76,6 +76,16 @@ TEST( XrdClFSURLCommand, PreservesURLParametersOnThePath )
                "stat", "/store/file?oss.asize=1"}) );
 }
 
+TEST( XrdClFSURLCommand, NormalizesSumPathButNotChecksumType )
+{
+  NormalizedCommand command = Normalize(
+    {"sum", "root://root.example.org//store/file", "ADLER32"} );
+
+  ASSERT_EQ( command.result, XrdCl::ValidURLCommand );
+  EXPECT_EQ( command.arguments,
+             (std::vector<std::string>{"sum", "/store/file", "ADLER32"}) );
+}
+
 TEST( XrdClFSURLCommand, AcceptsPluginBackedHTTPSURL )
 {
   NormalizedCommand command =

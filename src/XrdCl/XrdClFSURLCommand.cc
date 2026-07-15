@@ -21,7 +21,7 @@ namespace
   {
     static const char *commands[] = {
       "cache", "cat", "chmod", "locate", "ls", "mkdir", "mv",
-      "prepare", "rm", "rmdir", "spaceinfo", "stat", "statvfs",
+      "prepare", "rm", "rmdir", "spaceinfo", "stat", "statvfs", "sum",
       "tail", "truncate", "xattr"
     };
 
@@ -65,7 +65,7 @@ namespace
     if( command == "cache" )
       return index == 2;
     if( command == "chmod" || command == "rmdir" ||
-        command == "spaceinfo" || command == "statvfs" ||
+        command == "spaceinfo" || command == "statvfs" || command == "sum" ||
         command == "truncate" || command == "xattr" )
       return index == 1;
     if( command == "mv" )

@@ -51,6 +51,7 @@ FILE_B='root://storage.example.org//store/data/b.dat'
 | `gfal-ls -d "$DIR"` | `xrdfs ls -d "$DIR"` | Prints the directory operand itself instead of listing its contents. |
 | `gfal-cat -b "$FILE_A"` | `xrdfs cat -b "$FILE_A"` | Accepts `-b` as a compatibility no-op because `xrdfs cat` already writes file data to standard output without text conversion. |
 | `gfal-cat -b "$FILE_A" "$FILE_B"` | `xrdfs cat -b "$FILE_A" "$FILE_B"` | Concatenates multiple files from the same endpoint. |
+| `gfal-sum "$FILE_A" ADLER32` | `xrdfs sum "$FILE_A" ADLER32` | Selects the requested checksum algorithm and validates that the server returned that algorithm. |
 | `gfal-xattr "$FILE_A"` | `xrdfs xattr "$FILE_A"` | Uses the read-only shorthand to list extended attributes. |
 | `gfal-xattr "$FILE_A" user.example` | `xrdfs xattr "$FILE_A" user.example` | Uses the read-only shorthand to retrieve one extended attribute. |
 
@@ -74,6 +75,7 @@ server and controlled fixtures. They cover:
 - `stat`;
 - normal, long human-readable, and directory-entry `ls`;
 - binary-safe and multiple-file `cat`;
+- algorithm-selecting checksum queries through `sum`;
 - xattr list and get shorthand;
 - rejection of local URLs and mixed remote endpoints.
 
@@ -103,8 +105,7 @@ are not added by this compatibility work.
 The following are intentionally outside this first slice:
 
 - a new `xrd` command;
-- `query` in command-first form;
-- a `gfal-sum` or checksum compatibility interface;
+- raw `query` in command-first form;
 - `gfal-copy` or `gfal-cp` command mapping;
 - gfal2 common-option parity;
 - exact output, diagnostic, or exit-code parity.

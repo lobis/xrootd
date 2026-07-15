@@ -38,6 +38,8 @@
 #include "XrdOuc/XrdOucPrivateUtils.hh"
 #include "XrdSys/XrdSysE2T.hh"
 
+#include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <cstdio>
 #include <getopt.h>
@@ -1369,6 +1371,93 @@ XRootDStatus DoQuery( FileSystem                      *fs,
 }
 
 //------------------------------------------------------------------------------
+// Query a file checksum using gfal-sum's positional layout
+//------------------------------------------------------------------------------
+XRootDStatus DoSum( FileSystem                      *fs,
+                    Env                             *env,
+                    const FSExecutor::CommandParams &args )
+{
+  Log *log = DefaultEnv::GetLog();
+  if( args.size() != 3 )
+  {
+    log->Error( AppMsg, "Wrong number of arguments." );
+    return XRootDStatus( stError, errInvalidArgs );
+  }
+
+  std::string algorithm = args[2];
+  for( char &character : algorithm )
+  {
+    const unsigned char value = static_cast<unsigned char>( character );
+    if( std::isalnum( value ) == 0 && character != '-' && character != '_' )
+    {
+      log->Error( AppMsg, "Invalid checksum type: %s.", args[2].c_str() );
+      return XRootDStatus( stError, errInvalidArgs );
+    }
+    character = static_cast<char>( std::tolower( value ) );
+  }
+
+  if( algorithm.empty() )
+  {
+    log->Error( AppMsg, "Checksum type cannot be empty." );
+    return XRootDStatus( stError, errInvalidArgs );
+  }
+
+  std::string path;
+  if( !BuildPath( path, env, args[1] ).IsOK() )
+  {
+    log->Error( AppMsg, "Invalid path." );
+    return XRootDStatus( stError, errInvalidArgs );
+  }
+
+  path += path.find( '?' ) == std::string::npos ? '?' : '&';
+  path += "cks.type=";
+  path += algorithm;
+
+  Buffer request( path.size() );
+  request.FromString( path );
+  Buffer *rawResponse = 0;
+  XRootDStatus status = fs->Query(
+    QueryCode::Checksum, request, rawResponse );
+  std::unique_ptr<Buffer> response( rawResponse );
+  if( !status.IsOK() )
+  {
+    log->Error( AppMsg, "Unable to query %s checksum: %s",
+                algorithm.c_str(), status.ToStr().c_str() );
+    return status;
+  }
+
+  if( !response )
+  {
+    log->Error( AppMsg, "Checksum query returned no response." );
+    return XRootDStatus( stError, errInvalidResponse );
+  }
+
+  std::vector<std::string> fields;
+  Utils::splitString( fields, response->ToString(), " " );
+  if( fields.size() != 2 )
+  {
+    log->Error( AppMsg, "Invalid checksum response: %s",
+                response->ToString().c_str() );
+    return XRootDStatus( stError, errInvalidResponse );
+  }
+
+  std::transform( fields[0].begin(), fields[0].end(), fields[0].begin(),
+                  []( unsigned char character )
+  {
+    return static_cast<char>( std::tolower( character ) );
+  } );
+  if( fields[0] != algorithm )
+  {
+    log->Error( AppMsg, "Checksum response used %s instead of %s.",
+                fields[0].c_str(), algorithm.c_str() );
+    return XRootDStatus( stError, errCheckSumError );
+  }
+
+  std::cout << fields[0] << " " << fields[1] << std::endl;
+  return XRootDStatus();
+}
+
+//------------------------------------------------------------------------------
 // Query the server
 //------------------------------------------------------------------------------
 XRootDStatus DoPrepare( FileSystem                      *fs,
@@ -2149,6 +2238,9 @@ XRootDStatus PrintHelp( FileSystem *, Env *,
   printf( "   spaceinfo path\n"                                             );
   printf( "     Get space statistics for given path.\n\n"                   );
 
+  printf( "   sum <path> <checksum type>\n"                                 );
+  printf( "     Query a file checksum using the requested algorithm.\n\n"   );
+
   printf( "   xattr <path> [attribute]\n"                                   );
   printf( "     With no attribute, list attributes; with one attribute,\n"   );
   printf( "     get its value. Explicit native forms follow.\n\n"           );
@@ -2189,6 +2281,7 @@ FSExecutor *CreateExecutor( const URL &url )
   executor->AddCommand( "cat",         DoCat        );
   executor->AddCommand( "tail",        DoTail       );
   executor->AddCommand( "spaceinfo",   DoSpaceInfo  );
+  executor->AddCommand( "sum",         DoSum        );
   executor->AddCommand( "xattr",       DoXAttr      );
   return executor;
 }

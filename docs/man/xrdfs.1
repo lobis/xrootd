@@ -9,7 +9,7 @@ xrdfs - xrootd file and directory meta-data utility
 \fBxrdfs\fR \fIcommand\fR \fI[args containing complete URLs]\fR
 
 \fBcommand\fR: help, cache, chmod, ls, locate, mkdir, mv, stat, statvfs, query,
-           rm, rmdir, truncate, prepare, cat, tail, spaceinfo, xattr
+           rm, rmdir, truncate, prepare, cat, tail, spaceinfo, sum, xattr
 .fi
 .br
 .ad l
@@ -20,7 +20,7 @@ In batch mode, the endpoint may either be provided separately before the
 command or inferred from complete URL path operands following the command.
 All complete URLs in one command must refer to the same endpoint.
 The command-first complete-URL form is supported by cache, cat, chmod, locate,
-ls, mkdir, mv, prepare, rm, rmdir, spaceinfo, stat, statvfs, tail, truncate,
+ls, mkdir, mv, prepare, rm, rmdir, spaceinfo, stat, statvfs, sum, tail, truncate,
 and xattr. Raw query arguments remain available only through the server-first
 form because their positional layout is query-specific.
 Command help is available by invoking \fBxrdfs\fR with no command
@@ -257,6 +257,12 @@ Output last part of files to stdout.
 \fBspaceinfo\fR \fIpath\fR
 .RS 3
 Get space statistics for given path.
+
+.RE
+\fBsum\fR \fIpath checksum_type\fR
+.RS 3
+Query the file checksum using the requested algorithm. The positional layout
+matches \fBgfal-sum\fR; for example, \fBxrdfs sum URL ADLER32\fR.
 
 .RE
 \fBxattr\fR \fI<path> [attribute]\fR

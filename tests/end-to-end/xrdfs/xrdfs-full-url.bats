@@ -163,6 +163,36 @@ bats::on_failure() {
     assert_output --partial 'link="https://example.org/resource"'
 }
 
+@test "sum maps gfal positional arguments to the native checksum query" {
+    run "$XRDFS" "$TEST_ENDPOINT" query checksum \
+        '/data/first.txt?cks.type=adler32'
+    assert_success
+    local query_output=$output
+
+    run "$XRDFS" sum "$TEST_FILE" ADLER32
+    assert_success
+    assert_output "$query_output"
+    assert_output --regexp '^adler32 [[:xdigit:]]{8}$'
+
+    run "$XRDFS" "$TEST_ENDPOINT" sum /data/first.txt adler32
+    assert_success
+    assert_output "$query_output"
+}
+
+@test "sum preserves existing URL parameters when selecting an algorithm" {
+    run "$XRDFS" sum "$TEST_FILE?xrdcl.test=1" ADLER32
+    assert_success
+    assert_output --regexp '^adler32 [[:xdigit:]]{8}$'
+}
+
+@test "sum rejects invalid and unsupported checksum types" {
+    run "$XRDFS" sum "$TEST_FILE" 'md5&injected=true'
+    assert_failure
+
+    run "$XRDFS" sum "$TEST_FILE" sha256
+    assert_failure
+}
+
 @test "URL parameters are preserved in the operand path" {
     run "$XRDFS" stat "$TEST_FILE?xrdcl.test=1"
     assert_success
