@@ -25,6 +25,7 @@
 #include "XrdCl/XrdClFileSystem.hh"
 #include "XrdCl/XrdClFileSystemUtils.hh"
 #include "XrdCl/XrdClFSExecutor.hh"
+#include "XrdCl/XrdClFSURLCommand.hh"
 #include "XrdCl/XrdClURL.hh"
 #include "XrdCl/XrdClLog.hh"
 #include "XrdCl/XrdClDefaultEnv.hh"
@@ -37,14 +38,11 @@
 #include "XrdOuc/XrdOucPrivateUtils.hh"
 #include "XrdSys/XrdSysE2T.hh"
 
-#include <algorithm>
-#include <cctype>
 #include <cstdlib>
 #include <cstdio>
 #include <getopt.h>
 #include <iostream>
 #include <iomanip>
-#include <iterator>
 #include <cmath>
 
 #ifdef HAVE_READLINE
@@ -53,118 +51,6 @@
 #endif
 
 using namespace XrdCl;
-
-namespace
-{
-  enum URLCommandResult
-  {
-    NotURLCommand,
-    ValidURLCommand,
-    InvalidURLCommand
-  };
-
-  bool SupportsFullURLs( const std::string &command )
-  {
-    static const char *commands[] = {
-      "cache", "cat", "chmod", "locate", "ls", "mkdir", "mv",
-      "prepare", "rm", "rmdir", "spaceinfo", "stat", "statvfs",
-      "tail", "truncate", "xattr"
-    };
-
-    return std::find( std::begin( commands ), std::end( commands ), command )
-           != std::end( commands );
-  }
-
-  bool IsCompleteURL( const std::string &argument )
-  {
-    std::string::size_type separator = argument.find( "://" );
-    if( separator == std::string::npos || separator == 0
-        || !std::isalpha( static_cast<unsigned char>( argument[0] ) ) )
-      return false;
-
-    for( std::string::size_type i = 1; i < separator; ++i )
-    {
-      unsigned char character = static_cast<unsigned char>( argument[i] );
-      if( !std::isalnum( character ) && character != '+'
-          && character != '-' && character != '.' )
-        return false;
-    }
-
-    return true;
-  }
-
-  URL EndpointURL( const URL &url )
-  {
-    URL endpoint( url );
-    endpoint.SetPath( "" );
-    endpoint.SetParams( URL::ParamsMap() );
-    return endpoint;
-  }
-
-  std::string OperandPath( const URL &url )
-  {
-    std::string path = url.GetPathWithParams();
-    if( path.empty() || path[0] != '/' )
-      path.insert( path.begin(), '/' );
-    return path;
-  }
-
-  URLCommandResult ParseURLCommand( FSExecutor::CommandParams &arguments,
-                                    URL &endpoint, std::string &error )
-  {
-    if( arguments.empty() )
-      return NotURLCommand;
-
-    if( arguments[0] == "query" )
-    {
-      for( std::size_t i = 1; i < arguments.size(); ++i )
-      {
-        if( IsCompleteURL( arguments[i] ) )
-        {
-          error = "command-first full URLs are not supported for 'query'";
-          return InvalidURLCommand;
-        }
-      }
-      return NotURLCommand;
-    }
-
-    if( !SupportsFullURLs( arguments[0] ) )
-      return NotURLCommand;
-
-    bool foundURL = false;
-    for( std::size_t i = 1; i < arguments.size(); ++i )
-    {
-      if( !IsCompleteURL( arguments[i] ) )
-        continue;
-
-      URL operand( arguments[i] );
-      if( !operand.IsValid() || operand.GetProtocol().empty()
-          || operand.GetHostName().empty()
-          || operand.GetProtocol() == "file"
-          || operand.GetProtocol() == "stdio" )
-      {
-        error = "invalid remote URL operand";
-        return InvalidURLCommand;
-      }
-
-      URL operandEndpoint = EndpointURL( operand );
-      if( !foundURL )
-      {
-        endpoint = operandEndpoint;
-        foundURL = true;
-      }
-      else if( endpoint.GetURL() != operandEndpoint.GetURL() )
-      {
-        error = "all URL operands must use the same endpoint";
-        return InvalidURLCommand;
-      }
-
-      arguments[i] = OperandPath( operand );
-    }
-
-    return foundURL ? ValidURLCommand : NotURLCommand;
-  }
-}
 
 //------------------------------------------------------------------------------
 // Build a path
@@ -473,7 +359,7 @@ XRootDStatus DoLS( FileSystem                      *fs,
   bool        showUrls = false;
   bool        hascks   = false;
   bool        human    = false;
-  bool        directory= false;
+  bool        directory = false;
   uint64_t base        = 1024;
   std::string path;
   DirListFlags::Flags flags = DirListFlags::Locate | DirListFlags::Merge;
@@ -485,31 +371,33 @@ XRootDStatus DoLS( FileSystem                      *fs,
       case 'l':
         stats = true;
         flags |= DirListFlags::Stat;
-        break;
+        return true;
       case 'u':
         showUrls = true;
-        break;
+        return true;
       case 'R':
         flags |= DirListFlags::Recursive;
-        break;
+        return true;
       case 'D':
         flags &= ~DirListFlags::Merge;
-        break;
+        return true;
       case 'Z':
         flags |= DirListFlags::Zip;
-        break;
+        return true;
       case 'C':
         hascks = true;
         stats = true;
         flags |= DirListFlags::Cksm;
-        break;
+        return true;
       case 'h':
       case 'H':
         human = true;
-        break;
+        return true;
       case 'd':
         directory = true;
-        break;
+        return true;
+      default:
+        return false;
     }
   };
 
@@ -1953,14 +1841,23 @@ XRootDStatus DoXAttr( FileSystem                      *fs,
   Log         *log     = DefaultEnv::GetLog();
   uint32_t     argc    = args.size();
 
-  if( argc < 3 )
+  if( argc < 2 )
   {
     log->Error( AppMsg, "Wrong number of arguments." );
     return XRootDStatus( stError, errInvalidArgs );
   }
 
+  const bool implicitList = argc == 2;
+  const bool implicitGet = argc == 3 && args[2] != "set" &&
+                           args[2] != "get" && args[2] != "del" &&
+                           args[2] != "list";
+
   kXR_char code = 0;
-  if( args[2] == "set")
+  if( implicitList )
+    code = kXR_fattrList;
+  else if( implicitGet )
+    code = kXR_fattrGet;
+  else if( args[2] == "set")
     code = kXR_fattrSet;
   else if( args[2] == "get" )
     code = kXR_fattrGet;
@@ -2018,13 +1915,13 @@ XRootDStatus DoXAttr( FileSystem                      *fs,
 
     case kXR_fattrGet:
     {
-      if( argc != 4 )
+      if( (!implicitGet && argc != 4) || (implicitGet && argc != 3) )
       {
         log->Error( AppMsg, "Wrong number of arguments." );
         return XRootDStatus( stError, errInvalidArgs );
       }
 
-      std::string key = args[3];
+      std::string key = implicitGet ? args[2] : args[3];
       std::vector<std::string> attrs;
       attrs.push_back( key );
 
@@ -2076,7 +1973,7 @@ XRootDStatus DoXAttr( FileSystem                      *fs,
 
     case kXR_fattrList:
     {
-      if( argc != 3 )
+      if( (!implicitList && argc != 3) || (implicitList && argc != 2) )
       {
         log->Error( AppMsg, "Wrong number of arguments." );
         return XRootDStatus( stError, errInvalidArgs );
@@ -2147,9 +2044,9 @@ XRootDStatus PrintHelp( FileSystem *, Env *,
   printf( "     -D show duplicate entries\n"                                  );
   printf( "     -Z if a ZIP archive list its content\n"                       );
   printf( "     -C checksum every entry\n"                                    );
-  printf( "     -h|-H|--human-readable print human-readable sizes\n"          );
-  printf( "     -d|--directory list the entry instead of its contents\n"      );
-  printf( "     -- stop option parsing, allowing a dash-prefixed path\n\n"    );
+  printf( "     -h|-H|--human-readable print human-readable sizes\n"           );
+  printf( "     -d|--directory list the entry instead of its contents\n"       );
+  printf( "     -- stop option parsing, allowing a dash-prefixed path\n\n"     );
 
   printf( "   locate [-n] [-r] [-d] [-m] [-i] [-p] <path>\n"                  );
   printf( "     Get the locations of the path.\n"                             );
@@ -2252,6 +2149,9 @@ XRootDStatus PrintHelp( FileSystem *, Env *,
   printf( "   spaceinfo path\n"                                             );
   printf( "     Get space statistics for given path.\n\n"                   );
 
+  printf( "   xattr <path> [attribute]\n"                                   );
+  printf( "     With no attribute, list attributes; with one attribute,\n"   );
+  printf( "     get its value. Explicit native forms follow.\n\n"           );
   printf( "   xattr <path> <code> <params> \n"                              );
   printf( "     Operation on extended attributes. Codes:\n\n"               );
   printf( "     set   <attr>          Set extended attribute; <attr> is\n"  );
@@ -2530,7 +2430,7 @@ int main( int argc, char **argv )
   FSExecutor::CommandParams arguments( argv + optind, argv + argc );
   URL url;
   std::string error;
-  URLCommandResult result = ParseURLCommand( arguments, url, error );
+  URLCommandResult result = NormalizeFSURLCommand( arguments, url, error );
   if( result == InvalidURLCommand )
   {
     std::cerr << "xrdfs: " << error << std::endl;
