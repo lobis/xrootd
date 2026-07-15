@@ -12,6 +12,10 @@ setup() {
     printf 'first' > "$BATS_TEST_TMPDIR/xrdfs-full-url/data/first.txt"
     printf 'second' > "$BATS_TEST_TMPDIR/xrdfs-full-url/data/second.txt"
     : > "$BATS_TEST_TMPDIR/xrdfs-full-url/data/empty.txt"
+    printf 'hidden' > "$BATS_TEST_TMPDIR/xrdfs-full-url/data/.hidden.txt"
+    dd if=/dev/zero \
+        of="$BATS_TEST_TMPDIR/xrdfs-full-url/data/1025-bytes.dat" \
+        bs=1025 count=1 2>/dev/null
     printf '\000\001\177\200\377' \
         > "$BATS_TEST_TMPDIR/xrdfs-full-url/data/binary.dat"
     printf 'dash' > "$BATS_TEST_TMPDIR/xrdfs-full-url/-dash.txt"
@@ -78,11 +82,52 @@ bats::on_failure() {
     run "$XRDFS" ls -lH "$TEST_DIRECTORY"
     assert_success
     assert_output --partial first.txt
+    assert_output --partial '1.1K'
 
     run "$XRDFS" ls --long --human-readable --directory "$TEST_DIRECTORY"
     assert_success
     assert_output --partial /data/
     refute_output --partial first.txt
+}
+
+@test "ls accepts gfal all and uncolored options as no-ops" {
+    run "$XRDFS" ls "$TEST_DIRECTORY"
+    assert_success
+    local native_output=$output
+    assert_output --partial .hidden.txt
+
+    run "$XRDFS" ls -a "$TEST_DIRECTORY"
+    assert_success
+    assert_output "$native_output"
+
+    run "$XRDFS" ls --all --color=never "$TEST_DIRECTORY"
+    assert_success
+    assert_output "$native_output"
+
+    run "$XRDFS" ls --color never "$TEST_DIRECTORY"
+    assert_success
+    assert_output "$native_output"
+
+    run "$XRDFS" ls -la "$TEST_DIRECTORY"
+    assert_success
+    assert_output --partial .hidden.txt
+}
+
+@test "ls rejects unsupported gfal presentation options" {
+    for option in --time-style=full-iso --full-time --color=auto \
+        --unknown-option; do
+        run "$XRDFS" ls "$option" "$TEST_DIRECTORY"
+        assert_failure
+        assert_output --partial 'Invalid arguments'
+    done
+
+    run "$XRDFS" ls --color always "$TEST_DIRECTORY"
+    assert_failure
+    assert_output --partial 'Invalid arguments'
+
+    run "$XRDFS" ls --xattr user.status "$TEST_DIRECTORY"
+    assert_failure
+    assert_output --partial 'Invalid arguments'
 }
 
 @test "ls option delimiter preserves dash-prefixed paths" {

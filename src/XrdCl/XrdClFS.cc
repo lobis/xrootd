@@ -399,6 +399,9 @@ XRootDStatus DoLS( FileSystem                      *fs,
       case 'd':
         directory = true;
         return true;
+      case 'a':
+        // xrdfs already includes entries whose names begin with a dot.
+        return true;
       default:
         return false;
     }
@@ -421,6 +424,37 @@ XRootDStatus DoLS( FileSystem                      *fs,
       human = true;
     else if( parseOptions && args[i] == "--directory" )
       directory = true;
+    else if( parseOptions && args[i] == "--all" )
+    {
+      // Compatibility no-op: unlike gfal-ls, xrdfs does not hide dotfiles.
+      continue;
+    }
+    else if( parseOptions && args[i] == "--color=never" )
+    {
+      // Compatibility no-op: xrdfs output is already uncolored.
+      continue;
+    }
+    else if( parseOptions && args[i] == "--color" )
+    {
+      if( i + 1 == args.size() )
+      {
+        log->Error( AppMsg, "Parameter '--color' requires an argument." );
+        return XRootDStatus( stError, errInvalidArgs );
+      }
+      if( args[i + 1] != "never" )
+      {
+        log->Error( AppMsg, "Unsupported --color value: %s.",
+                    args[i + 1].c_str() );
+        return XRootDStatus( stError, errInvalidArgs );
+      }
+      ++i;
+    }
+    else if( parseOptions && args[i].size() > 2 && args[i][0] == '-' &&
+             args[i][1] == '-' )
+    {
+      log->Error( AppMsg, "Unsupported option: %s.", args[i].c_str() );
+      return XRootDStatus( stError, errInvalidArgs );
+    }
     else if( parseOptions && args[i].size() > 1 && args[i][0] == '-' &&
              args[i][1] != '-' &&
              args[i].find_first_not_of( shortOptions, 1 ) == std::string::npos )
@@ -2362,7 +2396,8 @@ XRootDStatus PrintHelp( FileSystem *, Env *,
   printf( "     Modify permissions. Permission string example:\n"             );
   printf( "     rwxr-x--x\n\n"                                                );
 
-  printf( "   ls [-l] [-u] [-R] [-D] [-Z] [-C] [-h|-H] [-d] [--] [dirname]\n" );
+  printf( "   ls [-l] [-u] [-R] [-D] [-Z] [-C] [-h|-H] [-d] [-a]\n"       );
+  printf( "      [--color=never] [--] [dirname]\n"                         );
   printf( "     Get directory listing.\n"                                     );
   printf( "     -l|--long stat every entry and print long listing\n"          );
   printf( "     -u print paths as URLs\n"                                     );
@@ -2372,6 +2407,9 @@ XRootDStatus PrintHelp( FileSystem *, Env *,
   printf( "     -C checksum every entry\n"                                    );
   printf( "     -h|-H|--human-readable print human-readable sizes\n"           );
   printf( "     -d|--directory list the entry instead of its contents\n"       );
+  printf( "     -a|--all accepted for gfal-ls compatibility; xrdfs already\n" );
+  printf( "        includes entries whose names begin with a dot\n"            );
+  printf( "     --color=never accepted for uncolored gfal-ls compatibility\n" );
   printf( "     -- stop option parsing, allowing a dash-prefixed path\n\n"     );
 
   printf( "   locate [-n] [-r] [-d] [-m] [-i] [-p] <path>\n"                  );
