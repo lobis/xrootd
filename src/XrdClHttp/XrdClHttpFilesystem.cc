@@ -252,7 +252,10 @@ XrdCl::XRootDStatus Filesystem::Query(XrdCl::QueryCode::Code  queryCode,
                 {
                     m_logger->Error(kLogXrdClHttp,
                         "Unknown checksum type %s", iter->second.c_str());
-                    preferred = XrdClHttp::ChecksumType::kCRC32C;
+                    return XrdCl::XRootDStatus(
+                        XrdCl::stError, XrdCl::errNotSupported, 0,
+                        "Unknown checksum type " + iter->second
+                    );
                 }
             }
             operation = std::make_unique<CurlChecksumOp>(

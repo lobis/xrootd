@@ -86,6 +86,23 @@ struct WaitingForBroker {
 
 namespace {
 
+bool ParseHex32(std::string_view encoded,
+                std::array<unsigned char, XrdClHttp::g_max_checksum_length> &value) {
+    if (encoded.empty() || encoded.size() > 8) return false;
+
+    uint32_t checksum{0};
+    auto result = std::from_chars(encoded.data(), encoded.data() + encoded.size(),
+                                  checksum, 16);
+    if (result.ec != std::errc() || result.ptr != encoded.data() + encoded.size())
+        return false;
+
+    value[0] = (checksum >> 24) & 0xFF;
+    value[1] = (checksum >> 16) & 0xFF;
+    value[2] = (checksum >> 8) & 0xFF;
+    value[3] = checksum & 0xFF;
+    return true;
+}
+
 pid_t getthreadid() {
 #if   defined(__APPLE__)
     uint64_t pth_threadid;
@@ -494,21 +511,28 @@ void HeaderParser::ParseDigest(const std::string &digest, XrdClHttp::ChecksumInf
     std::string digest_lower;
     while (!view.empty()) {
         auto nextsep = view.find(',');
-        auto entry = view.substr(0, nextsep);
+        auto entry = trim_view(view.substr(0, nextsep));
         if (nextsep == std::string_view::npos) {
             view = "";
         } else {
             view = view.substr(nextsep + 1);
         }
         nextsep = entry.find('=');
-        auto name = entry.substr(0, nextsep);
-        auto value = entry.substr(nextsep + 1);
+        if (nextsep == std::string_view::npos) {
+            continue;
+        }
+        auto name = trim_view(entry.substr(0, nextsep));
+        auto value = trim_view(entry.substr(nextsep + 1));
         digest_lower.clear();
         digest_lower.resize(name.size());
         std::transform(name.begin(), name.end(), digest_lower.begin(), [](unsigned char c) {
             return std::tolower(c);
         });
-        if (digest_lower == "md5") {
+        if (digest_lower == "adler32") {
+            if (ParseHex32(value, checksum_value)) {
+                info.Set(XrdClHttp::ChecksumType::kADLER32, checksum_value);
+            }
+        } else if (digest_lower == "md5") {
             if (value.size() != 24) {
                 continue;
             }
@@ -526,18 +550,7 @@ void HeaderParser::ParseDigest(const std::string &digest, XrdClHttp::ChecksumInf
                 }
                 continue;
             }
-            std::size_t pos{0};
-            unsigned long val;
-            try {
-                val = std::stoul(value.data(), &pos, 16);
-            } catch (...) {
-                continue;
-            }
-            if (pos == value.size()) {
-                checksum_value[0] = (val >> 24) & 0xFF;
-                checksum_value[1] = (val >> 16) & 0xFF;
-                checksum_value[2] = (val >> 8) & 0xFF;
-                checksum_value[3] = val & 0xFF;
+            if (ParseHex32(value, checksum_value)) {
                 info.Set(XrdClHttp::ChecksumType::kCRC32C, checksum_value);
             }
         }
@@ -548,6 +561,8 @@ void HeaderParser::ParseDigest(const std::string &digest, XrdClHttp::ChecksumInf
 // https://www.iana.org/assignments/http-dig-alg/http-dig-alg.xhtml
 std::string HeaderParser::ChecksumTypeToDigestName(XrdClHttp::ChecksumType type) {
     switch (type) {
+        case XrdClHttp::ChecksumType::kADLER32:
+            return "ADLER32";
         case XrdClHttp::ChecksumType::kMD5:
             return "MD5";
         case XrdClHttp::ChecksumType::kCRC32C:
