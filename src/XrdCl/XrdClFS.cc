@@ -25,6 +25,7 @@
 #include "XrdCl/XrdClFileSystem.hh"
 #include "XrdCl/XrdClFileSystemUtils.hh"
 #include "XrdCl/XrdClFSExecutor.hh"
+#include "XrdCl/XrdClFSCompatibility.hh"
 #include "XrdCl/XrdClFSURLCommand.hh"
 #include "XrdCl/XrdClURL.hh"
 #include "XrdCl/XrdClLog.hh"
@@ -296,6 +297,17 @@ std::string getSizeStr(uint64_t size, bool human, uint64_t base) {
   return oss.str();
 }
 
+bool IsGFALVirtualXAttr( const std::string &attribute );
+XRootDStatus GetGFALVirtualXAttr( FileSystem        *fs,
+                                 Env               *env,
+                                 const std::string &path,
+                                 const std::string &attribute,
+                                 std::string       &value );
+XRootDStatus GetNativeXAttrValue( FileSystem        *fs,
+                                 const std::string &path,
+                                 const std::string &attribute,
+                                 std::string       &value );
+
 void PrintDirListStatInfo( StatInfo *info, bool hascks = false, uint32_t ownerwidth = 0, uint32_t groupwidth = 0, uint32_t sizewidth = 0, bool human = false, uint64_t base = 1000 )
 {
   if( info->ExtendedFormat() )
@@ -365,6 +377,7 @@ XRootDStatus DoLS( FileSystem                      *fs,
   bool        directory = false;
   uint64_t base        = 1024;
   std::string path;
+  std::vector<std::string> xattrs;
   DirListFlags::Flags flags = DirListFlags::Locate | DirListFlags::Merge;
 
   auto applyOption = [&]( char option )
@@ -449,6 +462,29 @@ XRootDStatus DoLS( FileSystem                      *fs,
       }
       ++i;
     }
+    else if( parseOptions && args[i] == "--xattr" )
+    {
+      if( i + 1 == args.size() )
+      {
+        log->Error( AppMsg, "Parameter '--xattr' requires an argument." );
+        return XRootDStatus( stError, errInvalidArgs );
+      }
+      if( args[i + 1].empty() )
+      {
+        log->Error( AppMsg, "Parameter '--xattr' requires an argument." );
+        return XRootDStatus( stError, errInvalidArgs );
+      }
+      xattrs.emplace_back( args[++i] );
+    }
+    else if( parseOptions && args[i].compare( 0, 8, "--xattr=" ) == 0 )
+    {
+      if( args[i].size() == 8 )
+      {
+        log->Error( AppMsg, "Parameter '--xattr' requires an argument." );
+        return XRootDStatus( stError, errInvalidArgs );
+      }
+      xattrs.emplace_back( args[i].substr( 8 ) );
+    }
     else if( parseOptions && args[i].size() > 2 && args[i][0] == '-' &&
              args[i][1] == '-' )
     {
@@ -470,6 +506,30 @@ XRootDStatus DoLS( FileSystem                      *fs,
     // we don't merge the duplicate entries
     // in case we print the full URL
     flags &= ~DirListFlags::Merge;
+
+  auto getXAttrValues = [&]( const std::string       &xattrPath,
+                             std::vector<std::string> &values )
+  {
+    if( !stats ) return XRootDStatus();
+
+    values.reserve( xattrs.size() );
+    for( const std::string &attribute : xattrs )
+    {
+      std::string value;
+      XRootDStatus status = IsGFALVirtualXAttr( attribute ) ?
+        GetGFALVirtualXAttr( fs, env, xattrPath, attribute, value ) :
+        GetNativeXAttrValue( fs, xattrPath, attribute, value );
+      if( !status.IsOK() )
+      {
+        log->Error( AppMsg, "Unable to get attribute %s for %s: %s",
+                    attribute.c_str(), xattrPath.c_str(),
+                    status.ToStr().c_str() );
+        return status;
+      }
+      values.emplace_back( std::move( value ) );
+    }
+    return XRootDStatus();
+  };
 
   std::string newPath = "/";
   if( path.empty() )
@@ -501,6 +561,10 @@ XRootDStatus DoLS( FileSystem                      *fs,
       (!info->TestFlags( StatInfo::IsDir ) &&
        !( flags & DirListFlags::Zip )) )
   {
+    std::vector<std::string> values;
+    st = getXAttrValues( newPath, values );
+    if( !st.IsOK() ) return st;
+
     if( stats )
       PrintDirListStatInfo( info, false, 0, 0, 0, human, base );
 
@@ -510,7 +574,10 @@ XRootDStatus DoLS( FileSystem                      *fs,
       fs->GetProperty( "LastURL", url );
       std::cout << url;
     }
-    std::cout << newPath << std::endl;
+    std::cout << newPath;
+    for( const std::string &value : values )
+      std::cout << '\t' << value;
+    std::cout << std::endl;
     return XRootDStatus();
   }
 
@@ -527,6 +594,7 @@ XRootDStatus DoLS( FileSystem                      *fs,
     log->Error( AppMsg, "Unable to list the path: %s", st.ToStr().c_str() );
     return st;
   }
+  std::unique_ptr<DirectoryList> listPtr( list );
 
   if( st.code == suPartial )
   {
@@ -539,6 +607,7 @@ XRootDStatus DoLS( FileSystem                      *fs,
   for( it = list->Begin(); it != list->End() && stats; ++it )
   {
     StatInfo *info = (*it)->GetStatInfo();
+    if( !info ) continue;
 
     std::string size = getSizeStr(info->GetSize(),human,base);
     uint32_t sizeWidthComp;
@@ -563,19 +632,34 @@ XRootDStatus DoLS( FileSystem                      *fs,
   //----------------------------------------------------------------------------
   for( it = list->Begin(); it != list->End(); ++it )
   {
+    StatInfo *entryInfo = stats ? (*it)->GetStatInfo() : 0;
+    if( stats && !xattrs.empty() && !entryInfo )
+    {
+      // gfal-ls omits dangling entries before requesting their attributes.
+      continue;
+    }
+
+    const std::string entryPath =
+      list->GetParentName() + (*it)->GetName();
+    std::vector<std::string> values;
+    st = getXAttrValues( entryPath, values );
+    if( !st.IsOK() ) return st;
+
     if( stats )
     {
-      StatInfo *info = (*it)->GetStatInfo();
-      if( !info )
+      if( !entryInfo )
         std::cout << "---- 0000-00-00 00:00:00            ? ";
       else
-        PrintDirListStatInfo( info, hascks, ownerwidth, groupwidth, sizewidth, human, base );
+        PrintDirListStatInfo( entryInfo, hascks, ownerwidth, groupwidth,
+                              sizewidth, human, base );
     }
     if( showUrls )
       std::cout << "root://" << (*it)->GetHostAddress() << "/";
-    std::cout << list->GetParentName() << (*it)->GetName() << std::endl;
+    std::cout << entryPath;
+    for( const std::string &value : values )
+      std::cout << '\t' << value;
+    std::cout << std::endl;
   }
-  delete list;
   return XRootDStatus();
 }
 
@@ -2128,16 +2212,9 @@ XRootDStatus GetGFALVirtualXAttr( FileSystem        *fs,
     if( !info )
       return XRootDStatus( stError, errInvalidResponse, 0,
                            "Stat returned no response." );
-    const bool onTape = info->TestFlags( StatInfo::BackUpExists );
-    const bool onDisk = !info->TestFlags( StatInfo::Offline );
-    if( onTape && onDisk )
-      value = "ONLINE_AND_NEARLINE";
-    else if( onTape )
-      value = "NEARLINE";
-    else if( onDisk )
-      value = "ONLINE";
-    else
-      value = "UNKNOWN";
+    value = GetGFALFileStatus(
+      info->TestFlags( StatInfo::Offline ),
+      info->TestFlags( StatInfo::BackUpExists ) );
     return XRootDStatus();
   }
 
@@ -2397,7 +2474,7 @@ XRootDStatus PrintHelp( FileSystem *, Env *,
   printf( "     rwxr-x--x\n\n"                                                );
 
   printf( "   ls [-l] [-u] [-R] [-D] [-Z] [-C] [-h|-H] [-d] [-a]\n"       );
-  printf( "      [--color=never] [--] [dirname]\n"                         );
+  printf( "      [--color=never] [--xattr name] [--] [dirname]\n"          );
   printf( "     Get directory listing.\n"                                     );
   printf( "     -l|--long stat every entry and print long listing\n"          );
   printf( "     -u print paths as URLs\n"                                     );
@@ -2410,6 +2487,8 @@ XRootDStatus PrintHelp( FileSystem *, Env *,
   printf( "     -a|--all accepted for gfal-ls compatibility; xrdfs already\n" );
   printf( "        includes entries whose names begin with a dot\n"            );
   printf( "     --color=never accepted for uncolored gfal-ls compatibility\n" );
+  printf( "     --xattr name append an attribute value to long output; may\n" );
+  printf( "        be repeated and has no visible effect without -l\n"         );
   printf( "     -- stop option parsing, allowing a dash-prefixed path\n\n"     );
 
   printf( "   locate [-n] [-r] [-d] [-m] [-i] [-p] <path>\n"                  );

@@ -177,6 +177,7 @@ if(NOT XRDCL_LIB_ONLY)
 
   add_executable(xrdfs
     XrdClFS.cc
+    XrdClFSCompatibility.cc XrdClFSCompatibility.hh
     XrdClFSExecutor.cc XrdClFSExecutor.hh
     XrdClFSURLCommand.cc XrdClFSURLCommand.hh)
 

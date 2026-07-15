@@ -8,11 +8,13 @@ bats_load_library 'bats-assert'
 load ../helper/common.bash
 
 setup() {
-    mkdir -p "$BATS_TEST_TMPDIR/xrdfs-full-url/data"
+    mkdir -p "$BATS_TEST_TMPDIR/xrdfs-full-url/data/subdir"
     printf 'first' > "$BATS_TEST_TMPDIR/xrdfs-full-url/data/first.txt"
     printf 'second' > "$BATS_TEST_TMPDIR/xrdfs-full-url/data/second.txt"
     : > "$BATS_TEST_TMPDIR/xrdfs-full-url/data/empty.txt"
     printf 'hidden' > "$BATS_TEST_TMPDIR/xrdfs-full-url/data/.hidden.txt"
+    printf 'nested' \
+        > "$BATS_TEST_TMPDIR/xrdfs-full-url/data/subdir/nested.txt"
     dd if=/dev/zero \
         of="$BATS_TEST_TMPDIR/xrdfs-full-url/data/1025-bytes.dat" \
         bs=1025 count=1 2>/dev/null
@@ -24,6 +26,7 @@ setup() {
 
     export TEST_ENDPOINT=root://localhost:11965
     export TEST_DIRECTORY=$TEST_ENDPOINT//data/
+    export TEST_SUBDIRECTORY=$TEST_ENDPOINT//data/subdir/
     export TEST_FILE=$TEST_ENDPOINT//data/first.txt
     export TEST_SECOND_FILE=$TEST_ENDPOINT//data/second.txt
     export TEST_EMPTY_FILE=$TEST_ENDPOINT//data/empty.txt
@@ -124,10 +127,31 @@ bats::on_failure() {
     run "$XRDFS" ls --color always "$TEST_DIRECTORY"
     assert_failure
     assert_output --partial 'Invalid arguments'
+}
 
-    run "$XRDFS" ls --xattr user.status "$TEST_DIRECTORY"
+@test "ls appends repeatable gfal xattrs only to long output" {
+    run "$XRDFS" ls --xattr missing.attribute "$TEST_FILE"
+    assert_success
+    assert_output /data/first.txt
+
+    run "$XRDFS" ls -l --xattr user.status \
+        --xattr=user.checksum.adler32 "$TEST_FILE"
+    assert_success
+    assert_output --regexp $'\tONLINE\t[[:xdigit:]]{8}$'
+
+    run "$XRDFS" ls -l --xattr missing.attribute "$TEST_FILE"
     assert_failure
-    assert_output --partial 'Invalid arguments'
+
+    local listing="$BATS_TEST_TMPDIR/ls-xattrs.out"
+    run bash -c '"$1" ls -l --xattr user.status \
+        --xattr user.checksum.adler32 "$2" >"$3"' \
+        _ "$XRDFS" "$TEST_SUBDIRECTORY" "$listing"
+    assert_success
+    run awk -F '\t' '
+        NF != 3 || $2 != "ONLINE" || $3 !~ /^[[:xdigit:]]{8}$/ { exit 1 }
+        END { if (NR == 0) exit 1 }
+    ' "$listing"
+    assert_success
 }
 
 @test "ls option delimiter preserves dash-prefixed paths" {

@@ -190,6 +190,16 @@ TEST( XrdClFSURLCommand, LeavesURLValuedNonPathOperandsUntouched )
       {"cat", "-o", "https://local-output.example/value", "/store/file"}
     },
     {
+      {"ls", "--xattr", "https://attribute.example/value",
+             "root://root.example.org//store/file"},
+      {"ls", "--xattr", "https://attribute.example/value", "/store/file"}
+    },
+    {
+      {"ls", "--color", "https://color.example/value",
+             "root://root.example.org//store/file"},
+      {"ls", "--color", "https://color.example/value", "/store/file"}
+    },
+    {
       {"tail", "-c", "https://offset.example/value",
                "root://root.example.org//store/file"},
       {"tail", "-c", "https://offset.example/value", "/store/file"}

@@ -74,13 +74,16 @@ namespace
       return !IsOptionValue( arguments, index, "-q" );
     if( command == "cat" )
       return !IsOptionValue( arguments, index, "-o" );
+    if( command == "ls" )
+      return !IsOptionValue( arguments, index, "--color" ) &&
+             !IsOptionValue( arguments, index, "--xattr" );
     if( command == "tail" )
       return !IsOptionValue( arguments, index, "-c" );
     if( command == "prepare" )
       return !IsOptionValue( arguments, index, "-a" ) &&
              !IsOptionValue( arguments, index, "-p" );
 
-    // locate, ls, mkdir, and rm have no options with separate values.
+    // locate, mkdir, and rm have no options with separate values.
     return true;
   }
 
