@@ -220,11 +220,28 @@ l - connection statistics
 
 
 .RE
-\fBrm\fR \fI<filename>\fR \fI[<filenames>]\fR
+\fBrm\fR \fI[-r|-R|--recursive]\fR \fI[--]\fR \fI<path>\fR \fI[<paths>]\fR
 .RS 3
 Remove one or more files. For HTTP(S) and DAV(S) endpoints, each target is
 verified not to be a collection before any DELETE request is sent. This avoids
 using WebDAV's recursive collection DELETE for a non-recursive file removal.
+.br
+\fI-r\fR, \fI-R\fR, \fI--recursive\fR remove directories and their contents.
+Native XRootD trees are traversed iteratively in postorder with existing
+\fIRm\fR, \fIDirList\fR, and \fIRmDir\fR operations. File removal is attempted
+first, and directory symlinks are never followed. A successful WebDAV
+collection DELETE completes the recursive operand without client traversal.
+Partial or ambiguous responses fail closed.
+.br
+Every recursive operand is validated before the first mutation. Empty paths,
+the namespace root, and paths containing dot or dot-dot traversal components
+are rejected. URL query parameters are preserved while addressing descendants.
+.br
+If one top-level tree fails, its remaining children are not attempted, but
+later top-level operands are still processed. The first failure is returned;
+multi-path recursive removal is therefore not transactional.
+.br
+\fI--\fR stop option parsing, allowing a path beginning with a dash.
 
 .RE
 \fBrmdir\fR \fI<dirname>\fR

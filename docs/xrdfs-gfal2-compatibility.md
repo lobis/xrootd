@@ -117,6 +117,8 @@ a second namespace implementation.
 | `gfal-chmod 0750 "$FILE_A"` | `xrdfs chmod 0750 "$FILE_A"` | Adds gfal's octal mode-first order. |
 | — | `xrdfs chmod "$FILE_A" rwxr-x---` | Preserves xrdfs's symbolic path-first form. Octal path-first mode remains supported too. |
 | `gfal-rename "$FILE_A" "$FILE_B"` | `xrdfs mv "$FILE_A" "$FILE_B"` | Renames a file or directory through the existing XrdCl move operation on one ROOT endpoint. |
+| `gfal-rm "$FILE_A" "$FILE_B"` | `xrdfs rm "$FILE_A" "$FILE_B"` | Removes files through the existing XrdCl `Rm` operation. All URL operands must use one endpoint. |
+| `gfal-rm -r "$DIR"` | `xrdfs rm -r "$DIR"` | Adds `-r`, `-R`, and `--recursive`; native directory trees use an iterative CLI-local postorder traversal. |
 
 `mkdir` deliberately retains xrdfs's historical default mode of `0750`.
 Scripts that depend on gfal-mkdir's different default should pass an explicit
@@ -150,7 +152,7 @@ DAVS URLs still require the installed XrdClHttp plugin, and support for
 permissions and namespace flags depends on that backend; WebDAV parity is
 tracked separately.
 
-### Non-recursive removal safety
+### Removal safety and recursive removal
 
 Native XRootD distinguishes file removal from directory removal and lets the
 server enforce that `rmdir` only removes an empty directory. WebDAV instead
@@ -164,6 +166,33 @@ removal continues to use the existing server operation directly, including its
 symlink behavior. The WebDAV checks are client-side preflights rather than an
 atomic server primitive, so callers must still exclude concurrent namespace
 changes while removing a directory.
+
+With `-r`, `-R`, or `--recursive`, `xrdfs rm` remains a thin client of existing
+XrdCl operations rather than adding a recursive filesystem API. For each native
+ROOT operand it first tries `Rm`, which removes ordinary files and safely
+unlinkable symlinks without a metadata lookup. A directory response is checked
+with `RmDir`: an empty directory is removed immediately, while only an explicit
+nonempty-directory response permits a non-recursive `DirList`. Children are
+then processed by an iterative postorder stack and the directory is removed
+with `RmDir`. This avoids call-stack depth limits and never uses
+`DirListFlags::Recursive`.
+
+The native probe is important for directory symlinks. Some Linux backends can
+report a directory error when `Rm` sees an absolute symlink to a directory;
+`RmDir` fails on the symlink itself, so `xrdfs` stops instead of listing and
+following its target. Partial listings, unsafe child names, HTTP 207
+Multi-Status, and other ambiguous errors are terminal for that tree. Later
+top-level operands are still attempted, and the first error is returned.
+
+WebDAV collection DELETE is recursive by protocol definition. A successful
+DELETE therefore completes that operand directly. `xrdfs` does not emulate a
+second client-side traversal after success, and a 207 Multi-Status remains a
+failure because it can describe partially deleted descendants.
+
+Every recursive operand is checked before any mutation. Empty paths, the
+namespace root, and dot or dot-dot traversal components (including encoded
+forms) are rejected. Child paths retain the operand's URL query parameters.
+Use `--` before a dash-prefixed path.
 
 ## Remote-to-local copies with `xrdcp`
 
@@ -232,8 +261,11 @@ localhost fixture. They cover:
 - same-endpoint ROOT renames through complete-URL and legacy syntax, including
   regular-file replacement, directory trees, failure preservation, and
   mixed-endpoint prevalidation;
-- fail-closed WebDAV non-recursive removal decisions and unchanged native ROOT
-  symlink and non-empty-directory removal behavior.
+- fail-closed WebDAV non-recursive removal decisions;
+- recursive native ROOT trees, empty directories, multiple operands, missing
+  targets, special names, root and traversal guards, deep trees, and directory
+  symlink target preservation;
+- successful WebDAV collection DELETE and terminal multi-status handling.
 
 The expected behavior is derived from the corresponding gfal2-util commands,
 but gfal2 is not a build-time or runtime dependency of `xrdfs`, and it is not
@@ -296,7 +328,8 @@ The following are intentionally outside the compatibility covered here:
 
 - a new `xrd` command;
 - raw `query` in command-first form;
-- recursive removal and gfal-rm auxiliary modes;
+- gfal-rm auxiliary modes (`--dry-run`, `--just-delete`, `--from-file`, and
+  `--bulk`);
 - uploads, third-party copies, or any other copy with a remote destination;
 - exact recursive-copy layout, copy-chain, or dry-run parity;
 - full gfal2 common-option parity;

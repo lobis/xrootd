@@ -74,7 +74,13 @@ class WebDAVHandler(http.server.BaseHTTPRequestHandler):
         self.respond(207, body, "application/xml; charset=utf-8")
 
     def do_DELETE(self):
-        self.record()
+        path = self.record()
+        if path == "/partial":
+            self.respond(207, b"<multistatus/>", "application/xml")
+            return
+        if path == "/forbidden":
+            self.respond(403)
+            return
         self.respond(204)
 
 

@@ -353,6 +353,48 @@ bats::on_failure() {
     assert_success
 }
 
+@test "reference rm: recursive nested and empty trees agree" {
+    require_gfal2_command gfal-rm
+    local root=$BATS_TEST_TMPDIR/xrdfs-gfal2-reference
+    local gfal_tree=$root/rm-reference/gfal-tree
+    local xrdfs_tree=$root/rm-reference/xrdfs-tree
+    mkdir -p "$gfal_tree/nested/empty" "$gfal_tree/empty-child" \
+        "$xrdfs_tree/nested/empty" "$xrdfs_tree/empty-child"
+    printf 'gfal' > "$gfal_tree/nested/file"
+    printf 'xrdfs' > "$xrdfs_tree/nested/file"
+
+    run gfal-rm -r "$TEST_ENDPOINT//rm-reference/gfal-tree"
+    assert_success
+    run "$XRDFS" rm --recursive \
+        "$TEST_ENDPOINT//rm-reference/xrdfs-tree"
+    assert_success
+
+    run test ! -e "$gfal_tree"
+    assert_success
+    run test ! -e "$xrdfs_tree"
+    assert_success
+}
+
+@test "reference rm: nonrecursive directory rejection agrees" {
+    require_gfal2_command gfal-rm
+    local root=$BATS_TEST_TMPDIR/xrdfs-gfal2-reference
+    local gfal_tree=$root/rm-reference/gfal-nonrecursive
+    local xrdfs_tree=$root/rm-reference/xrdfs-nonrecursive
+    mkdir -p "$gfal_tree" "$xrdfs_tree"
+    printf 'keep' > "$gfal_tree/marker"
+    printf 'keep' > "$xrdfs_tree/marker"
+
+    run gfal-rm "$TEST_ENDPOINT//rm-reference/gfal-nonrecursive"
+    assert_failure
+    run "$XRDFS" rm "$TEST_ENDPOINT//rm-reference/xrdfs-nonrecursive"
+    assert_failure
+
+    run test -f "$gfal_tree/marker"
+    assert_success
+    run test -f "$xrdfs_tree/marker"
+    assert_success
+}
+
 @test "reference stat: regular and empty files have matching size semantics" {
     local name expected gfal_out xrdfs_out
     for name in regular empty; do

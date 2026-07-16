@@ -1,0 +1,379 @@
+//------------------------------------------------------------------------------
+// Copyright (c) 2026 by European Organization for Nuclear Research (CERN)
+//------------------------------------------------------------------------------
+// This file is part of the XRootD software suite.
+//
+// XRootD is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Lesser General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//------------------------------------------------------------------------------
+
+#include "XrdCl/XrdClFSRemove.hh"
+
+#include "XProtocol/XProtocol.hh"
+
+#include <cctype>
+#include <utility>
+
+namespace
+{
+  int HexDigit( char character )
+  {
+    const unsigned char value = static_cast<unsigned char>( character );
+    if( std::isdigit( value ) ) return character - '0';
+    if( character >= 'a' && character <= 'f' ) return character - 'a' + 10;
+    if( character >= 'A' && character <= 'F' ) return character - 'A' + 10;
+    return -1;
+  }
+
+  std::string DecodePercentEscapes( const std::string &path )
+  {
+    std::string decoded;
+    decoded.reserve( path.size() );
+    for( std::size_t i = 0; i < path.size(); ++i )
+    {
+      if( path[i] == '%' && i + 2 < path.size() )
+      {
+        const int high = HexDigit( path[i + 1] );
+        const int low = HexDigit( path[i + 2] );
+        if( high >= 0 && low >= 0 )
+        {
+          decoded.push_back( static_cast<char>( high * 16 + low ) );
+          i += 2;
+          continue;
+        }
+      }
+      decoded.push_back( path[i] );
+    }
+    return decoded;
+  }
+
+  bool HasDotComponent( const std::string &path )
+  {
+    std::size_t begin = 0;
+    while( begin <= path.size() )
+    {
+      const std::size_t end = path.find( '/', begin );
+      const std::string component = path.substr(
+        begin, end == std::string::npos ? std::string::npos : end - begin );
+      if( component == "." || component == ".." ) return true;
+      if( end == std::string::npos ) break;
+      begin = end + 1;
+    }
+    return false;
+  }
+
+  bool IsRootPath( const std::string &path )
+  {
+    if( path.empty() ) return true;
+    for( const char character : path )
+      if( character != '/' ) return false;
+    return true;
+  }
+
+  bool ValidateChildName( const std::string &child, std::string &error )
+  {
+    const std::string decoded = DecodePercentEscapes( child );
+    if( child.empty() || child == "." || child == ".." ||
+        child.find( '/' ) != std::string::npos ||
+        child.find( '?' ) != std::string::npos ||
+        decoded.empty() || decoded == "." || decoded == ".." ||
+        decoded.find( '/' ) != std::string::npos ||
+        decoded.find( '\0' ) != std::string::npos )
+    {
+      error = "directory listing returned an unsafe child name";
+      return false;
+    }
+    return true;
+  }
+
+  XrdCl::XRootDStatus InvalidRemovePathStatus( const std::string &message )
+  {
+    return XrdCl::XRootDStatus( XrdCl::stError, XrdCl::errInvalidArgs, 0,
+                                message );
+  }
+
+  XrdCl::XRootDStatus InvalidListingStatus( const std::string &message )
+  {
+    return XrdCl::XRootDStatus( XrdCl::stError,
+                                XrdCl::errInvalidResponse, 0, message );
+  }
+
+  XrdCl::XRootDStatus IncompleteOperationStatus( const char *operation )
+  {
+    return InvalidListingStatus(
+      std::string( operation ) + " did not return a complete response" );
+  }
+}
+
+namespace XrdCl
+{
+  bool ParseRemoveCommand( const std::vector<std::string> &arguments,
+                           RemoveCommand                  &command,
+                           std::string                    &error )
+  {
+    command = RemoveCommand();
+    error.clear();
+
+    bool parseOptions = true;
+    for( std::size_t i = 1; i < arguments.size(); ++i )
+    {
+      const std::string &argument = arguments[i];
+      if( parseOptions && argument == "--" )
+      {
+        parseOptions = false;
+        continue;
+      }
+      if( parseOptions &&
+          (argument == "-r" || argument == "-R" ||
+           argument == "--recursive") )
+      {
+        command.recursive = true;
+        continue;
+      }
+      if( parseOptions && argument.size() > 1 && argument[0] == '-' )
+      {
+        error = "unknown rm option: " + argument;
+        return false;
+      }
+      command.paths.push_back( argument );
+    }
+
+    if( command.paths.empty() )
+    {
+      error = "rm requires at least one path";
+      return false;
+    }
+    return true;
+  }
+
+  bool ValidateRecursiveRemovePath( const std::string &path,
+                                    std::string       &error )
+  {
+    error.clear();
+    const std::size_t query = path.find( '?' );
+    const std::string pathPart = path.substr( 0, query );
+    const std::string decoded = DecodePercentEscapes( pathPart );
+
+    if( IsRootPath( pathPart ) || IsRootPath( decoded ) )
+    {
+      error = "recursive removal of the namespace root is not allowed";
+      return false;
+    }
+    if( HasDotComponent( pathPart ) || HasDotComponent( decoded ) )
+    {
+      error = "recursive removal paths must not contain '.' or '..' components";
+      return false;
+    }
+    if( decoded.find( '\0' ) != std::string::npos )
+    {
+      error = "recursive removal paths must not contain an encoded NUL byte";
+      return false;
+    }
+    return true;
+  }
+
+  bool IsRecursiveRemovalDirectoryStatus( const XRootDStatus &status,
+                                          bool nativeXRootD )
+  {
+    return nativeXRootD && !status.IsOK() &&
+           status.code == errErrorResponse &&
+           (status.errNo == kXR_isDirectory ||
+            status.errNo == kXR_ItExists);
+  }
+
+  std::string RecursiveRemovalChildPath( const std::string &parent,
+                                         const std::string &child )
+  {
+    const std::size_t query = parent.find( '?' );
+    std::string path = parent.substr( 0, query );
+    const std::string parameters = query == std::string::npos ?
+      std::string() : parent.substr( query );
+
+    while( path.size() > 1 && path.back() == '/' ) path.pop_back();
+    path += '/';
+    path += child;
+    path += parameters;
+    return path;
+  }
+
+  XRootDStatus RemoveRecursively(
+    const std::vector<std::string> &paths,
+    const RecursiveRemoveOperations &operations,
+    std::string &failedPath )
+  {
+    failedPath.clear();
+    std::string error;
+    for( const std::string &path : paths )
+    {
+      if( !ValidateRecursiveRemovePath( path, error ) )
+      {
+        failedPath = path;
+        return InvalidRemovePathStatus( error );
+      }
+    }
+
+    struct StackEntry
+    {
+      std::string path;
+      bool postorder;
+    };
+
+    bool haveFailure = false;
+    XRootDStatus firstFailure;
+    for( const std::string &root : paths )
+    {
+      bool rootFailed = false;
+      std::vector<StackEntry> stack;
+      stack.push_back( {root, false} );
+      while( !stack.empty() )
+      {
+        StackEntry &entry = stack.back();
+        if( entry.postorder )
+        {
+          XRootDStatus status = operations.removeDirectory( entry.path );
+          if( !status.IsOK() || status.code != suDone )
+          {
+            if( !haveFailure )
+            {
+              failedPath = entry.path;
+              firstFailure = status.IsOK() ?
+                IncompleteOperationStatus( "directory removal" ) : status;
+              haveFailure = true;
+            }
+            rootFailed = true;
+            break;
+          }
+          stack.pop_back();
+          continue;
+        }
+
+        XRootDStatus status = operations.remove( entry.path );
+        if( status.IsOK() && status.code == suDone )
+        {
+          stack.pop_back();
+          continue;
+        }
+        if( status.IsOK() )
+        {
+          if( !haveFailure )
+          {
+            failedPath = entry.path;
+            firstFailure = IncompleteOperationStatus( "removal" );
+            haveFailure = true;
+          }
+          rootFailed = true;
+          break;
+        }
+        if( !IsRecursiveRemovalDirectoryStatus(
+              status, operations.nativeXRootD ) )
+        {
+          if( !haveFailure )
+          {
+            failedPath = entry.path;
+            firstFailure = status;
+            haveFailure = true;
+          }
+          rootFailed = true;
+          break;
+        }
+
+        if( status.errNo == kXR_isDirectory )
+        {
+          // On Linux an absolute symlink to a directory can make native Rm
+          // report EISDIR. RmDir is a non-following type probe: it removes an
+          // empty real directory, reports ENOTEMPTY for a nonempty real
+          // directory, and fails for the symlink itself. Listing is safe only
+          // after that explicit nonempty-directory response.
+          status = operations.removeDirectory( entry.path );
+          if( status.IsOK() && status.code == suDone )
+          {
+            stack.pop_back();
+            continue;
+          }
+          if( status.IsOK() || status.code != errErrorResponse ||
+              status.errNo != kXR_ItExists )
+          {
+            if( !haveFailure )
+            {
+              failedPath = entry.path;
+              firstFailure = status.IsOK() ?
+                IncompleteOperationStatus( "directory removal probe" ) :
+                status;
+              haveFailure = true;
+            }
+            rootFailed = true;
+            break;
+          }
+        }
+
+        std::vector<std::string> children;
+        status = operations.list( entry.path, children );
+        if( !status.IsOK() )
+        {
+          if( !haveFailure )
+          {
+            failedPath = entry.path;
+            firstFailure = status;
+            haveFailure = true;
+          }
+          rootFailed = true;
+          break;
+        }
+        if( status.code != suDone )
+        {
+          if( !haveFailure )
+          {
+            failedPath = entry.path;
+            firstFailure = IncompleteOperationStatus( "directory listing" );
+            haveFailure = true;
+          }
+          rootFailed = true;
+          break;
+        }
+
+        std::vector<std::string> childPaths;
+        childPaths.reserve( children.size() );
+        for( const std::string &child : children )
+        {
+          // Some directory backends expose POSIX pseudo-entries. They are not
+          // children and must never be traversed.
+          if( child == "." || child == ".." ) continue;
+          if( !ValidateChildName( child, error ) )
+          {
+            if( !haveFailure )
+            {
+              failedPath = entry.path;
+              firstFailure = InvalidListingStatus( error );
+              haveFailure = true;
+            }
+            rootFailed = true;
+            break;
+          }
+          std::string childPath = RecursiveRemovalChildPath( entry.path, child );
+          if( !ValidateRecursiveRemovePath( childPath, error ) )
+          {
+            if( !haveFailure )
+            {
+              failedPath = childPath;
+              firstFailure = InvalidListingStatus( error );
+              haveFailure = true;
+            }
+            rootFailed = true;
+            break;
+          }
+          childPaths.push_back( std::move( childPath ) );
+        }
+
+        if( rootFailed ) break;
+
+        entry.postorder = true;
+        for( auto child = childPaths.rbegin(); child != childPaths.rend();
+             ++child )
+          stack.push_back( {*child, false} );
+      }
+    }
+    return haveFailure ? firstFailure : XRootDStatus();
+  }
+}

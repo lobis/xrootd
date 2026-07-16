@@ -242,6 +242,20 @@ TEST( XrdClFSURLCommand, NormalizesEveryMvAndRmPath )
                "rm", "/store/one", "/store/two", "/store/three"}) );
 }
 
+TEST( XrdClFSURLCommand, KeepsRecursiveRmOptionsOutsideURLNormalization )
+{
+  for( const char *option : {"-r", "-R", "--recursive"} )
+  {
+    NormalizedCommand command = Normalize(
+      {"rm", option, "root://root.example.org//store/tree?auth=value"} );
+    ASSERT_EQ( command.result, XrdCl::ValidURLCommand ) << option;
+    EXPECT_EQ( command.endpoint.GetProtocol(), "root" ) << option;
+    EXPECT_EQ( command.arguments,
+               (std::vector<std::string>{
+                 "rm", option, "/store/tree?auth=value"}) ) << option;
+  }
+}
+
 TEST( XrdClFSURLCommand, ReducesURLsUsingTheSameEffectiveEndpoint )
 {
   NormalizedCommand command = Normalize(

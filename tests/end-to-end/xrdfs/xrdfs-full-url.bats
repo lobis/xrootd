@@ -349,6 +349,105 @@ request_count() {
     assert_success
 }
 
+@test "recursive rm removes nested, empty, and specially named native trees" {
+    local root=$BATS_TEST_TMPDIR/xrdfs-full-url
+    local tree=$root/remove-recursive
+    mkdir -p "$tree/nested/empty" "$tree/standalone-empty" \
+        "$tree/special names/-child"
+    printf 'top' > "$tree/top.txt"
+    printf 'leaf' > "$tree/nested/leaf.txt"
+    printf 'hidden' > "$tree/special names/.hidden"
+    printf 'space' > "$tree/special names/file with spaces"
+    printf 'unicode' > "$tree/special names/unicodé-文件"
+    printf 'percent' > "$tree/special names/percent%name"
+    printf 'hash' > "$tree/special names/hash#name"
+
+    run "$XRDFS" rm --recursive "$TEST_ENDPOINT//remove-recursive"
+    assert_success
+    run test ! -e "$tree"
+    assert_success
+}
+
+@test "recursive rm continues with later operands after a missing target" {
+    local root=$BATS_TEST_TMPDIR/xrdfs-full-url
+    mkdir -p "$root/remove-after-missing-one/nested" \
+        "$root/remove-after-missing-two/empty"
+    printf 'one' > "$root/remove-after-missing-one/nested/file"
+    printf 'two' > "$root/remove-after-missing-two/file"
+
+    run "$XRDFS" rm -R \
+        "$TEST_ENDPOINT//missing-recursive-target" \
+        "$TEST_ENDPOINT//remove-after-missing-one" \
+        "$TEST_ENDPOINT//remove-after-missing-two"
+    assert_failure
+    run test ! -e "$root/remove-after-missing-one"
+    assert_success
+    run test ! -e "$root/remove-after-missing-two"
+    assert_success
+}
+
+@test "recursive rm delimiter handles dash paths without following symlinks" {
+    local root=$BATS_TEST_TMPDIR/xrdfs-full-url
+    mkdir -p "$root/-recursive-dash/nested" \
+        "$root/recursive-link-target"
+    printf 'inside' > "$root/-recursive-dash/nested/file"
+    printf 'preserve' > "$root/recursive-link-target/keep"
+    ln -s ../recursive-link-target \
+        "$root/-recursive-dash/directory-link"
+
+    run bash -c \
+        'printf "cd /\nrm -r -- -recursive-dash\nexit\n" | "$1" "$2"' \
+        _ "$XRDFS" "$TEST_ENDPOINT"
+    assert_success
+    run test ! -e "$root/-recursive-dash"
+    assert_success
+    run test -f "$root/recursive-link-target/keep"
+    assert_success
+}
+
+@test "recursive rm never follows an absolute directory symlink" {
+    local root=$BATS_TEST_TMPDIR/xrdfs-full-url
+    mkdir -p "$root/absolute-link-target"
+    printf 'preserve' > "$root/absolute-link-target/marker"
+    ln -s "$root/absolute-link-target" "$root/absolute-directory-link"
+
+    run "$XRDFS" rm -r "$TEST_ENDPOINT//absolute-directory-link"
+    assert_failure
+    run test -L "$root/absolute-directory-link"
+    assert_success
+    run test -f "$root/absolute-link-target/marker"
+    assert_success
+}
+
+@test "recursive rm prevalidates the root guard before any mutation" {
+    local root=$BATS_TEST_TMPDIR/xrdfs-full-url
+    mkdir -p "$root/remove-before-root-guard/nested"
+    printf 'keep' > "$root/remove-before-root-guard/nested/file"
+
+    run "$XRDFS" rm -r \
+        "$TEST_ENDPOINT//remove-before-root-guard" "$TEST_ENDPOINT//"
+    assert_failure
+    run test -f "$root/remove-before-root-guard/nested/file"
+    assert_success
+}
+
+@test "recursive rm handles deep native trees iteratively" {
+    local root=$BATS_TEST_TMPDIR/xrdfs-full-url
+    local tree=$root/remove-deep
+    local path=$tree
+    mkdir -p "$path"
+    for _ in {1..160}; do
+        path=$path/d
+        mkdir "$path"
+    done
+    printf 'deep' > "$path/leaf"
+
+    run "$XRDFS" rm -r "$TEST_ENDPOINT//remove-deep"
+    assert_success
+    run test ! -e "$tree"
+    assert_success
+}
+
 @test "WebDAV non-recursive removal verifies targets before DELETE" {
     local mock=$BATS_TEST_TMPDIR/webdav-removal
     local plugins=$mock/client.plugins.d
@@ -411,6 +510,39 @@ request_count() {
     run request_count DELETE /empty "$requests"
     assert_success
     assert_output 1
+
+    # Recursive mode intentionally relies on WebDAV collection DELETE. A 204
+    # means the whole collection operation completed, so no client traversal
+    # or additional metadata request is needed.
+    run env XRD_PLUGINCONFDIR="$plugins" \
+        "$XRDFS" rm -r "$endpoint/directory"
+    assert_success
+    run request_count DELETE /directory "$requests"
+    assert_success
+    assert_output 1
+    run request_count PROPFIND /directory "$requests"
+    assert_success
+    assert_output 1
+
+    run env XRD_PLUGINCONFDIR="$plugins" \
+        "$XRDFS" rm --recursive "$endpoint/partial"
+    assert_failure
+    run request_count DELETE /partial "$requests"
+    assert_success
+    assert_output 1
+    run request_count PROPFIND /partial "$requests"
+    assert_success
+    assert_output 0
+
+    run env XRD_PLUGINCONFDIR="$plugins" \
+        "$XRDFS" rm --recursive "$endpoint/forbidden"
+    assert_failure
+    run request_count DELETE /forbidden "$requests"
+    assert_success
+    assert_output 1
+    run request_count PROPFIND /forbidden "$requests"
+    assert_success
+    assert_output 0
 
     kill "$mock_pid"
     wait "$mock_pid" 2>/dev/null || true

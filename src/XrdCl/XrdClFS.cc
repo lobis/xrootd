@@ -26,6 +26,7 @@
 #include "XrdCl/XrdClFileSystemUtils.hh"
 #include "XrdCl/XrdClFSExecutor.hh"
 #include "XrdCl/XrdClFSCompatibility.hh"
+#include "XrdCl/XrdClFSRemove.hh"
 #include "XrdCl/XrdClFSURLCommand.hh"
 #include "XrdCl/XrdClURL.hh"
 #include "XrdCl/XrdClLog.hh"
@@ -58,6 +59,8 @@
 #endif
 
 using namespace XrdCl;
+
+bool IsXRootDProtocol( Env *env );
 
 namespace
 {
@@ -960,25 +963,107 @@ XRootDStatus DoRm( FileSystem                      *fs,
   // Check up the args
   //----------------------------------------------------------------------------
   Log         *log     = DefaultEnv::GetLog();
-  uint32_t     argc    = args.size();
-
-  if( argc < 2 )
+  RemoveCommand command;
+  std::string parseError;
+  if( !ParseRemoveCommand( args, command, parseError ) )
   {
-    log->Error( AppMsg, "Wrong number of arguments." );
+    log->Error( AppMsg, "%s", parseError.c_str() );
     return XRootDStatus( stError, errInvalidArgs );
   }
 
   std::vector<std::string> fullPaths;
-  fullPaths.reserve( argc - 1 );
-  for( size_t i = 1; i < argc; ++i )
+  fullPaths.reserve( command.paths.size() );
+  for( const std::string &path : command.paths )
   {
-    std::string fullPath;
-    if( !BuildPath( fullPath, env, args[i] ).IsOK() )
+    if( command.recursive &&
+        !ValidateRecursiveRemovePath( path, parseError ) )
     {
-      log->Error( AppMsg, "Invalid path: %s", fullPath.c_str() );
+      log->Error( AppMsg, "Invalid recursive removal path %s: %s",
+                          path.c_str(), parseError.c_str() );
+      return XRootDStatus( stError, errInvalidArgs, 0, parseError );
+    }
+
+    std::string fullPath;
+    if( !BuildPath( fullPath, env, path ).IsOK() )
+    {
+      log->Error( AppMsg, "Invalid path: %s", path.c_str() );
       return XRootDStatus( stError, errInvalidArgs );
     }
     fullPaths.emplace_back( std::move( fullPath ) );
+  }
+
+  if( command.recursive )
+  {
+    // Validate every resolved operand before the first mutation. This also
+    // catches relative paths which resolve to the namespace root.
+    for( const std::string &fullPath : fullPaths )
+    {
+      if( !ValidateRecursiveRemovePath( fullPath, parseError ) )
+      {
+        log->Error( AppMsg, "Invalid recursive removal path %s: %s",
+                            fullPath.c_str(), parseError.c_str() );
+        return XRootDStatus( stError, errInvalidArgs, 0, parseError );
+      }
+    }
+
+    RecursiveRemoveOperations operations;
+    operations.nativeXRootD = IsXRootDProtocol( env );
+    operations.remove = [fs]( const std::string &path )
+    {
+      // Trying Rm first is important: a native directory symlink is unlinked
+      // here instead of being followed by a metadata operation.
+      return fs->Rm( path );
+    };
+    operations.list = [fs]( const std::string &path,
+                            std::vector<std::string> &children )
+    {
+      DirectoryList *rawList = nullptr;
+      XRootDStatus status = fs->DirList( path, DirListFlags::None, rawList );
+      std::unique_ptr<DirectoryList> list( rawList );
+      if( !status.IsOK() || status.code != suDone ) return status;
+      if( !list )
+        return XRootDStatus( stError, errInvalidResponse, 0,
+                             "Directory listing succeeded without a response." );
+
+      children.reserve( list->GetSize() );
+      for( DirectoryList::ConstIterator entry = list->Begin();
+           entry != list->End(); ++entry )
+      {
+        if( !*entry )
+          return XRootDStatus( stError, errInvalidResponse, 0,
+                               "Directory listing contained a null entry." );
+        children.push_back( (*entry)->GetName() );
+      }
+      return status;
+    };
+    operations.removeDirectory = [fs]( const std::string &path )
+    {
+      return fs->RmDir( path );
+    };
+
+    bool haveFailure = false;
+    XRootDStatus firstFailure;
+    // Process operands in command-line order. A failed tree is abandoned, but
+    // later top-level operands are still attempted, matching multi-file rm.
+    for( const std::string &fullPath : fullPaths )
+    {
+      std::string failedPath;
+      XRootDStatus status = RemoveRecursively(
+        {fullPath}, operations, failedPath );
+      if( !status.IsOK() )
+      {
+        log->Error( AppMsg, "Unable to recursively remove %s: %s",
+                            failedPath.c_str(), status.ToStr().c_str() );
+        if( !haveFailure )
+        {
+          firstFailure = status;
+          haveFailure = true;
+        }
+        continue;
+      }
+      std::cout << "rm " << fullPath << " : " << status.ToString() << '\n';
+    }
+    return haveFailure ? firstFailure : XRootDStatus();
   }
 
   if( NeedsWebDAVRemovalGuard( env ) )
@@ -1006,7 +1091,7 @@ XRootDStatus DoRm( FileSystem                      *fs,
     std::mutex mtx;
   };
   std::shared_ptr<print_t> print;
-  if( argc - 1 > 0 )
+  if( !fullPaths.empty() )
     print = std::make_shared<print_t>();
 
   std::vector<Pipeline> rms;
@@ -2919,9 +3004,15 @@ XRootDStatus PrintHelp( FileSystem *, Env *,
   printf( "     xattr          <path>   Extended attributes\n"            );
   printf( "     prepare        <reqid> [filenames]  Prepare request status\n\n" );
 
-  printf( "   rm <filename>...\n"                                           );
-  printf( "     Remove one or more files without recursive directory\n"     );
-  printf( "     deletion.\n\n"                                              );
+  printf( "   rm [-r|-R|--recursive] [--] <path>...\n"                      );
+  printf( "     Remove one or more files or directory trees.\n"              );
+  printf( "     -r, -R, --recursive remove directories and their contents\n" );
+  printf( "                         without following directory symlinks\n"   );
+  printf( "                         WebDAV uses collection DELETE directly\n"  );
+  printf( "     Recursive root and traversal paths are rejected up front.\n"   );
+  printf( "     Later operands continue after a failure; the first error is\n"   );
+  printf( "     returned, so multi-path removal is not transactional.\n"        );
+  printf( "     -- stop option parsing, allowing a dash-prefixed path\n\n"   );
 
   printf( "   rmdir <dirname>\n"                                            );
   printf( "     Remove an empty directory.\n\n"                              );
