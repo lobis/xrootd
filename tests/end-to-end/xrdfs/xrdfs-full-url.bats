@@ -240,6 +240,99 @@ request_count() {
     assert_output 710
 }
 
+@test "mv accepts complete URLs and preserves legacy syntax" {
+    local root=$BATS_TEST_TMPDIR/xrdfs-full-url
+
+    printf 'complete-url' > "$root/mv-url-source"
+    run "$XRDFS" mv \
+        "$TEST_ENDPOINT//mv-url-source" \
+        "$TEST_ENDPOINT//mv-url-destination"
+    assert_success
+    run test ! -e "$root/mv-url-source"
+    assert_success
+    run test "$(cat "$root/mv-url-destination")" = complete-url
+    assert_success
+
+    printf 'legacy' > "$root/mv-legacy-source"
+    run "$XRDFS" "$TEST_ENDPOINT" mv \
+        /mv-legacy-source /mv-legacy-destination
+    assert_success
+    run test ! -e "$root/mv-legacy-source"
+    assert_success
+    run test "$(cat "$root/mv-legacy-destination")" = legacy
+    assert_success
+}
+
+@test "mv replaces regular destinations and preserves directory trees" {
+    local root=$BATS_TEST_TMPDIR/xrdfs-full-url
+
+    printf 'replacement' > "$root/mv-overwrite-source"
+    printf 'stale' > "$root/mv-overwrite-destination"
+    run "$XRDFS" mv \
+        "$TEST_ENDPOINT//mv-overwrite-source" \
+        "$TEST_ENDPOINT//mv-overwrite-destination"
+    assert_success
+    run test ! -e "$root/mv-overwrite-source"
+    assert_success
+    run test "$(cat "$root/mv-overwrite-destination")" = replacement
+    assert_success
+
+    mkdir -p \
+        "$root/mv-tree-source/nested" \
+        "$root/mv-tree-source/empty-child"
+    printf 'leaf' > "$root/mv-tree-source/nested/leaf.txt"
+    printf 'hidden' > "$root/mv-tree-source/.hidden.txt"
+    run "$XRDFS" mv \
+        "$TEST_ENDPOINT//mv-tree-source" \
+        "$TEST_ENDPOINT//mv-tree-destination"
+    assert_success
+    run test ! -e "$root/mv-tree-source"
+    assert_success
+    run test "$(cat "$root/mv-tree-destination/nested/leaf.txt")" = leaf
+    assert_success
+    run test "$(cat "$root/mv-tree-destination/.hidden.txt")" = hidden
+    assert_success
+    run test -d "$root/mv-tree-destination/empty-child"
+    assert_success
+}
+
+@test "mv failures leave the controlled namespace unchanged" {
+    local root=$BATS_TEST_TMPDIR/xrdfs-full-url
+
+    run "$XRDFS" mv \
+        "$TEST_ENDPOINT//mv-missing-source" \
+        "$TEST_ENDPOINT//mv-missing-destination"
+    assert_failure
+    run test ! -e "$root/mv-missing-destination"
+    assert_success
+
+    printf 'source' > "$root/mv-directory-collision-source"
+    mkdir -p "$root/mv-directory-collision-destination"
+    printf 'marker' \
+        > "$root/mv-directory-collision-destination/marker.txt"
+    run "$XRDFS" mv \
+        "$TEST_ENDPOINT//mv-directory-collision-source" \
+        "$TEST_ENDPOINT//mv-directory-collision-destination"
+    assert_failure
+    run test "$(cat "$root/mv-directory-collision-source")" = source
+    assert_success
+    run test \
+        "$(cat "$root/mv-directory-collision-destination/marker.txt")" \
+        = marker
+    assert_success
+
+    printf 'sentinel' > "$root/mv-mixed-endpoint-source"
+    run "$XRDFS" mv \
+        "$TEST_ENDPOINT//mv-mixed-endpoint-source" \
+        root://127.0.0.1:11965//mv-mixed-endpoint-destination
+    assert_failure 1
+    assert_output 'xrdfs: all URL operands must use the same endpoint'
+    run test "$(cat "$root/mv-mixed-endpoint-source")" = sentinel
+    assert_success
+    run test ! -e "$root/mv-mixed-endpoint-destination"
+    assert_success
+}
+
 @test "native ROOT removal keeps server-side symlink and rmdir semantics" {
     local root=$BATS_TEST_TMPDIR/xrdfs-full-url
 

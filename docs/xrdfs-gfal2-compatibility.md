@@ -106,8 +106,8 @@ of the GFAL virtual-attribute compatibility described here.
 ## Namespace mutations
 
 The namespace compatibility layer only parses gfal-style operands and then
-calls the existing XrdCl `MkDir` and `ChMod` operations. It does not add a
-second namespace implementation.
+calls the existing XrdCl `MkDir`, `ChMod`, and `Mv` operations. It does not add
+a second namespace implementation.
 
 | gfal2-util | `xrdfs` | Compatibility provided |
 | --- | --- | --- |
@@ -116,6 +116,7 @@ second namespace implementation.
 | `gfal-mkdir -m 0755 "$DIR_A" "$DIR_B"` | `xrdfs mkdir -m 0755 "$DIR_A" "$DIR_B"` | Validates every supplied mode, the endpoint, and every path before the first mutation, then creates directories in operand order. |
 | `gfal-chmod 0750 "$FILE_A"` | `xrdfs chmod 0750 "$FILE_A"` | Adds gfal's octal mode-first order. |
 | — | `xrdfs chmod "$FILE_A" rwxr-x---` | Preserves xrdfs's symbolic path-first form. Octal path-first mode remains supported too. |
+| `gfal-rename "$FILE_A" "$FILE_B"` | `xrdfs mv "$FILE_A" "$FILE_B"` | Renames a file or directory through the existing XrdCl move operation on one ROOT endpoint. |
 
 `mkdir` deliberately retains xrdfs's historical default mode of `0750`.
 Scripts that depend on gfal-mkdir's different default should pass an explicit
@@ -125,6 +126,22 @@ For `chmod`, path-first interpretation wins when the second operand is a valid
 symbolic or octal mode. Otherwise, the first operand must be a valid octal mode
 and is interpreted using gfal's mode-first order. Symbolic mode-first input is
 rejected, avoiding an ambiguous change to the legacy xrdfs grammar.
+
+`mv` accepts two complete URLs when their protocol, credentials, host, and
+effective port identify the same endpoint. It is a namespace rename, not a
+cross-storage copy: mixed endpoints are rejected before the remote operation,
+while the legacy `xrdfs <endpoint> mv <source> <destination>` form remains
+supported.
+
+On the usual local XrdOss backend, an authorized rename replaces an existing
+regular-file destination. Authorization policy and other storage backends can
+apply different overwrite rules. Directory collisions and exact error or exit
+statuses are likewise backend-specific; migration code should depend on the
+success or failure of the operation rather than a particular diagnostic.
+
+This rename mapping is currently claimed only for native XRootD protocols.
+XrdClHttp does not implement the XrdCl `Mv` operation, so parsing complete
+HTTP(S) or DAV(S) operands does not provide a WebDAV rename operation.
 
 These namespace operations use the native XRootD protocol directly. Its server
 always grants owner read, write, and execute permissions when creating a
@@ -212,6 +229,9 @@ localhost fixture. They cover:
 - rejection of local URLs and mixed remote endpoints;
 - octal and symbolic namespace modes, all supported `mkdir` option spellings,
   multiple directory operands, legacy syntax, and pre-mutation validation;
+- same-endpoint ROOT renames through complete-URL and legacy syntax, including
+  regular-file replacement, directory trees, failure preservation, and
+  mixed-endpoint prevalidation;
 - fail-closed WebDAV non-recursive removal decisions and unchanged native ROOT
   symlink and non-empty-directory removal behavior.
 
@@ -268,6 +288,9 @@ example, HTTP and HTTPS access requires the XrdCl HTTP plugin, and support for
 an operation such as directory listing still depends on that plugin and the
 remote server. Protocols supported by GFAL but without an XrdCl implementation
 are not added by this compatibility work.
+
+In particular, XrdClHttp does not currently implement `Mv`; HTTPS and DAV
+rename compatibility is not claimed here.
 
 The following are intentionally outside the compatibility covered here:
 

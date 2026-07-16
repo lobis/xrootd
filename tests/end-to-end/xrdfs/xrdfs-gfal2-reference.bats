@@ -242,6 +242,117 @@ bats::on_failure() {
     assert_output "$gfal_mode"
 }
 
+@test "reference rename: regular-file replacement agrees" {
+    require_gfal2_command gfal-rename
+    local root=$BATS_TEST_TMPDIR/xrdfs-gfal2-reference
+
+    printf 'replacement' > "$root/gfal-rename-source"
+    printf 'replacement' > "$root/xrdfs-mv-source"
+    printf 'stale' > "$root/gfal-rename-destination"
+    printf 'stale' > "$root/xrdfs-mv-destination"
+
+    run gfal-rename \
+        "$TEST_ENDPOINT//gfal-rename-source" \
+        "$TEST_ENDPOINT//gfal-rename-destination"
+    assert_success
+    run "$XRDFS" mv \
+        "$TEST_ENDPOINT//xrdfs-mv-source" \
+        "$TEST_ENDPOINT//xrdfs-mv-destination"
+    assert_success
+
+    run test ! -e "$root/gfal-rename-source"
+    assert_success
+    run test ! -e "$root/xrdfs-mv-source"
+    assert_success
+    run cmp \
+        "$root/gfal-rename-destination" \
+        "$root/xrdfs-mv-destination"
+    assert_success
+    run test "$(cat "$root/xrdfs-mv-destination")" = replacement
+    assert_success
+}
+
+@test "reference rename: directory trees agree" {
+    require_gfal2_command gfal-rename
+    local root=$BATS_TEST_TMPDIR/xrdfs-gfal2-reference
+
+    mkdir -p \
+        "$root/gfal-rename-tree/nested" \
+        "$root/gfal-rename-tree/empty-child" \
+        "$root/xrdfs-mv-tree/nested" \
+        "$root/xrdfs-mv-tree/empty-child"
+    printf 'leaf' > "$root/gfal-rename-tree/nested/leaf.txt"
+    printf 'leaf' > "$root/xrdfs-mv-tree/nested/leaf.txt"
+    printf 'hidden' > "$root/gfal-rename-tree/.hidden.txt"
+    printf 'hidden' > "$root/xrdfs-mv-tree/.hidden.txt"
+
+    run gfal-rename \
+        "$TEST_ENDPOINT//gfal-rename-tree" \
+        "$TEST_ENDPOINT//gfal-renamed-tree"
+    assert_success
+    run "$XRDFS" mv \
+        "$TEST_ENDPOINT//xrdfs-mv-tree" \
+        "$TEST_ENDPOINT//xrdfs-moved-tree"
+    assert_success
+
+    run test ! -e "$root/gfal-rename-tree"
+    assert_success
+    run test ! -e "$root/xrdfs-mv-tree"
+    assert_success
+    run diff -r "$root/gfal-renamed-tree" "$root/xrdfs-moved-tree"
+    assert_success
+}
+
+@test "reference rename: missing and directory destinations fail safely" {
+    require_gfal2_command gfal-rename
+    local root=$BATS_TEST_TMPDIR/xrdfs-gfal2-reference
+
+    run gfal-rename \
+        "$TEST_ENDPOINT//gfal-missing-rename-source" \
+        "$TEST_ENDPOINT//gfal-missing-rename-destination"
+    assert_failure
+    run "$XRDFS" mv \
+        "$TEST_ENDPOINT//xrdfs-missing-mv-source" \
+        "$TEST_ENDPOINT//xrdfs-missing-mv-destination"
+    assert_failure
+    run test ! -e "$root/gfal-missing-rename-destination"
+    assert_success
+    run test ! -e "$root/xrdfs-missing-mv-destination"
+    assert_success
+
+    printf 'source' > "$root/gfal-directory-collision-source"
+    printf 'source' > "$root/xrdfs-directory-collision-source"
+    mkdir -p \
+        "$root/gfal-directory-collision-destination" \
+        "$root/xrdfs-directory-collision-destination"
+    printf 'marker' \
+        > "$root/gfal-directory-collision-destination/marker.txt"
+    printf 'marker' \
+        > "$root/xrdfs-directory-collision-destination/marker.txt"
+
+    run gfal-rename \
+        "$TEST_ENDPOINT//gfal-directory-collision-source" \
+        "$TEST_ENDPOINT//gfal-directory-collision-destination"
+    assert_failure
+    run "$XRDFS" mv \
+        "$TEST_ENDPOINT//xrdfs-directory-collision-source" \
+        "$TEST_ENDPOINT//xrdfs-directory-collision-destination"
+    assert_failure
+
+    run test "$(cat "$root/gfal-directory-collision-source")" = source
+    assert_success
+    run test "$(cat "$root/xrdfs-directory-collision-source")" = source
+    assert_success
+    run test \
+        "$(cat "$root/gfal-directory-collision-destination/marker.txt")" \
+        = marker
+    assert_success
+    run test \
+        "$(cat "$root/xrdfs-directory-collision-destination/marker.txt")" \
+        = marker
+    assert_success
+}
+
 @test "reference stat: regular and empty files have matching size semantics" {
     local name expected gfal_out xrdfs_out
     for name in regular empty; do
