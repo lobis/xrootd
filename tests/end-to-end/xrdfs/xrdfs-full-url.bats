@@ -8,6 +8,7 @@ bats_load_library 'bats-assert'
 load ../helper/common.bash
 
 setup() {
+    umask 022
     mkdir -p "$BATS_TEST_TMPDIR/xrdfs-full-url/data/subdir"
     printf 'first' > "$BATS_TEST_TMPDIR/xrdfs-full-url/data/first.txt"
     printf 'second' > "$BATS_TEST_TMPDIR/xrdfs-full-url/data/second.txt"
@@ -59,6 +60,14 @@ bats::on_failure() {
     print_log_files
 }
 
+local_mode() {
+    if stat -c '%a' "$1" >/dev/null 2>&1; then
+        stat -c '%a' "$1"
+    else
+        stat -f '%Lp' "$1"
+    fi
+}
+
 @test "legacy and complete-URL stat forms have identical output" {
     run "$XRDFS" "$TEST_ENDPOINT" stat /data/first.txt
     assert_success
@@ -79,6 +88,148 @@ bats::on_failure() {
     assert_success
     assert_output "$legacy_output"
     assert_output --partial first.txt
+}
+
+@test "mkdir accepts gfal octal modes and multiple complete URLs" {
+    local root=$BATS_TEST_TMPDIR/xrdfs-full-url
+
+    run "$XRDFS" mkdir -p -m 0751 \
+        "$TEST_ENDPOINT//mkdir-compat/separate-one" \
+        "$TEST_ENDPOINT//mkdir-compat/separate-two"
+    assert_success
+    run local_mode "$root/mkdir-compat/separate-one"
+    assert_success
+    assert_output 751
+    run local_mode "$root/mkdir-compat/separate-two"
+    assert_success
+    assert_output 751
+
+    run "$XRDFS" mkdir --parents --mode=0710 \
+        "$TEST_ENDPOINT//mkdir-compat/long-equals"
+    assert_success
+    run local_mode "$root/mkdir-compat/long-equals"
+    assert_success
+    assert_output 710
+
+    run "$XRDFS" mkdir -p -m0701 \
+        "$TEST_ENDPOINT//mkdir-compat/short-attached"
+    assert_success
+    run local_mode "$root/mkdir-compat/short-attached"
+    assert_success
+    assert_output 701
+
+    run "$XRDFS" mkdir -p --mode 0711 \
+        "$TEST_ENDPOINT//mkdir-compat/long-separated"
+    assert_success
+    run local_mode "$root/mkdir-compat/long-separated"
+    assert_success
+    assert_output 711
+}
+
+@test "mkdir preserves legacy symbolic modes and the default mode" {
+    local root=$BATS_TEST_TMPDIR/xrdfs-full-url
+
+    run "$XRDFS" "$TEST_ENDPOINT" mkdir -p -mrwxr-x--- \
+        /mkdir-compat/legacy
+    assert_success
+    run local_mode "$root/mkdir-compat/legacy"
+    assert_success
+    assert_output 750
+
+    run "$XRDFS" mkdir -p "$TEST_ENDPOINT//mkdir-compat/default"
+    assert_success
+    run local_mode "$root/mkdir-compat/default"
+    assert_success
+    assert_output 750
+}
+
+@test "mkdir validates every operand before the first mutation" {
+    local root=$BATS_TEST_TMPDIR/xrdfs-full-url
+
+    for mode in 0788 1000 0755garbage ''; do
+        run "$XRDFS" mkdir --mode="$mode" \
+            "$TEST_ENDPOINT//invalid-mode-one" \
+            "$TEST_ENDPOINT//invalid-mode-two"
+        assert_failure
+        run test ! -e "$root/invalid-mode-one"
+        assert_success
+        run test ! -e "$root/invalid-mode-two"
+        assert_success
+
+        run "$XRDFS" mkdir --mode="$mode" --mode=0755 \
+            "$TEST_ENDPOINT//overwritten-invalid-mode"
+        assert_failure
+        run test ! -e "$root/overwritten-invalid-mode"
+        assert_success
+    done
+
+    run "$XRDFS" "$TEST_ENDPOINT" mkdir /valid-first-path ''
+    assert_failure
+    run test ! -e "$root/valid-first-path"
+    assert_success
+
+    run "$XRDFS" mkdir "$TEST_ENDPOINT//same-endpoint-first" \
+        root://127.0.0.1:11965//different-endpoint-second
+    assert_failure 1
+    assert_output 'xrdfs: all URL operands must use the same endpoint'
+    run test ! -e "$root/same-endpoint-first"
+    assert_success
+}
+
+@test "mkdir option delimiter preserves a dash-prefixed path" {
+    local root=$BATS_TEST_TMPDIR/xrdfs-full-url
+
+    run bash -c \
+        'printf "cd /\nmkdir -- -mkdir-compat\nexit\n" | "$1" "$2"' \
+        _ "$XRDFS" "$TEST_ENDPOINT"
+    assert_success
+    run test -d "$root/-mkdir-compat"
+    assert_success
+
+    run "$XRDFS" "$TEST_ENDPOINT" mkdir -rejected-without-delimiter
+    assert_failure
+    run test ! -e "$root/-rejected-without-delimiter"
+    assert_success
+}
+
+@test "chmod accepts gfal mode-first and legacy path-first forms" {
+    local root=$BATS_TEST_TMPDIR/xrdfs-full-url
+    local url=$TEST_ENDPOINT//chmod-compat
+
+    run "$XRDFS" mkdir "$url"
+    assert_success
+
+    run "$XRDFS" chmod 0715 "$url"
+    assert_success
+    run local_mode "$root/chmod-compat"
+    assert_success
+    assert_output 715
+
+    run "$XRDFS" chmod "$url" rwxr-x---
+    assert_success
+    run local_mode "$root/chmod-compat"
+    assert_success
+    assert_output 750
+
+    run "$XRDFS" "$TEST_ENDPOINT" chmod /chmod-compat 0704
+    assert_success
+    run local_mode "$root/chmod-compat"
+    assert_success
+    assert_output 704
+}
+
+@test "chmod keeps path-first precedence for mode-shaped path names" {
+    local root=$BATS_TEST_TMPDIR/xrdfs-full-url
+
+    run "$XRDFS" mkdir "$TEST_ENDPOINT//0755"
+    assert_success
+    run bash -c \
+        'printf "cd /\nchmod 0755 0710\nexit\n" | "$1" "$2"' \
+        _ "$XRDFS" "$TEST_ENDPOINT"
+    assert_success
+    run local_mode "$root/0755"
+    assert_success
+    assert_output 710
 }
 
 @test "ls accepts gfal human-readable and directory options" {

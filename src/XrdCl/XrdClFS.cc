@@ -173,51 +173,6 @@ XRootDStatus BuildPath( std::string &newPath, Env *env,
 }
 
 //------------------------------------------------------------------------------
-// Convert mode string to uint16_t
-//------------------------------------------------------------------------------
-XRootDStatus ConvertMode( Access::Mode &mode, const std::string &modeStr )
-{
-  if( modeStr.length() != 9 )
-    return XRootDStatus( stError, errInvalidArgs );
-
-  mode = Access::None;
-  for( int i = 0; i < 3; ++i )
-  {
-    if( modeStr[i] == 'r' )
-      mode |= Access::UR;
-    else if( modeStr[i] == 'w' )
-      mode |= Access::UW;
-    else if( modeStr[i] == 'x' )
-      mode |= Access::UX;
-    else if( modeStr[i] != '-' )
-      return XRootDStatus( stError, errInvalidArgs );
-  }
-  for( int i = 3; i < 6; ++i )
-  {
-    if( modeStr[i] == 'r' )
-      mode |= Access::GR;
-    else if( modeStr[i] == 'w' )
-      mode |= Access::GW;
-    else if( modeStr[i] == 'x' )
-      mode |= Access::GX;
-    else if( modeStr[i] != '-' )
-      return XRootDStatus( stError, errInvalidArgs );
-  }
-  for( int i = 6; i < 9; ++i )
-  {
-    if( modeStr[i] == 'r' )
-      mode |= Access::OR;
-    else if( modeStr[i] == 'w' )
-      mode |= Access::OW;
-    else if( modeStr[i] == 'x' )
-      mode |= Access::OX;
-    else if( modeStr[i] != '-' )
-      return XRootDStatus( stError, errInvalidArgs );
-  }
-  return XRootDStatus();
-}
-
-//------------------------------------------------------------------------------
 // Perform a cache operation
 //------------------------------------------------------------------------------
 XRootDStatus DoCache( FileSystem                      *fs,
@@ -725,54 +680,95 @@ XRootDStatus DoMkDir( FileSystem                      *fs,
   //----------------------------------------------------------------------------
   // Check up the args
   //----------------------------------------------------------------------------
-  Log         *log     = DefaultEnv::GetLog();
-  uint32_t     argc    = args.size();
-
-  if( argc < 2 || argc > 4 )
-  {
-    log->Error( AppMsg, "Too few arguments." );
-    return XRootDStatus( stError, errInvalidArgs );
-  }
-
+  Log *log = DefaultEnv::GetLog();
   MkDirFlags::Flags flags = MkDirFlags::None;
-  Access::Mode mode    = Access::None;
-  std::string  modeStr = "rwxr-x---";
-  std::string  path    = "";
+  std::vector<std::string> modeStrings( 1, "rwxr-x---" );
+  std::vector<std::string> paths;
+  bool parseOptions = true;
 
-  for( uint32_t i = 1; i < args.size(); ++i )
+  for( std::size_t i = 1; i < args.size(); ++i )
   {
-    if( args[i] == "-p" )
+    if( parseOptions && args[i] == "--" )
+    {
+      parseOptions = false;
+    }
+    else if( parseOptions && (args[i] == "-p" ||
+                              args[i] == "--parents") )
+    {
       flags |= MkDirFlags::MakePath;
-    else if( !args[i].compare( 0, 2, "-m" ) )
-      modeStr = args[i].substr( 2, 9 );
+    }
+    else if( parseOptions && (args[i] == "-m" ||
+                              args[i] == "--mode") )
+    {
+      if( i + 1 == args.size() )
+      {
+        log->Error( AppMsg, "Parameter '%s' requires an argument.",
+                    args[i].c_str() );
+        return XRootDStatus( stError, errInvalidArgs );
+      }
+      modeStrings.emplace_back( args[++i] );
+    }
+    else if( parseOptions && args[i].compare( 0, 7, "--mode=" ) == 0 )
+    {
+      modeStrings.emplace_back( args[i].substr( 7 ) );
+    }
+    else if( parseOptions && args[i].compare( 0, 2, "-m" ) == 0 )
+    {
+      modeStrings.emplace_back( args[i].substr( 2 ) );
+    }
+    else if( parseOptions && args[i].size() > 1 && args[i][0] == '-' )
+    {
+      log->Error( AppMsg, "Unsupported option: %s.", args[i].c_str() );
+      return XRootDStatus( stError, errInvalidArgs );
+    }
     else
-      path = args[i];
+    {
+      paths.emplace_back( args[i] );
+    }
   }
 
-  XRootDStatus st = ConvertMode( mode, modeStr );
-  if( !st.IsOK() )
+  if( paths.empty() )
   {
-    log->Error( AppMsg, "Invalid mode string." );
-    return st;
-  }
-
-  std::string newPath;
-  if( !BuildPath( newPath, env, path ).IsOK() )
-  {
-    log->Error( AppMsg, "Invalid path." );
+    log->Error( AppMsg, "No directory path specified." );
     return XRootDStatus( stError, errInvalidArgs );
   }
 
-  //----------------------------------------------------------------------------
-  // Run the query
-  //----------------------------------------------------------------------------
-  st = fs->MkDir( newPath, flags, mode );
-  if( !st.IsOK() )
+  Access::Mode mode = Access::None;
+  for( const std::string &modeString : modeStrings )
   {
-    log->Error( AppMsg, "Unable create directory %s: %s",
-                        newPath.c_str(),
-                        st.ToStr().c_str() );
-    return st;
+    if( ParseAccessMode( mode, modeString ) == AccessModeFormat::Invalid )
+    {
+      log->Error( AppMsg, "Invalid mode string: %s.", modeString.c_str() );
+      return XRootDStatus( stError, errInvalidArgs );
+    }
+  }
+
+  std::vector<std::string> newPaths;
+  newPaths.reserve( paths.size() );
+  for( const std::string &path : paths )
+  {
+    std::string newPath;
+    if( !BuildPath( newPath, env, path ).IsOK() )
+    {
+      log->Error( AppMsg, "Invalid path: %s.", path.c_str() );
+      return XRootDStatus( stError, errInvalidArgs );
+    }
+    newPaths.emplace_back( std::move( newPath ) );
+  }
+
+  //----------------------------------------------------------------------------
+  // Run the queries sequentially, matching gfal-mkdir's ordering.
+  //----------------------------------------------------------------------------
+  for( const std::string &newPath : newPaths )
+  {
+    XRootDStatus st = fs->MkDir( newPath, flags, mode );
+    if( !st.IsOK() )
+    {
+      log->Error( AppMsg, "Unable create directory %s: %s",
+                          newPath.c_str(),
+                          st.ToStr().c_str() );
+      return st;
+    }
   }
 
   return XRootDStatus();
@@ -1010,25 +1006,37 @@ XRootDStatus DoChMod( FileSystem                      *fs,
     return XRootDStatus( stError, errInvalidArgs );
   }
 
+  Access::Mode mode = Access::None;
+  std::string path;
+  const AccessModeFormat secondFormat = ParseAccessMode( mode, args[2] );
+  if( secondFormat != AccessModeFormat::Invalid )
+  {
+    // Preserve the historical path-first form, including a path whose name
+    // itself looks like an octal mode.
+    path = args[1];
+  }
+  else
+  {
+    const AccessModeFormat firstFormat = ParseAccessMode( mode, args[1] );
+    if( firstFormat != AccessModeFormat::Octal )
+    {
+      log->Error( AppMsg, "Invalid mode string." );
+      return XRootDStatus( stError, errInvalidArgs );
+    }
+    path = args[2];
+  }
+
   std::string fullPath;
-  if( !BuildPath( fullPath, env, args[1] ).IsOK() )
+  if( !BuildPath( fullPath, env, path ).IsOK() )
   {
     log->Error( AppMsg, "Invalid path." );
     return XRootDStatus( stError, errInvalidArgs );
   }
 
-  Access::Mode mode = Access::None;
-  XRootDStatus st = ConvertMode( mode, args[2] );
-  if( !st.IsOK() )
-  {
-    log->Error( AppMsg, "Invalid mode string." );
-    return st;
-  }
-
   //----------------------------------------------------------------------------
   // Run the query
   //----------------------------------------------------------------------------
-  st = fs->ChMod( fullPath, mode );
+  XRootDStatus st = fs->ChMod( fullPath, mode );
   if( !st.IsOK() )
   {
     log->Error( AppMsg, "Unable change mode of %s: %s",
@@ -2714,9 +2722,11 @@ XRootDStatus PrintHelp( FileSystem *, Env *,
   printf( "   cd <path>\n"                                                    );
   printf( "     Change the current working directory\n\n"                     );
 
-  printf( "   chmod <path> <user><group><other>\n"                            );
-  printf( "     Modify permissions. Permission string example:\n"             );
-  printf( "     rwxr-x--x\n\n"                                                );
+  printf( "   chmod <path> <mode>\n"                                           );
+  printf( "   chmod <octal-mode> <path>\n"                                     );
+  printf( "     Modify permissions. Modes may be symbolic (for example,\n"      );
+  printf( "     rwxr-x--x) or octal (for example, 0751). The mode-first\n"      );
+  printf( "     form accepts octal modes.\n\n"                                 );
 
   printf( "   ls [-l] [-u] [-R] [-D] [-Z] [-C] [-h|-H] [-d] [-a]\n"       );
   printf( "      [--color=never] [--xattr name] [--] [dirname]\n"          );
@@ -2746,8 +2756,10 @@ XRootDStatus PrintHelp( FileSystem *, Env *,
   printf( "     -i ignore network dependencies\n"                             );
   printf( "     -p be passive: ignore tried/triedrc cgi opaque info\n\n"      );
 
-  printf( "   mkdir [-p] [-m<user><group><other>] <dirname>\n"                );
-  printf( "     Creates a directory/tree of directories.\n\n"                 );
+  printf( "   mkdir [-p|--parents] [-m mode|--mode mode] <dirname>...\n"       );
+  printf( "     Creates one or more directories/trees of directories. Modes\n" );
+  printf( "     may be symbolic or octal; the default remains 0750. Use --\n"  );
+  printf( "     before a directory name beginning with a dash.\n\n"           );
 
   printf( "   mv <path1> <path2>\n"                                           );
   printf( "     Move path1 to path2 locally on the same server.\n\n"          );

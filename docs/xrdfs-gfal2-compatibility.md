@@ -1,7 +1,7 @@
-# Using XRootD tools for read-only gfal2-util workflows
+# Using XRootD tools for gfal2-util workflows
 
-This document covers the first compatibility slice for operators moving common
-read-only workflows from gfal2-util to XRootD tools.
+This document covers compatibility work for operators moving common read-only
+and namespace workflows from gfal2-util to XRootD tools.
 
 The metadata implementation stays inside `xrdfs`. It does not add an `xrd`
 application, a wrapper, or a second execution layer. Complete URLs and
@@ -40,6 +40,8 @@ Assume these example operands:
 
 ```sh
 DIR='root://storage.example.org//store/data/'
+DIR_A='root://storage.example.org//store/data/new-a/'
+DIR_B='root://storage.example.org//store/data/new-b/'
 FILE_A='root://storage.example.org//store/data/a.dat'
 FILE_B='root://storage.example.org//store/data/b.dat'
 ```
@@ -101,6 +103,36 @@ HTTP(S) Tape REST virtual attributes exposed by XrdClHttp are a separate
 feature. They are not enumerated by this shorthand and are not claimed as part
 of the GFAL virtual-attribute compatibility described here.
 
+## Namespace mutations
+
+The namespace compatibility layer only parses gfal-style operands and then
+calls the existing XrdCl `MkDir` and `ChMod` operations. It does not add a
+second namespace implementation.
+
+| gfal2-util | `xrdfs` | Compatibility provided |
+| --- | --- | --- |
+| `gfal-mkdir -p -m 0755 "$DIR"` | `xrdfs mkdir -p -m 0755 "$DIR"` | Accepts separated octal modes, complete URLs, and the existing `-p` spelling. |
+| `gfal-mkdir --parents --mode=0755 "$DIR"` | `xrdfs mkdir --parents --mode=0755 "$DIR"` | Adds the long gfal option spellings; `-m0755` and `--mode 0755` also work. |
+| `gfal-mkdir -m 0755 "$DIR_A" "$DIR_B"` | `xrdfs mkdir -m 0755 "$DIR_A" "$DIR_B"` | Validates every supplied mode, the endpoint, and every path before the first mutation, then creates directories in operand order. |
+| `gfal-chmod 0750 "$FILE_A"` | `xrdfs chmod 0750 "$FILE_A"` | Adds gfal's octal mode-first order. |
+| — | `xrdfs chmod "$FILE_A" rwxr-x---` | Preserves xrdfs's symbolic path-first form. Octal path-first mode remains supported too. |
+
+`mkdir` deliberately retains xrdfs's historical default mode of `0750`.
+Scripts that depend on gfal-mkdir's different default should pass an explicit
+mode, which makes the intended permissions portable and reviewable.
+
+For `chmod`, path-first interpretation wins when the second operand is a valid
+symbolic or octal mode. Otherwise, the first operand must be a valid octal mode
+and is interpreted using gfal's mode-first order. Symbolic mode-first input is
+rejected, avoiding an ambiguous change to the legacy xrdfs grammar.
+
+These namespace operations use the native XRootD protocol directly. Its server
+always grants owner read, write, and execute permissions when creating a
+directory, even when fewer owner permissions were requested. Complete HTTPS or
+DAVS URLs still require the installed XrdClHttp plugin, and support for
+permissions and namespace flags depends on that backend; WebDAV parity is
+tracked separately.
+
 ## Remote-to-local copies with `xrdcp`
 
 `gfal-copy` and `gfal-cp` downloads map to the existing `xrdcp` application.
@@ -150,7 +182,8 @@ part of this read-only compatibility work.
 ## Testing approach
 
 The XRootD tests exercise the compatibility behavior against a local XRootD
-server and controlled fixtures. They cover:
+server and controlled fixtures. Namespace tests mutate only that ephemeral
+localhost fixture. They cover:
 
 - complete-URL parsing and preservation of URL parameters;
 - legacy server-first syntax;
@@ -161,7 +194,9 @@ server and controlled fixtures. They cover:
 - GFAL virtual xattr shorthand and explicit native xattr list/get;
 - remote-to-local `xrdcp` downloads, including overwrite, checksum validation,
   input lists, and stdout;
-- rejection of local URLs and mixed remote endpoints.
+- rejection of local URLs and mixed remote endpoints;
+- octal and symbolic namespace modes, all supported `mkdir` option spellings,
+  multiple directory operands, legacy syntax, and pre-mutation validation.
 
 The expected behavior is derived from the corresponding gfal2-util commands,
 but gfal2 is not a build-time or runtime dependency of `xrdfs`, and it is not
@@ -178,8 +213,9 @@ XRDFS_GFAL2_REFERENCE=1 \
   -R '^XrdCl::xrdfs-gfal2-reference$'
 ```
 
-The enabled suite starts its own localhost XRootD server, uses generated test
-data, and writes copy destinations only below the test temporary directory.
+The enabled suite starts its own localhost XRootD server and uses generated
+test data. Namespace mutations and copy destinations remain below the test
+temporary directory.
 Optional read-only protocol comparisons can also be enabled by setting all
 four of these variables to equivalent accessible fixtures:
 
@@ -216,10 +252,11 @@ an operation such as directory listing still depends on that plugin and the
 remote server. Protocols supported by GFAL but without an XrdCl implementation
 are not added by this compatibility work.
 
-The following are intentionally outside this first slice:
+The following are intentionally outside the compatibility covered here:
 
 - a new `xrd` command;
 - raw `query` in command-first form;
+- recursive removal and gfal-rm auxiliary modes;
 - uploads, third-party copies, or any other copy with a remote destination;
 - exact recursive-copy layout, copy-chain, or dry-run parity;
 - full gfal2 common-option parity;

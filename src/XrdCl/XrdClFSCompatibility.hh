@@ -12,8 +12,22 @@
 #ifndef __XRD_CL_FS_COMPATIBILITY_HH__
 #define __XRD_CL_FS_COMPATIBILITY_HH__
 
+#include "XrdCl/XrdClFileSystem.hh"
+
+#include <string>
+
 namespace XrdCl
 {
+  enum class AccessModeFormat
+  {
+    Invalid,
+    Symbolic,
+    Octal
+  };
+
+  AccessModeFormat ParseAccessMode( Access::Mode       &mode,
+                                    const std::string &modeString );
+
   const char *GetGFALFileStatus( bool offline, bool backupExists );
 }
 

@@ -9,9 +9,9 @@ load ../helper/common.bash
 
 # This suite is a live behavioral comparison with gfal2-util. It is opt-in so
 # that gfal2 remains neither a build dependency nor a normal test dependency.
-# All remote operations target the ephemeral XRootD server created below. The
-# only setup write is the native xattr fixture; every command under comparison
-# is read-only, and every copy destination is local to BATS_TEST_TMPDIR.
+# All remote operations target the ephemeral XRootD server created below.
+# Namespace mutations are confined to that localhost fixture, and every copy
+# destination is local to BATS_TEST_TMPDIR.
 
 require_gfal2_reference() {
     if [[ "${XRDFS_GFAL2_REFERENCE:-0}" != 1 ]]; then
@@ -30,6 +30,15 @@ require_gfal2_reference() {
     # the server so such environments skip instead of producing false failures.
     if ! gfal-stat --version >/dev/null 2>&1; then
         skip 'the installed gfal2-util commands are not functional'
+    fi
+}
+
+require_gfal2_command() {
+    if ! command -v "$1" >/dev/null 2>&1; then
+        skip "$1 is required by this gfal2 reference case"
+    fi
+    if ! "$1" --version >/dev/null 2>&1; then
+        skip "the installed $1 command is not functional"
     fi
 }
 
@@ -82,6 +91,14 @@ checksum_digest() {
     awk 'NF { print $NF; exit }' "$1" | tr '[:upper:]' '[:lower:]'
 }
 
+local_mode() {
+    if stat -c '%a' "$1" >/dev/null 2>&1; then
+        stat -c '%a' "$1"
+    else
+        stat -f '%Lp' "$1"
+    fi
+}
+
 producer_pipe_status() {
     set +e
     "$@" 2>/dev/null | head -c 1 >/dev/null
@@ -92,6 +109,7 @@ producer_pipe_status() {
 
 setup() {
     require_gfal2_reference
+    umask 022
 
     local root="$BATS_TEST_TMPDIR/xrdfs-gfal2-reference"
     mkdir -p \
@@ -156,6 +174,72 @@ teardown() {
 
 bats::on_failure() {
     print_log_files
+}
+
+@test "reference mkdir: explicit octal modes and multiple operands agree" {
+    require_gfal2_command gfal-mkdir
+    local root=$BATS_TEST_TMPDIR/xrdfs-gfal2-reference
+    local gfal_one=$TEST_ENDPOINT//mkdir-reference/gfal-one
+    local gfal_two=$TEST_ENDPOINT//mkdir-reference/gfal-two
+    local xrd_one=$TEST_ENDPOINT//mkdir-reference/xrd-one
+    local xrd_two=$TEST_ENDPOINT//mkdir-reference/xrd-two
+
+    run gfal-mkdir -p -m 0751 "$gfal_one" "$gfal_two"
+    assert_success
+    run "$XRDFS" mkdir --parents --mode=0751 "$xrd_one" "$xrd_two"
+    assert_success
+
+    run local_mode "$root/mkdir-reference/gfal-one"
+    assert_success
+    local gfal_mode=$output
+    run local_mode "$root/mkdir-reference/xrd-one"
+    assert_success
+    assert_output "$gfal_mode"
+
+    run local_mode "$root/mkdir-reference/gfal-two"
+    assert_success
+    gfal_mode=$output
+    run local_mode "$root/mkdir-reference/xrd-two"
+    assert_success
+    assert_output "$gfal_mode"
+}
+
+@test "reference mkdir: the documented default mode remains distinct" {
+    require_gfal2_command gfal-mkdir
+    local root=$BATS_TEST_TMPDIR/xrdfs-gfal2-reference
+
+    run gfal-mkdir "$TEST_ENDPOINT//gfal-default-mode"
+    assert_success
+    run "$XRDFS" mkdir "$TEST_ENDPOINT//xrdfs-default-mode"
+    assert_success
+
+    run local_mode "$root/gfal-default-mode"
+    assert_success
+    assert_output 755
+    run local_mode "$root/xrdfs-default-mode"
+    assert_success
+    assert_output 750
+}
+
+@test "reference chmod: gfal and xrdfs mode-first forms agree" {
+    require_gfal2_command gfal-chmod
+    local root=$BATS_TEST_TMPDIR/xrdfs-gfal2-reference
+    local gfal_path=$TEST_ENDPOINT//gfal-chmod-reference
+    local xrd_path=$TEST_ENDPOINT//xrdfs-chmod-reference
+
+    run "$XRDFS" mkdir "$gfal_path" "$xrd_path"
+    assert_success
+    run gfal-chmod 0715 "$gfal_path"
+    assert_success
+    run "$XRDFS" chmod 0715 "$xrd_path"
+    assert_success
+
+    run local_mode "$root/gfal-chmod-reference"
+    assert_success
+    local gfal_mode=$output
+    run local_mode "$root/xrdfs-chmod-reference"
+    assert_success
+    assert_output "$gfal_mode"
 }
 
 @test "reference stat: regular and empty files have matching size semantics" {
