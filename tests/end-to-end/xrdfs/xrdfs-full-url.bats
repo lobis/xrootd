@@ -22,6 +22,7 @@ setup() {
     printf '\000\001\177\200\377' \
         > "$BATS_TEST_TMPDIR/xrdfs-full-url/data/binary.dat"
     printf 'dash' > "$BATS_TEST_TMPDIR/xrdfs-full-url/-dash.txt"
+    ln -s data/first.txt "$BATS_TEST_TMPDIR/xrdfs-full-url/remove-link"
 
     launch_xrootd xrdfs-full-url.cfg xrdfs-full-url
 
@@ -66,6 +67,13 @@ local_mode() {
     else
         stat -f '%Lp' "$1"
     fi
+}
+
+request_count() {
+    awk -v method="$1" -v path="$2" '
+        $1 == method && $2 == path { count++ }
+        END { print count + 0 }
+    ' "$3"
 }
 
 @test "legacy and complete-URL stat forms have identical output" {
@@ -230,6 +238,90 @@ local_mode() {
     run local_mode "$root/0755"
     assert_success
     assert_output 710
+}
+
+@test "native ROOT removal keeps server-side symlink and rmdir semantics" {
+    local root=$BATS_TEST_TMPDIR/xrdfs-full-url
+
+    run "$XRDFS" rm "$TEST_ENDPOINT//remove-link"
+    assert_success
+    run test ! -e "$root/remove-link"
+    assert_success
+    run test -f "$root/data/first.txt"
+    assert_success
+
+    run "$XRDFS" rmdir "$TEST_DIRECTORY"
+    assert_failure
+    run test -f "$root/data/first.txt"
+    assert_success
+}
+
+@test "WebDAV non-recursive removal verifies targets before DELETE" {
+    local mock=$BATS_TEST_TMPDIR/webdav-removal
+    local plugins=$mock/client.plugins.d
+    local port_file=$mock/port
+    local requests=$mock/requests.log
+    mkdir -p "$plugins"
+    printf '%s\n' \
+        'url = http://*;https://*;dav://*;davs://*' \
+        'lib = libXrdClHttp.so' \
+        'enable = true' > "$plugins/http.conf"
+
+    python3 "$BATS_TEST_DIRNAME/webdav-removal-mock.py" \
+        "$port_file" "$requests" &
+    local mock_pid=$!
+    printf '%s\n' "$mock_pid" > "$mock/webdav-removal.pid"
+
+    local ready=false
+    for _ in {1..50}; do
+        if [[ -s "$port_file" ]]; then
+            ready=true
+            break
+        fi
+        sleep 0.1
+    done
+    "$ready"
+
+    local endpoint=http://127.0.0.1:$(<"$port_file")
+
+    run env XRD_PLUGINCONFDIR="$plugins" \
+        "$XRDFS" rm "$endpoint/file-a" "$endpoint/directory"
+    assert_failure
+    run request_count DELETE /file-a "$requests"
+    assert_success
+    assert_output 0
+    run request_count DELETE /directory "$requests"
+    assert_success
+    assert_output 0
+
+    run env XRD_PLUGINCONFDIR="$plugins" "$XRDFS" rm "$endpoint/file"
+    assert_success
+    run request_count DELETE /file "$requests"
+    assert_success
+    assert_output 1
+
+    run env XRD_PLUGINCONFDIR="$plugins" \
+        "$XRDFS" rmdir "$endpoint/nonempty"
+    assert_failure
+    run request_count DELETE /nonempty "$requests"
+    assert_success
+    assert_output 0
+
+    run env XRD_PLUGINCONFDIR="$plugins" "$XRDFS" rmdir "$endpoint/file-a"
+    assert_failure
+    run request_count DELETE /file-a "$requests"
+    assert_success
+    assert_output 0
+
+    run env XRD_PLUGINCONFDIR="$plugins" "$XRDFS" rmdir "$endpoint/empty"
+    assert_success
+    run request_count DELETE /empty "$requests"
+    assert_success
+    assert_output 1
+
+    kill "$mock_pid"
+    wait "$mock_pid" 2>/dev/null || true
+    : > "$mock/webdav-removal.pid"
 }
 
 @test "ls accepts gfal human-readable and directory options" {

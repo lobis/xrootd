@@ -106,6 +106,76 @@ namespace
     validity = static_cast<std::uint64_t>( parsed );
     return true;
   }
+
+  bool NeedsWebDAVRemovalGuard( Env *env )
+  {
+    std::string server;
+    if( !env->GetString( "ServerURL", server ) ) return false;
+    return IsWebDAVProtocol( URL( server ).GetProtocol() );
+  }
+
+  XRootDStatus RemovalDecisionStatus(
+    NonRecursiveRemovalDecision decision )
+  {
+    switch( decision )
+    {
+      case NonRecursiveRemovalDecision::Allow:
+        return XRootDStatus();
+      case NonRecursiveRemovalDecision::IsDirectory:
+        return XRootDStatus(
+          stError, errErrorResponse, kXR_isDirectory,
+          "Target is a directory; recursive removal was not requested." );
+      case NonRecursiveRemovalDecision::NotDirectory:
+        return XRootDStatus(
+          stError, errErrorResponse, kXR_InvalidRequest,
+          "Target is not a directory." );
+      case NonRecursiveRemovalDecision::NotEmpty:
+        return XRootDStatus(
+          stError, errErrorResponse, kXR_ItExists,
+          "Directory is not empty." );
+    }
+    return XRootDStatus( stError, errInternal, 0,
+                         "Unknown removal safety decision." );
+  }
+
+  XRootDStatus GuardWebDAVRemoval( FileSystem          *fs,
+                                   const std::string   &path,
+                                   NonRecursiveRemoval  removal )
+  {
+    StatInfo *rawStat = nullptr;
+    XRootDStatus status = fs->Stat( path, rawStat );
+    std::unique_ptr<StatInfo> stat( rawStat );
+    if( !status.IsOK() ) return status;
+    if( !IsCompleteSuccess( status ) )
+      return XRootDStatus( stError, errInvalidResponse, 0,
+                           "Stat did not return a complete response." );
+    if( !stat )
+      return XRootDStatus( stError, errInvalidResponse, 0,
+                           "Stat succeeded without target metadata." );
+
+    const bool isDirectory = stat->TestFlags( StatInfo::IsDir );
+    if( removal == NonRecursiveRemoval::File )
+      return RemovalDecisionStatus( EvaluateNonRecursiveRemoval(
+        removal, isDirectory, 0 ) );
+
+    if( !isDirectory )
+      return RemovalDecisionStatus( EvaluateNonRecursiveRemoval(
+        removal, false, 0 ) );
+
+    DirectoryList *rawList = nullptr;
+    status = fs->DirList( path, DirListFlags::None, rawList );
+    std::unique_ptr<DirectoryList> list( rawList );
+    if( !status.IsOK() ) return status;
+    if( !IsCompleteSuccess( status ) )
+      return XRootDStatus( stError, errInvalidResponse, 0,
+                           "Directory listing was incomplete." );
+    if( !list )
+      return XRootDStatus( stError, errInvalidResponse, 0,
+                           "Directory listing succeeded without a response." );
+
+    return RemovalDecisionStatus( EvaluateNonRecursiveRemoval(
+      removal, true, list->GetSize() ) );
+  }
 }
 
 //------------------------------------------------------------------------------
@@ -800,6 +870,18 @@ XRootDStatus DoRmDir( FileSystem                      *query,
     return XRootDStatus( stError, errInvalidArgs );
   }
 
+  if( NeedsWebDAVRemovalGuard( env ) )
+  {
+    XRootDStatus st = GuardWebDAVRemoval(
+      query, fullPath, NonRecursiveRemoval::Directory );
+    if( !st.IsOK() )
+    {
+      log->Error( AppMsg, "Unable to safely remove directory %s: %s",
+                          fullPath.c_str(), st.ToStr().c_str() );
+      return st;
+    }
+  }
+
   //----------------------------------------------------------------------------
   // Run the query
   //----------------------------------------------------------------------------
@@ -886,6 +968,34 @@ XRootDStatus DoRm( FileSystem                      *fs,
     return XRootDStatus( stError, errInvalidArgs );
   }
 
+  std::vector<std::string> fullPaths;
+  fullPaths.reserve( argc - 1 );
+  for( size_t i = 1; i < argc; ++i )
+  {
+    std::string fullPath;
+    if( !BuildPath( fullPath, env, args[i] ).IsOK() )
+    {
+      log->Error( AppMsg, "Invalid path: %s", fullPath.c_str() );
+      return XRootDStatus( stError, errInvalidArgs );
+    }
+    fullPaths.emplace_back( std::move( fullPath ) );
+  }
+
+  if( NeedsWebDAVRemovalGuard( env ) )
+  {
+    for( const std::string &fullPath : fullPaths )
+    {
+      XRootDStatus st = GuardWebDAVRemoval(
+        fs, fullPath, NonRecursiveRemoval::File );
+      if( !st.IsOK() )
+      {
+        log->Error( AppMsg, "Unable to safely remove %s: %s",
+                            fullPath.c_str(), st.ToStr().c_str() );
+        return st;
+      }
+    }
+  }
+
   struct print_t
   {
     void print( const std::string &msg )
@@ -900,15 +1010,9 @@ XRootDStatus DoRm( FileSystem                      *fs,
     print = std::make_shared<print_t>();
 
   std::vector<Pipeline> rms;
-  rms.reserve( argc - 1 );
-  for( size_t i = 1; i < argc; ++i )
+  rms.reserve( fullPaths.size() );
+  for( const std::string &fullPath : fullPaths )
   {
-    std::string fullPath;
-    if( !BuildPath( fullPath, env, args[i] ).IsOK() )
-    {
-      log->Error( AppMsg, "Invalid path: %s", fullPath.c_str() );
-      return XRootDStatus( stError, errInvalidArgs );
-    }
     rms.emplace_back( Rm( fs, fullPath ) >>
                       [log, fullPath, print]( XRootDStatus &st )
                       {
@@ -2815,11 +2919,12 @@ XRootDStatus PrintHelp( FileSystem *, Env *,
   printf( "     xattr          <path>   Extended attributes\n"            );
   printf( "     prepare        <reqid> [filenames]  Prepare request status\n\n" );
 
-  printf( "   rm <filename>\n"                                              );
-  printf( "     Remove a file.\n\n"                                         );
+  printf( "   rm <filename>...\n"                                           );
+  printf( "     Remove one or more files without recursive directory\n"     );
+  printf( "     deletion.\n\n"                                              );
 
   printf( "   rmdir <dirname>\n"                                            );
-  printf( "     Remove a directory.\n\n"                                    );
+  printf( "     Remove an empty directory.\n\n"                              );
 
   printf( "   truncate <filename> <length>\n"                               );
   printf( "     Truncate a file.\n\n"                                       );

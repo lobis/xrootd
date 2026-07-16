@@ -133,6 +133,21 @@ DAVS URLs still require the installed XrdClHttp plugin, and support for
 permissions and namespace flags depends on that backend; WebDAV parity is
 tracked separately.
 
+### Non-recursive removal safety
+
+Native XRootD distinguishes file removal from directory removal and lets the
+server enforce that `rmdir` only removes an empty directory. WebDAV instead
+defines DELETE on a collection as recursive. Before using HTTP(S) or DAV(S)
+DELETE, `xrdfs rm` therefore verifies that every operand is a file, and
+`xrdfs rmdir` verifies that its operand is an empty directory. Any failed,
+partial, or ambiguous metadata response is rejected without sending DELETE.
+
+The checks are deliberately limited to WebDAV-backed protocols. Native ROOT
+removal continues to use the existing server operation directly, including its
+symlink behavior. The WebDAV checks are client-side preflights rather than an
+atomic server primitive, so callers must still exclude concurrent namespace
+changes while removing a directory.
+
 ## Remote-to-local copies with `xrdcp`
 
 `gfal-copy` and `gfal-cp` downloads map to the existing `xrdcp` application.
@@ -196,7 +211,9 @@ localhost fixture. They cover:
   input lists, and stdout;
 - rejection of local URLs and mixed remote endpoints;
 - octal and symbolic namespace modes, all supported `mkdir` option spellings,
-  multiple directory operands, legacy syntax, and pre-mutation validation.
+  multiple directory operands, legacy syntax, and pre-mutation validation;
+- fail-closed WebDAV non-recursive removal decisions and unchanged native ROOT
+  symlink and non-empty-directory removal behavior.
 
 The expected behavior is derived from the corresponding gfal2-util commands,
 but gfal2 is not a build-time or runtime dependency of `xrdfs`, and it is not

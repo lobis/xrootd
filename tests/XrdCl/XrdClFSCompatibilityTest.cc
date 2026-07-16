@@ -75,6 +75,47 @@ TEST( XrdClFSCompatibility, RejectsInvalidAccessModes )
   }
 }
 
+TEST( XrdClFSCompatibility, IdentifiesWebDAVProtocols )
+{
+  for( const char *protocol : {"http", "https", "dav", "davs", "HTTPS"} )
+    EXPECT_TRUE( XrdCl::IsWebDAVProtocol( protocol ) ) << protocol;
+
+  for( const char *protocol : {"root", "roots", "file", "stdio", ""} )
+    EXPECT_FALSE( XrdCl::IsWebDAVProtocol( protocol ) ) << protocol;
+}
+
+TEST( XrdClFSCompatibility, EvaluatesNonRecursiveRemovalSafety )
+{
+  using XrdCl::EvaluateNonRecursiveRemoval;
+  using XrdCl::NonRecursiveRemoval;
+  using XrdCl::NonRecursiveRemovalDecision;
+
+  EXPECT_EQ( EvaluateNonRecursiveRemoval(
+               NonRecursiveRemoval::File, false, 0 ),
+             NonRecursiveRemovalDecision::Allow );
+  EXPECT_EQ( EvaluateNonRecursiveRemoval(
+               NonRecursiveRemoval::File, true, 0 ),
+             NonRecursiveRemovalDecision::IsDirectory );
+  EXPECT_EQ( EvaluateNonRecursiveRemoval(
+               NonRecursiveRemoval::Directory, false, 0 ),
+             NonRecursiveRemovalDecision::NotDirectory );
+  EXPECT_EQ( EvaluateNonRecursiveRemoval(
+               NonRecursiveRemoval::Directory, true, 0 ),
+             NonRecursiveRemovalDecision::Allow );
+  EXPECT_EQ( EvaluateNonRecursiveRemoval(
+               NonRecursiveRemoval::Directory, true, 1 ),
+             NonRecursiveRemovalDecision::NotEmpty );
+}
+
+TEST( XrdClFSCompatibility, RequiresCompleteMetadataBeforeRemoval )
+{
+  EXPECT_TRUE( XrdCl::IsCompleteSuccess( XrdCl::XRootDStatus() ) );
+  EXPECT_FALSE( XrdCl::IsCompleteSuccess(
+    XrdCl::XRootDStatus( XrdCl::stOK, XrdCl::suPartial ) ) );
+  EXPECT_FALSE( XrdCl::IsCompleteSuccess(
+    XrdCl::XRootDStatus( XrdCl::stError, XrdCl::errInvalidResponse ) ) );
+}
+
 TEST( XrdClFSCompatibility, MapsGFALDiskAndTapeStatus )
 {
   EXPECT_STREQ( XrdCl::GetGFALFileStatus( false, false ), "ONLINE" );

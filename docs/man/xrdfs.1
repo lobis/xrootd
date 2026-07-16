@@ -222,12 +222,15 @@ l - connection statistics
 .RE
 \fBrm\fR \fI<filename>\fR \fI[<filenames>]\fR
 .RS 3
-Remove a file.
+Remove one or more files. For HTTP(S) and DAV(S) endpoints, each target is
+verified not to be a collection before any DELETE request is sent. This avoids
+using WebDAV's recursive collection DELETE for a non-recursive file removal.
 
 .RE
 \fBrmdir\fR \fI<dirname>\fR
 .RS 3
-Remove a directory.
+Remove an empty directory. For HTTP(S) and DAV(S) endpoints, the target is
+verified to be an empty collection before DELETE is sent.
 
 .RE
 \fBtruncate\fR \fI<filename> <length>\fR

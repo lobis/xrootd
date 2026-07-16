@@ -14,6 +14,7 @@
 
 #include "XrdCl/XrdClFileSystem.hh"
 
+#include <cstddef>
 #include <string>
 
 namespace XrdCl
@@ -25,8 +26,29 @@ namespace XrdCl
     Octal
   };
 
+  enum class NonRecursiveRemoval
+  {
+    File,
+    Directory
+  };
+
+  enum class NonRecursiveRemovalDecision
+  {
+    Allow,
+    IsDirectory,
+    NotDirectory,
+    NotEmpty
+  };
+
   AccessModeFormat ParseAccessMode( Access::Mode       &mode,
                                     const std::string &modeString );
+
+  bool IsWebDAVProtocol( const std::string &protocol );
+
+  bool IsCompleteSuccess( const XRootDStatus &status );
+
+  NonRecursiveRemovalDecision EvaluateNonRecursiveRemoval(
+    NonRecursiveRemoval removal, bool isDirectory, std::size_t childCount );
 
   const char *GetGFALFileStatus( bool offline, bool backupExists );
 }

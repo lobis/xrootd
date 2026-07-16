@@ -11,6 +11,9 @@
 
 #include "XrdCl/XrdClFSCompatibility.hh"
 
+#include <algorithm>
+#include <cctype>
+
 namespace XrdCl
 {
   AccessModeFormat ParseAccessMode( Access::Mode       &mode,
@@ -82,6 +85,35 @@ namespace XrdCl
     }
     mode = symbolicMode;
     return AccessModeFormat::Symbolic;
+  }
+
+  bool IsWebDAVProtocol( const std::string &protocol )
+  {
+    std::string normalized( protocol );
+    std::transform( normalized.begin(), normalized.end(), normalized.begin(),
+                    []( unsigned char character )
+    {
+      return static_cast<char>( std::tolower( character ) );
+    } );
+    return normalized == "http" || normalized == "https" ||
+           normalized == "dav" || normalized == "davs";
+  }
+
+  bool IsCompleteSuccess( const XRootDStatus &status )
+  {
+    return status.IsOK() && status.code == suDone;
+  }
+
+  NonRecursiveRemovalDecision EvaluateNonRecursiveRemoval(
+    NonRecursiveRemoval removal, bool isDirectory, std::size_t childCount )
+  {
+    if( removal == NonRecursiveRemoval::File )
+      return isDirectory ? NonRecursiveRemovalDecision::IsDirectory :
+                           NonRecursiveRemovalDecision::Allow;
+
+    if( !isDirectory ) return NonRecursiveRemovalDecision::NotDirectory;
+    if( childCount != 0 ) return NonRecursiveRemovalDecision::NotEmpty;
+    return NonRecursiveRemovalDecision::Allow;
   }
 
   const char *GetGFALFileStatus( bool offline, bool backupExists )
