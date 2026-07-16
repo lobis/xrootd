@@ -18,6 +18,7 @@
 
 #include <gtest/gtest.h>
 
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -126,6 +127,21 @@ TEST(HttpToken, PreservesCustomActivities)
               (std::vector<std::string>{"READ_METADATA", "LIST"}));
 }
 
+TEST(HttpToken, ParsesIssuer)
+{
+    XrdClHttp::TokenRequest request;
+    std::string error;
+
+    ASSERT_TRUE(XrdClHttp::ParseTokenRequest(
+        R"({"path":"/file","issuer":"https://issuer.example/base"})",
+        request, error)) << error;
+    EXPECT_EQ(request.issuer, "https://issuer.example/base");
+
+    ASSERT_TRUE(XrdClHttp::ParseTokenRequest(
+        R"({"path":"/file"})", request, error)) << error;
+    EXPECT_TRUE(request.issuer.empty());
+}
+
 TEST(HttpToken, RejectsInvalidQueryFields)
 {
     const std::vector<std::string> invalid = {
@@ -135,6 +151,8 @@ TEST(HttpToken, RejectsInvalidQueryFields)
         R"({"path":42})",
         R"({"path":"/file","validity":-1})",
         R"({"path":"/file","validity":"60"})",
+        R"({"path":"/file","issuer":""})",
+        R"({"path":"/file","issuer":42})",
         R"({"path":"/file","write":"yes"})",
         R"({"path":"/file","activities":"LIST"})",
         R"({"path":"/file","activities":[""]})",
@@ -147,6 +165,65 @@ TEST(HttpToken, RejectsInvalidQueryFields)
         EXPECT_FALSE(XrdClHttp::ParseTokenRequest(input, request, error))
             << input;
         EXPECT_FALSE(error.empty()) << input;
+    }
+}
+
+TEST(HttpToken, BuildsIssuerDiscoveryUrls)
+{
+    std::string url;
+
+    ASSERT_TRUE(XrdClHttp::BuildOAuthAuthorizationServerUrl(
+        "https://issuer.example", url));
+    EXPECT_EQ(url,
+              "https://issuer.example/.well-known/oauth-authorization-server");
+
+    ASSERT_TRUE(XrdClHttp::BuildOAuthAuthorizationServerUrl(
+        "https://issuer.example/tenant/one", url));
+    EXPECT_EQ(url,
+              "https://issuer.example/.well-known/"
+              "oauth-authorization-server/tenant/one");
+
+    ASSERT_TRUE(XrdClHttp::BuildOpenIdConfigurationUrl(
+        "https://issuer.example", url));
+    EXPECT_EQ(url,
+              "https://issuer.example/.well-known/openid-configuration");
+
+    ASSERT_TRUE(XrdClHttp::BuildOpenIdConfigurationUrl(
+        "davs://issuer.example:8443/tenant/one/", url));
+    EXPECT_EQ(url,
+              "https://issuer.example:8443/tenant/one/"
+              ".well-known/openid-configuration");
+
+    ASSERT_TRUE(XrdClHttp::BuildOAuthAuthorizationServerUrl(
+        "https://issuer.example/tenant?ignored=yes#fragment", url));
+    EXPECT_EQ(url,
+              "https://issuer.example/.well-known/"
+              "oauth-authorization-server/tenant");
+
+    ASSERT_TRUE(XrdClHttp::BuildOpenIdConfigurationUrl(
+        "https://issuer.example?ignored=yes#fragment", url));
+    EXPECT_EQ(url,
+              "https://issuer.example/.well-known/openid-configuration");
+}
+
+TEST(HttpToken, RejectsInsecureIssuerDiscoveryUrls)
+{
+    const std::vector<std::string> invalid = {
+        "http://issuer.example",
+        "root://issuer.example",
+        "https:///missing-host",
+        "https://user:password@issuer.example"
+    };
+
+    for (const auto &issuer : invalid) {
+        std::string url = "stale-url";
+        EXPECT_FALSE(XrdClHttp::BuildOAuthAuthorizationServerUrl(issuer, url))
+            << issuer;
+        EXPECT_TRUE(url.empty()) << issuer;
+        url = "stale-url";
+        EXPECT_FALSE(XrdClHttp::BuildOpenIdConfigurationUrl(issuer, url))
+            << issuer;
+        EXPECT_TRUE(url.empty()) << issuer;
     }
 }
 
@@ -180,6 +257,114 @@ TEST(HttpToken, EscapesCustomActivitiesInJson)
     EXPECT_EQ(XrdClHttp::BuildMacaroonRequest(1, {"LIST\"INJECT"}),
               "{\"caveats\": [\"activity:LIST\\\"INJECT\"], "
               "\"validity\": \"PT1M\"}");
+}
+
+TEST(HttpToken, BuildsSciTokensRequest)
+{
+    EXPECT_EQ(XrdClHttp::BuildSciTokensRequest(),
+              "grant_type=client_credentials");
+}
+
+TEST(HttpToken, BuildsGfalCompatibleOAuthMacaroonRequest)
+{
+    std::string body;
+    std::string error;
+    ASSERT_TRUE(XrdClHttp::BuildOAuthMacaroonRequest(
+        "/eos/pilot/file", 5, {"LIST", "DOWNLOAD"}, body, error))
+        << error;
+    EXPECT_EQ(body,
+              "grant_type=client_credentials&expire_in=300&scopes="
+              "LIST%3A%2Feos%2Fpilot%2Ffile%20"
+              "DOWNLOAD%3A%2Feos%2Fpilot%2Ffile");
+    EXPECT_TRUE(error.empty());
+}
+
+TEST(HttpToken, PercentEncodesOAuthMacaroonScopes)
+{
+    std::string body;
+    std::string error;
+    ASSERT_TRUE(XrdClHttp::BuildOAuthMacaroonRequest(
+        "/eos/a b+~%?opaque=ignored", 0, {"READ_METADATA"}, body,
+        error)) << error;
+    EXPECT_EQ(body,
+              "grant_type=client_credentials&expire_in=0&scopes="
+              "READ_METADATA%3A%2Feos%2Fa%20b%2B~%25");
+
+    ASSERT_TRUE(XrdClHttp::BuildOAuthMacaroonRequest(
+        "/eos/fragment-only#ignored", 1, {"LIST"}, body, error))
+        << error;
+    EXPECT_EQ(body,
+              "grant_type=client_credentials&expire_in=60&scopes="
+              "LIST%3A%2Feos%2Ffragment-only");
+}
+
+TEST(HttpToken, RejectsOAuthMacaroonValidityOverflow)
+{
+    const auto maximum_minutes =
+        std::numeric_limits<std::uint64_t>::max() / 60;
+    std::string body;
+    std::string error;
+
+    ASSERT_TRUE(XrdClHttp::BuildOAuthMacaroonRequest(
+        "/file", maximum_minutes, {"LIST"}, body, error)) << error;
+    EXPECT_NE(body.find("expire_in=" +
+                        std::to_string(maximum_minutes * 60)),
+              std::string::npos);
+
+    body = "stale-body";
+    EXPECT_FALSE(XrdClHttp::BuildOAuthMacaroonRequest(
+        "/file", maximum_minutes + 1, {"LIST"}, body, error));
+    EXPECT_TRUE(body.empty());
+    EXPECT_NE(error.find("too large"), std::string::npos);
+}
+
+TEST(HttpToken, RejectsRelativeOAuthMacaroonScopePath)
+{
+    std::string body = "stale-body";
+    std::string error;
+    EXPECT_FALSE(XrdClHttp::BuildOAuthMacaroonRequest(
+        "relative/file", 5, {"LIST"}, body, error));
+    EXPECT_TRUE(body.empty());
+    EXPECT_FALSE(error.empty());
+}
+
+TEST(HttpToken, ParsesGenericJsonStringResponse)
+{
+    std::string value;
+    std::string error;
+    ASSERT_TRUE(XrdClHttp::ParseJsonStringResponse(
+        R"({"token_endpoint":"https://issuer.example/token"})",
+        "token_endpoint", value, error)) << error;
+    EXPECT_EQ(value, "https://issuer.example/token");
+
+    ASSERT_TRUE(XrdClHttp::ParseJsonStringResponse(
+        R"({"access_token":"issued-token"})", "access_token", value,
+        error)) << error;
+    EXPECT_EQ(value, "issued-token");
+}
+
+TEST(HttpToken, RejectsInvalidGenericJsonStringResponse)
+{
+    const std::vector<std::string> invalid = {
+        R"({})",
+        R"({"access_token":""})",
+        R"({"access_token":null})",
+        R"({"access_token":42})",
+        "not-json",
+        ""
+    };
+
+    for (const auto &input : invalid) {
+        std::string value = "stale-value";
+        std::string error;
+        EXPECT_FALSE(XrdClHttp::ParseJsonStringResponse(
+            input, "access_token", value, error)) << input;
+        EXPECT_TRUE(value.empty()) << input;
+        EXPECT_FALSE(error.empty()) << input;
+        if (!input.empty()) {
+            EXPECT_EQ(error.find(input), std::string::npos) << input;
+        }
+    }
 }
 
 TEST(HttpToken, ParsesMacaroonResponse)

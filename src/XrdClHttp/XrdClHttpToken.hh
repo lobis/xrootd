@@ -29,6 +29,7 @@ constexpr std::size_t kMaxTokenResponseSize = 1024 * 1024;
 
 struct TokenRequest {
     std::string path;
+    std::string issuer;
     std::uint64_t validity{60};
     bool write{false};
     std::vector<std::string> activities;
@@ -42,10 +43,31 @@ bool NormalizeTokenUrl(std::string_view input, std::string &https_url);
 bool ParseTokenRequest(std::string_view input, TokenRequest &request,
                        std::string &error);
 
+// Construct the RFC 8414 and OpenID Connect discovery URLs for an HTTPS
+// issuer. DAVS issuers are normalized to HTTPS, query and fragment components
+// are omitted, and issuer URLs containing credentials are rejected.
+bool BuildOAuthAuthorizationServerUrl(std::string_view issuer,
+                                      std::string &url);
+bool BuildOpenIdConfigurationUrl(std::string_view issuer, std::string &url);
+
 // Construct the byte-for-byte request format emitted by gfal2 for a direct
 // storage-element macaroon request.
 std::string BuildMacaroonRequest(
     std::uint64_t validity, const std::vector<std::string> &activities);
+
+// Construct the form bodies used by SciTokens and OAuth-style macaroon token
+// endpoints. The OAuth helper rejects validity values which cannot be safely
+// converted from minutes to seconds.
+std::string BuildSciTokensRequest();
+bool BuildOAuthMacaroonRequest(
+    std::string_view path, std::uint64_t validity,
+    const std::vector<std::string> &activities, std::string &body,
+    std::string &error);
+
+// Extract a non-empty string member from a bounded JSON response without
+// exposing response contents in diagnostics.
+bool ParseJsonStringResponse(std::string_view input, std::string_view key,
+                             std::string &value, std::string &error);
 
 // Extract a macaroon without exposing the response contents in diagnostics.
 bool ParseMacaroonResponse(std::string_view input, std::string &token,

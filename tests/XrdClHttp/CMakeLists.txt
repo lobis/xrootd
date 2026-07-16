@@ -59,6 +59,7 @@ add_executable(xrdcl-test
 add_executable(xrdcl-http-test
   ChecksumParserTest.cc
   CopyTest.cc
+  HandlerQueueTest.cc
   VectorReadTest.cc
 )
 

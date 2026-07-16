@@ -1676,8 +1676,8 @@ XRootDStatus DoToken( FileSystem                      *fs,
   };
 
   bool writeAccess = false;
-  bool issuerProvided = false;
   std::uint64_t validity = 60;
+  std::string issuer;
   std::string parseError;
   int firstOperand = 0;
 
@@ -1733,7 +1733,9 @@ XRootDStatus DoToken( FileSystem                      *fs,
             parseError = "Validity must be a number >= 0.";
           break;
         case TokenIssuerOption:
-          issuerProvided = true;
+          issuer = optarg ? optarg : "";
+          if( issuer.empty() )
+            parseError = "Issuer URL cannot be empty.";
           break;
         case ':':
           if( optopt == TokenValidityOption )
@@ -1764,15 +1766,6 @@ XRootDStatus DoToken( FileSystem                      *fs,
   {
     log->Error( AppMsg, "%s", parseError.c_str() );
     return XRootDStatus( stError, errInvalidArgs, 0, parseError );
-  }
-
-  if( issuerProvided )
-  {
-    const std::string error =
-      "Token issuer URLs are not supported yet; omit --issuer to request "
-      "the token directly from the storage endpoint.";
-    log->Error( AppMsg, "%s", error.c_str() );
-    return XRootDStatus( stError, errNotSupported, 0, error );
   }
 
   if( firstOperand >= static_cast<int>( commandArguments.size() ) )
@@ -1826,6 +1819,8 @@ XRootDStatus DoToken( FileSystem                      *fs,
     { "write", writeAccess },
     { "activities", activities }
   };
+  if( !issuer.empty() ) request["issuer"] = issuer;
+
   Buffer argument;
   argument.FromString( request.dump() );
 
@@ -2847,13 +2842,14 @@ XRootDStatus PrintHelp( FileSystem *, Env *,
 
   printf( "   token [-w|--write] [--validity minutes] [--issuer URL]\n"      );
   printf( "         [--] <path> [activity ...]\n"                            );
-  printf( "     Request a storage-issued token for a path.\n"                );
+  printf( "     Request a token for a storage path.\n"                       );
   printf( "     The storage endpoint must use HTTPS or DAVS.\n"              );
   printf( "     -w|--write request write access; otherwise request read\n"    );
   printf( "                access\n"                                        );
   printf( "     --validity token validity in minutes (default: 60)\n"         );
-  printf( "     --issuer recognized for gfal-token compatibility but not\n"   );
-  printf( "              supported yet; direct storage requests omit it\n"    );
+  printf( "     --issuer request through an explicit HTTPS or DAVS issuer;\n" );
+  printf( "              omit it to request directly from the storage\n"      );
+  printf( "              endpoint\n"                                          );
   printf( "     -- stop option parsing, allowing a dash-prefixed path\n"      );
   printf( "     Optional activities override the read/write defaults.\n\n"   );
 

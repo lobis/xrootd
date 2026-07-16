@@ -263,7 +263,7 @@ Output last part of files to stdout.
 .RE
 \fBtoken\fR \fI[-w|--write]\fR \fI[--validity minutes]\fR \fI[--issuer URL]\fR \fI[--]\fR \fIpath\fR \fI[activity ...]\fR
 .RS 3
-Request a storage-issued token for a path and print it to standard output.
+Request a token for a storage path and print it to standard output.
 The storage endpoint must use HTTPS or DAVS. Without explicit activities, the
 request uses LIST and DOWNLOAD for read access; write access also adds MANAGE,
 UPLOAD, and DELETE.
@@ -272,9 +272,11 @@ UPLOAD, and DELETE.
 .br
 \fI--validity minutes\fR request a nonnegative validity in minutes (default: 60)
 .br
-\fI--issuer URL\fR is recognized for gfal-token command-line compatibility but
-issuer-based token discovery is not supported yet; omit this option to issue a
-direct request to the storage endpoint
+\fI--issuer URL\fR request the token through an explicit HTTPS or DAVS issuer. The
+client discovers an OAuth token endpoint using RFC 8414 and OpenID metadata,
+then tries the supported SciTokens and macaroon flows. If issuer discovery is
+unavailable, the request falls back to direct storage issuance. Omit this
+option to request a storage-issued token directly
 .br
 \fI--\fR stop option parsing, allowing a path beginning with a dash
 

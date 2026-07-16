@@ -18,6 +18,8 @@
 
 #include <XrdOuc/XrdOucJson.hh>
 
+#include <limits>
+
 namespace {
 
 const std::vector<std::string> &DefaultActivities(bool write)
@@ -39,6 +41,56 @@ bool ValidPort(std::string_view port)
         if (value > 65535) return false;
     }
     return true;
+}
+
+bool ParseIssuerUrl(std::string_view issuer, std::string &authority,
+                    std::string &path)
+{
+    authority.clear();
+    path.clear();
+
+    std::string normalized;
+    if (!XrdClHttp::NormalizeTokenUrl(issuer, normalized)) return false;
+
+    constexpr std::string_view prefix{"https://"};
+    auto authority_end = normalized.find_first_of("/?#", prefix.size());
+    if (authority_end == std::string::npos) authority_end = normalized.size();
+    auto authority_view = std::string_view(normalized).substr(
+        prefix.size(), authority_end - prefix.size());
+
+    // Never forward embedded credentials to a discovery endpoint. Query and
+    // fragment components are not part of either discovery URL and are
+    // intentionally omitted, matching gfal2's URL transformation.
+    if (authority_view.find('@') != std::string_view::npos) return false;
+
+    authority.assign(prefix);
+    authority.append(authority_view);
+    if (authority_end < normalized.size() &&
+        normalized[authority_end] == '/') {
+        auto path_end = normalized.find_first_of("?#", authority_end);
+        path = normalized.substr(authority_end, path_end - authority_end);
+    }
+    return true;
+}
+
+std::string PercentEncode(std::string_view input)
+{
+    static constexpr char hex[] = "0123456789ABCDEF";
+    std::string encoded;
+    encoded.reserve(input.size());
+    for (unsigned char byte : input) {
+        if ((byte >= 'a' && byte <= 'z') ||
+            (byte >= 'A' && byte <= 'Z') ||
+            (byte >= '0' && byte <= '9') || byte == '-' || byte == '.' ||
+            byte == '_' || byte == '~') {
+            encoded += static_cast<char>(byte);
+        } else {
+            encoded += '%';
+            encoded += hex[byte >> 4];
+            encoded += hex[byte & 0x0f];
+        }
+    }
+    return encoded;
 }
 
 } // namespace
@@ -143,6 +195,16 @@ XrdClHttp::ParseTokenRequest(std::string_view input, TokenRequest &request,
     }
     request.path = path->get<std::string>();
 
+    auto issuer = parsed.find("issuer");
+    if (issuer != parsed.end()) {
+        if (!issuer->is_string() ||
+            issuer->get_ref<const std::string &>().empty()) {
+            error = "Token query 'issuer' must be a non-empty string";
+            return false;
+        }
+        request.issuer = issuer->get<std::string>();
+    }
+
     auto validity = parsed.find("validity");
     if (validity != parsed.end()) {
         if (!validity->is_number_integer()) {
@@ -192,6 +254,35 @@ XrdClHttp::ParseTokenRequest(std::string_view input, TokenRequest &request,
     return true;
 }
 
+bool
+XrdClHttp::BuildOAuthAuthorizationServerUrl(std::string_view issuer,
+                                            std::string &url)
+{
+    url.clear();
+    std::string authority;
+    std::string path;
+    if (!ParseIssuerUrl(issuer, authority, path)) return false;
+
+    url = authority + "/.well-known/oauth-authorization-server";
+    if (!path.empty() && path != "/") url += path;
+    return true;
+}
+
+bool
+XrdClHttp::BuildOpenIdConfigurationUrl(std::string_view issuer,
+                                       std::string &url)
+{
+    url.clear();
+    std::string authority;
+    std::string path;
+    if (!ParseIssuerUrl(issuer, authority, path)) return false;
+
+    if (path.empty()) path = "/";
+    if (path.back() != '/') path += '/';
+    url = authority + path + ".well-known/openid-configuration";
+    return true;
+}
+
 std::string
 XrdClHttp::BuildMacaroonRequest(
     std::uint64_t validity, const std::vector<std::string> &activities)
@@ -210,11 +301,53 @@ XrdClHttp::BuildMacaroonRequest(
         "], \"validity\": \"PT" + std::to_string(validity) + "M\"}";
 }
 
-bool
-XrdClHttp::ParseMacaroonResponse(std::string_view input, std::string &token,
-                                 std::string &error)
+std::string
+XrdClHttp::BuildSciTokensRequest()
 {
-    token.clear();
+    return "grant_type=client_credentials";
+}
+
+bool
+XrdClHttp::BuildOAuthMacaroonRequest(
+    std::string_view path, std::uint64_t validity,
+    const std::vector<std::string> &activities, std::string &body,
+    std::string &error)
+{
+    body.clear();
+    error.clear();
+
+    auto path_end = path.find_first_of("?#");
+    auto scope_path = path.substr(0, path_end);
+    if (scope_path.empty() || scope_path.front() != '/') {
+        error = "OAuth macaroon scope requires an absolute path";
+        return false;
+    }
+    if (validity > std::numeric_limits<std::uint64_t>::max() / 60) {
+        error = "Token validity is too large to convert to seconds";
+        return false;
+    }
+
+    std::string scopes;
+    bool first = true;
+    for (const auto &activity : activities) {
+        if (!first) scopes += ' ';
+        scopes += activity;
+        scopes += ':';
+        scopes.append(scope_path);
+        first = false;
+    }
+
+    body = "grant_type=client_credentials&expire_in=" +
+        std::to_string(validity * 60) + "&scopes=" + PercentEncode(scopes);
+    return true;
+}
+
+bool
+XrdClHttp::ParseJsonStringResponse(std::string_view input,
+                                   std::string_view key, std::string &value,
+                                   std::string &error)
+{
+    value.clear();
     error.clear();
     if (input.size() >= kMaxTokenResponseSize) {
         error = "Token response exceeds maximum size";
@@ -222,6 +355,10 @@ XrdClHttp::ParseMacaroonResponse(std::string_view input, std::string &token,
     }
     if (input.empty()) {
         error = "Token response contained no data";
+        return false;
+    }
+    if (key.empty()) {
+        error = "Token response key must not be empty";
         return false;
     }
 
@@ -232,12 +369,20 @@ XrdClHttp::ParseMacaroonResponse(std::string_view input, std::string &token,
         return false;
     }
 
-    auto macaroon = parsed.find("macaroon");
-    if (macaroon == parsed.end() || !macaroon->is_string() ||
-        macaroon->get_ref<const std::string &>().empty()) {
-        error = "Token response did not include a non-empty string 'macaroon'";
+    auto member = parsed.find(std::string(key));
+    if (member == parsed.end() || !member->is_string() ||
+        member->get_ref<const std::string &>().empty()) {
+        error = "Token response did not include a non-empty string '" +
+            std::string(key) + "'";
         return false;
     }
-    token = macaroon->get<std::string>();
+    value = member->get<std::string>();
     return true;
+}
+
+bool
+XrdClHttp::ParseMacaroonResponse(std::string_view input, std::string &token,
+                                 std::string &error)
+{
+    return ParseJsonStringResponse(input, "macaroon", token, error);
 }

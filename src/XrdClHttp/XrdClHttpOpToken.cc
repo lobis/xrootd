@@ -26,16 +26,53 @@
 using namespace XrdClHttp;
 
 CurlTokenOp::CurlTokenOp(XrdCl::ResponseHandler *handler,
+                         std::shared_ptr<XrdCl::ResponseHandler> handler_owner,
+                         const std::string &url,
+                         HttpVerb verb,
+                         HeaderList headers,
+                         const std::string &request_body,
+                         const std::string &response_key,
+                         struct timespec timeout, XrdCl::Log *logger,
+                         CreateConnCalloutType callout)
+    : CurlOperation(handler, url, timeout, logger, callout, nullptr),
+      m_handler_owner(std::move(handler_owner)),
+      m_verb(verb),
+      m_request_body(request_body),
+      m_response_key(response_key)
+{
+    m_operation_expiry = m_header_expiry;
+    m_headers_list = std::move(headers);
+}
+
+CurlTokenOp::CurlTokenOp(XrdCl::ResponseHandler *handler,
+                         std::shared_ptr<XrdCl::ResponseHandler> handler_owner,
+                         const std::string &url,
+                         HttpVerb verb,
+                         HeaderList headers,
+                         const std::string &request_body,
+                         const std::string &response_key,
+                         std::chrono::steady_clock::time_point expiry,
+                         XrdCl::Log *logger,
+                         CreateConnCalloutType callout)
+    : CurlOperation(handler, url, expiry, logger, callout, nullptr),
+      m_handler_owner(std::move(handler_owner)),
+      m_verb(verb),
+      m_request_body(request_body),
+      m_response_key(response_key)
+{
+    m_operation_expiry = m_header_expiry;
+    m_headers_list = std::move(headers);
+}
+
+CurlTokenOp::CurlTokenOp(XrdCl::ResponseHandler *handler,
                          const std::string &url,
                          const std::string &request_body,
                          struct timespec timeout, XrdCl::Log *logger,
                          CreateConnCalloutType callout)
-    : CurlOperation(handler, url, timeout, logger, callout, nullptr),
-      m_request_body(request_body)
+    : CurlTokenOp(handler, {}, url, HttpVerb::POST,
+          {{"Content-Type", "application/macaroon-request"}}, request_body,
+          "macaroon", timeout, logger, callout)
 {
-    m_operation_expiry = m_header_expiry;
-    m_headers_list.emplace_back("Content-Type",
-                                "application/macaroon-request");
 }
 
 bool
@@ -43,10 +80,24 @@ CurlTokenOp::Setup(CURL *curl, CurlWorker &worker)
 {
     if (!CurlOperation::Setup(curl, worker)) return false;
 
-    curl_easy_setopt(m_curl.get(), CURLOPT_POST, 1L);
-    curl_easy_setopt(m_curl.get(), CURLOPT_POSTFIELDS, m_request_body.data());
-    curl_easy_setopt(m_curl.get(), CURLOPT_POSTFIELDSIZE_LARGE,
-                     static_cast<curl_off_t>(m_request_body.size()));
+    if (m_verb == HttpVerb::POST) {
+        curl_easy_setopt(m_curl.get(), CURLOPT_POST, 1L);
+        curl_easy_setopt(m_curl.get(), CURLOPT_POSTFIELDS,
+                         m_request_body.data());
+        curl_easy_setopt(m_curl.get(), CURLOPT_POSTFIELDSIZE_LARGE,
+                         static_cast<curl_off_t>(m_request_body.size()));
+    } else if (m_verb == HttpVerb::GET) {
+        // Set this explicitly: handles are pooled and a prior user may have
+        // configured a request body.
+        curl_easy_setopt(m_curl.get(), CURLOPT_POSTFIELDS, nullptr);
+        curl_easy_setopt(m_curl.get(), CURLOPT_POSTFIELDSIZE_LARGE,
+                         static_cast<curl_off_t>(-1));
+        curl_easy_setopt(m_curl.get(), CURLOPT_HTTPGET, 1L);
+    } else {
+        Fail(XrdCl::errInternal, 0,
+             "Unsupported HTTP verb for token request");
+        return false;
+    }
     curl_easy_setopt(m_curl.get(), CURLOPT_WRITEFUNCTION,
                      CurlTokenOp::WriteCallback);
     curl_easy_setopt(m_curl.get(), CURLOPT_WRITEDATA, this);
@@ -97,9 +148,9 @@ CurlTokenOp::Success()
         return;
     }
 
-    std::string token;
+    std::string value;
     std::string error;
-    if (!ParseMacaroonResponse(m_response, token, error)) {
+    if (!ParseJsonStringResponse(m_response, m_response_key, value, error)) {
         Fail(XrdCl::errErrorResponse, kXR_ServerError, error);
         return;
     }
@@ -108,7 +159,7 @@ CurlTokenOp::Success()
     if (m_handler == nullptr) return;
 
     auto response = new XrdCl::Buffer();
-    response->FromString(token);
+    response->FromString(value);
     auto object = new XrdCl::AnyObject();
     object->Set(response);
 

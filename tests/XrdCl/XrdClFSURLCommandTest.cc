@@ -145,6 +145,18 @@ TEST( XrdClFSURLCommand, RoutesTokenOptionAbbreviationsToCommandParser )
                "token", "--val", "5", "/eos/file"}) );
 }
 
+TEST( XrdClFSURLCommand, PreservesEmptyTokenIssuerForCommandValidation )
+{
+  NormalizedCommand command = Normalize(
+    {"token", "--issuer=", "https://storage.example/eos/file"} );
+
+  ASSERT_EQ( command.result, XrdCl::ValidURLCommand );
+  EXPECT_EQ( command.endpoint.GetProtocol(), "https" );
+  EXPECT_EQ( command.arguments,
+             (std::vector<std::string>{
+               "token", "--issuer=", "/eos/file"}) );
+}
+
 TEST( XrdClFSURLCommand, ReducesURLsUsingTheSameEffectiveEndpoint )
 {
   NormalizedCommand command = Normalize(
