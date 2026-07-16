@@ -109,6 +109,26 @@ function test_macaroons() {
 	response=$(xrdfs "${HOST}" token --validity 1 /)
 	[[ -n "${response}" ]] || error "legacy xrdfs syntax returned an empty macaroon"
 
+	# Keep the OAuth endpoint compatible with both the standard singular
+	# spelling and the plural spelling emitted by gfal-token.
+	response=$(curl -sf \
+		--capath "${X509_CERT_DIR}" --cert "${X509_USER_CERT}" --key "${X509_USER_KEY}" \
+		-H 'Content-Type: application/x-www-form-urlencoded' \
+		-X POST -d 'grant_type=client_credentials&expire_in=300&scope=DOWNLOAD%3A%2F' \
+		"${HOST}/.oauth2/token")
+	response=$(echo "${response}" | jq -er \
+		'.access_token | select(type == "string" and length > 0)')
+	[[ -n "${response}" ]] || error "singular OAuth scope returned an empty macaroon"
+
+	response=$(curl -sf \
+		--capath "${X509_CERT_DIR}" --cert "${X509_USER_CERT}" --key "${X509_USER_KEY}" \
+		-H 'Content-Type: application/x-www-form-urlencoded' \
+		-X POST -d 'grant_type=client_credentials&expire_in=300&scopes=LIST%3A%2F%20DOWNLOAD%3A%2F' \
+		"${HOST}/.oauth2/token")
+	response=$(echo "${response}" | jq -er \
+		'.access_token | select(type == "string" and length > 0)')
+	[[ -n "${response}" ]] || error "plural OAuth scopes returned an empty macaroon"
+
 	# Exercise curl handle reuse in one process: the GET following the token POST
 	# must remain a GET after the easy handle returns to the pool.
 	response=$(printf 'token /\ncat /hello.txt\nexit\n' | xrdfs "${HOST}")
