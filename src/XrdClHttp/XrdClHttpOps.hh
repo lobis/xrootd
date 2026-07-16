@@ -668,6 +668,31 @@ public:
         CreateConnCalloutType callout, HeaderCallout *header_callout);
 };
 
+// Request a macaroon directly from a storage element over HTTPS.
+class CurlTokenOp final : public CurlOperation {
+public:
+    CurlTokenOp(XrdCl::ResponseHandler *handler, const std::string &url,
+        const std::string &request_body, struct timespec timeout,
+        XrdCl::Log *log, CreateConnCalloutType callout);
+
+    virtual ~CurlTokenOp() {}
+
+    bool Setup(CURL *curl, CurlWorker &) override;
+    void Success() override;
+    void ReleaseHandle() override;
+    RedirectAction Redirect(std::string &target) override;
+
+    virtual HttpVerb GetVerb() const override {return HttpVerb::POST;}
+
+private:
+    static size_t WriteCallback(char *buffer, size_t size, size_t nitems,
+                                void *this_ptr);
+    size_t Write(const char *buffer, size_t length);
+
+    std::string m_request_body;
+    std::string m_response;
+};
+
 class CurlReadOp : public CurlOperation {
 public:
     CurlReadOp(XrdCl::ResponseHandler *handler, std::shared_ptr<XrdCl::ResponseHandler> default_handler,

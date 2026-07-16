@@ -3,11 +3,22 @@
 X509_CERT_DIR="${BINARY_DIR}/tests/tls"
 X509_USER_KEY="${X509_CERT_DIR}/client.key"
 X509_USER_CERT="${X509_CERT_DIR}/client.crt"
+XRD_HTTPCLIENTKEYFILE="${X509_USER_KEY}"
+XRD_HTTPCLIENTCERTFILE="${X509_USER_CERT}"
+MACAROONS_PLUGINCONFDIR="${PWD}/macaroons/client.plugins.d"
 
 export XrdSecPROTOCOL X509_CERT_DIR X509_USER_KEY X509_USER_CERT
+export XRD_HTTPCLIENTKEYFILE XRD_HTTPCLIENTCERTFILE
 
 function setup_macaroons() {
 	require_commands curl jq openssl
+
+	mkdir -p "${MACAROONS_PLUGINCONFDIR}"
+	cat >| "${MACAROONS_PLUGINCONFDIR}/http.conf" <<-EOF
+	url = http://*;https://*;dav://*;davs://*
+	lib = libXrdClHttp.so
+	enable = true
+	EOF
 
 	cat >| macaroons.authdb <<-EOF
 	u client /rw a
@@ -33,6 +44,8 @@ function setup_macaroons() {
 
 function teardown_macaroons() {
 	rm macaroons.{authdb,gridmap,secret}
+	rm -f "${MACAROONS_PLUGINCONFDIR}/http.conf"
+	rmdir "${MACAROONS_PLUGINCONFDIR}"
 }
 
 # Obtain a macaroon for $1 (path, default "/") with an optional JSON caveats
@@ -68,10 +81,46 @@ function get_macaroon() {
 
 function test_macaroons() {
 	HOST="https://localhost:15043"
+	export XRD_PLUGINCONFDIR="${MACAROONS_PLUGINCONFDIR}"
 
-	local response
+	local response xrdfs_macaroon
 
 	# Issuance tests
+
+	# xrdfs uses the same local HTTPS macaroon endpoint as gfal-token.
+	xrdfs_macaroon=$(xrdfs token "${HOST}/")
+	[[ -n "${xrdfs_macaroon}" ]] || error "xrdfs returned an empty macaroon"
+
+	# Tokens and request bodies must only be returned to the caller, not copied
+	# into the XrdCl client log.
+	if grep -Fq "${xrdfs_macaroon}" "${XRD_LOGFILE}"; then
+		error "xrdfs logged the issued macaroon"
+	fi
+	if grep -Fq '"caveats"' "${XRD_LOGFILE}"; then
+		error "xrdfs logged the macaroon request body"
+	fi
+
+	# The write defaults and explicit activity list are both accepted by the
+	# local issuer; these requests do not perform a remote write.
+	response=$(xrdfs token --write --validity 15 "${HOST}/rw")
+	[[ -n "${response}" ]] || error "xrdfs returned an empty write macaroon"
+	response=$(xrdfs token --validity 5 "${HOST}/" DOWNLOAD LIST)
+	[[ -n "${response}" ]] || error "xrdfs returned an empty custom macaroon"
+	response=$(xrdfs "${HOST}" token --validity 1 /)
+	[[ -n "${response}" ]] || error "legacy xrdfs syntax returned an empty macaroon"
+
+	# Exercise curl handle reuse in one process: the GET following the token POST
+	# must remain a GET after the easy handle returns to the pool.
+	response=$(printf 'token /\ncat /hello.txt\nexit\n' | xrdfs "${HOST}")
+	[[ "${response}" == *"Hello, macaroons!"* ]] || \
+		error "a read following token issuance did not return the file"
+
+	# Reject insecure endpoints and unsupported issuer discovery before making a
+	# token request.
+	assert_failure xrdfs token "http://localhost:15043/"
+	assert_failure xrdfs token --issuer https://issuer.example "${HOST}/"
+	assert_failure xrdfs token --validity -1 "${HOST}/"
+	assert_failure xrdfs token --val 5 "${HOST}/"
 
 	# can obtain a macaroon via HTTPS POST
 	get_macaroon /

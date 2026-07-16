@@ -22,6 +22,7 @@
 #include "XrdClHttpFilesystem.hh"
 #include "XrdClHttpOps.hh"
 #include "XrdClHttpResponses.hh"
+#include "XrdClHttpToken.hh"
 
 #include "XrdCl/XrdClAnyObject.hh"
 
@@ -276,6 +277,36 @@ XrdCl::XRootDStatus Filesystem::Query(XrdCl::QueryCode::Code  queryCode,
                 GetConnCallout(), queryCode,
                 m_header_callout.load(std::memory_order_acquire));
             description = "xattr query operation";
+            break;
+        }
+        case XrdCl::QueryCode::Visa:
+        {
+            std::size_t size = arg.GetSize();
+            if(size && arg.GetBuffer()[size - 1] == '\0') --size;
+            std::string input;
+            if(size) input.assign(arg.GetBuffer(), size);
+
+            TokenRequest request;
+            std::string error;
+            if(!ParseTokenRequest(input, request, error))
+            {
+                return XrdCl::XRootDStatus(
+                    XrdCl::stError, XrdCl::errInvalidArgs, 0, error);
+            }
+
+            std::string targetUrl;
+            if(!NormalizeTokenUrl(GetCurrentURL(request.path), targetUrl))
+            {
+                return XrdCl::XRootDStatus(
+                    XrdCl::stError, XrdCl::errNotSupported, 0,
+                    "Token requests require an HTTPS or DAVS filesystem URL");
+            }
+
+            operation = std::make_unique<CurlTokenOp>(
+                handler, targetUrl,
+                BuildMacaroonRequest(request.validity, request.activities),
+                ts, m_logger, GetConnCallout());
+            description = "token operation";
             break;
         }
         default:
