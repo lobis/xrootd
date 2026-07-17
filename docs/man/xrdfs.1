@@ -220,7 +220,8 @@ l - connection statistics
 
 
 .RE
-\fBrm\fR \fI[-r|-R|--recursive]\fR \fI[--]\fR \fI<path>\fR \fI[<paths>]\fR
+\fBrm\fR \fI[-r|-R|--recursive]\fR \fI[--dry-run]\fR \fI[--]\fR
+\fI<path>\fR \fI[<paths>]\fR
 .RS 3
 Remove one or more files. For HTTP(S) and DAV(S) endpoints, each target is
 verified not to be a collection before any DELETE request is sent. This avoids
@@ -240,6 +241,23 @@ are rejected. URL query parameters are preserved while addressing descendants.
 If one top-level tree fails, its remaining children are not attempted, but
 later top-level operands are still processed. The first failure is returned;
 multi-path recursive removal is therefore not transactional.
+.br
+\fI--dry-run\fR inspect every target without changing remote storage. Files
+that would be removed are printed with \fISKIP\fR; recursively planned
+directories are printed with \fISKIP DIR\fR after their children. Missing
+targets are printed with \fIMISSING\fR. Dry-run performs only metadata
+operations (\fIStat\fR and, for recursive directories, \fIDirList\fR); it
+never calls \fIRm\fR or \fIRmDir\fR and never sends WebDAV DELETE. A failed
+tree is abandoned, later top-level operands are still planned, and the first
+failure is returned. Query parameters are retained for descendant metadata
+requests, while \fIauthz\fR values are redacted from output and diagnostics.
+.br
+XrdCl does not provide an lstat operation. Metadata inspection can therefore
+follow a directory symlink, so a dry-run directory-symlink plan is advisory.
+To keep metadata planning finite even for cyclic or hostile listings, dry-run
+fails a tree that would descend beyond 4096 directory levels. The actual
+recursive removal path retains its non-following symlink checks and is not
+subject to this dry-run-only limit.
 .br
 \fI--\fR stop option parsing, allowing a path beginning with a dash.
 

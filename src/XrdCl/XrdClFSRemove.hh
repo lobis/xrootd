@@ -23,6 +23,7 @@ namespace XrdCl
   struct RemoveCommand
   {
     bool recursive = false;
+    bool dryRun = false;
     std::vector<std::string> paths;
   };
 
@@ -38,6 +39,26 @@ namespace XrdCl
 
   std::string RecursiveRemovalChildPath( const std::string &parent,
                                          const std::string &child );
+
+  std::string RemovalDisplayPath( const std::string &path );
+
+  XRootDStatus SanitizeRemovalStatus( const XRootDStatus &status );
+
+  struct DryRunRemoveOperations
+  {
+    std::function<XRootDStatus( const std::string &, bool & )> stat;
+    std::function<XRootDStatus( const std::string &,
+                                std::vector<std::string> & )> list;
+    std::function<void( const std::string &, bool )> report;
+    std::function<void( const std::string &,
+                        const XRootDStatus & )> reportFailure;
+  };
+
+  XRootDStatus PlanRemoval(
+    const std::vector<std::string> &paths,
+    bool recursive,
+    const DryRunRemoveOperations &operations,
+    std::string &failedPath );
 
   struct RecursiveRemoveOperations
   {

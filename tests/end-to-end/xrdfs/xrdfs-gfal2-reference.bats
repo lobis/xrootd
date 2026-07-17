@@ -375,6 +375,63 @@ bats::on_failure() {
     assert_success
 }
 
+@test "reference rm: recursive dry-run plans agree without mutation" {
+    require_gfal2_command gfal-rm
+    local root=$BATS_TEST_TMPDIR/xrdfs-gfal2-reference
+    local gfal_tree=$root/rm-reference/gfal-dry-run-tree
+    local xrdfs_tree=$root/rm-reference/xrdfs-dry-run-tree
+    mkdir -p "$gfal_tree/nested/empty" "$xrdfs_tree/nested/empty"
+    printf 'gfal' > "$gfal_tree/nested/file"
+    printf 'xrdfs' > "$xrdfs_tree/nested/file"
+
+    run gfal-rm -r --dry-run \
+        "$TEST_ENDPOINT//rm-reference/gfal-dry-run-tree"
+    assert_success
+    assert_output --partial $'/nested/file\tSKIP'
+    assert_output --partial $'/rm-reference/gfal-dry-run-tree\tSKIP DIR'
+
+    run "$XRDFS" rm --dry-run --recursive \
+        "$TEST_ENDPOINT//rm-reference/xrdfs-dry-run-tree"
+    assert_success
+    assert_output --partial $'/nested/file\tSKIP'
+    assert_output --partial $'/rm-reference/xrdfs-dry-run-tree\tSKIP DIR'
+
+    run test -f "$gfal_tree/nested/file"
+    assert_success
+    run test -d "$gfal_tree/nested/empty"
+    assert_success
+    run test -f "$xrdfs_tree/nested/file"
+    assert_success
+    run test -d "$xrdfs_tree/nested/empty"
+    assert_success
+}
+
+@test "reference rm: dry-run missing and later file outcomes agree" {
+    require_gfal2_command gfal-rm
+    local root=$BATS_TEST_TMPDIR/xrdfs-gfal2-reference
+    printf 'gfal' > "$root/rm-reference/gfal-dry-run-later"
+    printf 'xrdfs' > "$root/rm-reference/xrdfs-dry-run-later"
+
+    run gfal-rm --dry-run \
+        "$TEST_ENDPOINT//rm-reference/gfal-dry-run-missing" \
+        "$TEST_ENDPOINT//rm-reference/gfal-dry-run-later"
+    assert_failure
+    assert_output --partial $'/gfal-dry-run-missing\tMISSING'
+    assert_output --partial $'/gfal-dry-run-later\tSKIP'
+
+    run "$XRDFS" rm --dry-run \
+        "$TEST_ENDPOINT//rm-reference/xrdfs-dry-run-missing" \
+        "$TEST_ENDPOINT//rm-reference/xrdfs-dry-run-later"
+    assert_failure
+    assert_output --partial $'/xrdfs-dry-run-missing\tMISSING'
+    assert_output --partial $'/xrdfs-dry-run-later\tSKIP'
+
+    run test -f "$root/rm-reference/gfal-dry-run-later"
+    assert_success
+    run test -f "$root/rm-reference/xrdfs-dry-run-later"
+    assert_success
+}
+
 @test "reference rm: nonrecursive directory rejection agrees" {
     require_gfal2_command gfal-rm
     local root=$BATS_TEST_TMPDIR/xrdfs-gfal2-reference

@@ -30,9 +30,10 @@ class WebDAVHandler(http.server.BaseHTTPRequestHandler):
         pass
 
     def record(self):
-        path = urllib.parse.urlsplit(self.path).path
+        request = urllib.parse.urlsplit(self.path)
+        path = request.path
         with self.server.log_path.open("a", encoding="utf-8") as stream:
-            stream.write(f"{self.command} {path}\n")
+            stream.write(f"{self.command} {path} {request.query}\n")
         return path
 
     def respond(self, status, body=b"", content_type=None):
@@ -57,14 +58,39 @@ class WebDAVHandler(http.server.BaseHTTPRequestHandler):
 
     def do_PROPFIND(self):
         path = self.record()
-        directories = {"/directory", "/empty", "/nonempty"}
-        if path not in directories and path not in {"/file", "/file-a"}:
+        directories = {
+            "/directory",
+            "/dry-run-tree",
+            "/dry-run-tree/nested",
+            "/empty",
+            "/nonempty",
+        }
+        files = {
+            "/dry-run-file",
+            "/dry-run-tree/file",
+            "/dry-run-tree/nested/leaf",
+            "/file",
+            "/file-a",
+        }
+        if path not in directories and path not in files:
             self.respond(404)
             return
 
         responses = [resource_response(path, path in directories)]
         if path == "/nonempty" and self.headers.get("Depth") == "1":
             responses.append(resource_response("/nonempty/child", False))
+        if path == "/dry-run-tree" and self.headers.get("Depth") == "1":
+            responses.append(resource_response("/dry-run-tree/file", False))
+            responses.append(
+                resource_response("/dry-run-tree/nested", True)
+            )
+        if (
+            path == "/dry-run-tree/nested"
+            and self.headers.get("Depth") == "1"
+        ):
+            responses.append(
+                resource_response("/dry-run-tree/nested/leaf", False)
+            )
         body = (
             '<?xml version="1.0" encoding="utf-8"?>\n'
             '<D:multistatus xmlns:D="DAV:">'

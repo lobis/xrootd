@@ -76,6 +76,13 @@ request_count() {
     ' "$3"
 }
 
+request_query_count() {
+    awk -v method="$1" -v path="$2" -v query="$3" '
+        $1 == method && $2 == path && index($3, query) { count++ }
+        END { print count + 0 }
+    ' "$4"
+}
+
 @test "legacy and complete-URL stat forms have identical output" {
     run "$XRDFS" "$TEST_ENDPOINT" stat /data/first.txt
     assert_success
@@ -448,6 +455,105 @@ request_count() {
     assert_success
 }
 
+@test "dry-run inspects native files and recursive trees without changing them" {
+    local root=$BATS_TEST_TMPDIR/xrdfs-full-url
+    mkdir -p "$root/dry-run-tree/nested/empty" \
+        "$root/dry-run-tree/standalone-empty"
+    printf 'file' > "$root/dry-run-file"
+    printf 'top' > "$root/dry-run-tree/top"
+    printf 'leaf' > "$root/dry-run-tree/nested/leaf"
+
+    run "$XRDFS" rm --dry-run "$TEST_ENDPOINT//dry-run-file"
+    assert_success
+    assert_output --partial $'/dry-run-file\tSKIP'
+    run test -f "$root/dry-run-file"
+    assert_success
+
+    run "$XRDFS" "$TEST_ENDPOINT" rm --dry-run -R /dry-run-tree
+    assert_success
+    assert_output --partial $'/dry-run-tree/top\tSKIP'
+    assert_output --partial $'/dry-run-tree/nested/leaf\tSKIP'
+    assert_output --partial $'/dry-run-tree/nested\tSKIP DIR'
+    assert_output --partial $'/dry-run-tree\tSKIP DIR'
+
+    local leaf_line=-1 nested_line=-1 root_line=-1 index
+    for ((index = 0; index < ${#lines[@]}; ++index)); do
+        case "${lines[index]}" in
+            $'/dry-run-tree/nested/leaf\tSKIP') leaf_line=$index ;;
+            $'/dry-run-tree/nested\tSKIP DIR') nested_line=$index ;;
+            $'/dry-run-tree\tSKIP DIR') root_line=$index ;;
+        esac
+    done
+    run test "$leaf_line" -lt "$nested_line"
+    assert_success
+    run test "$nested_line" -lt "$root_line"
+    assert_success
+    run test -f "$root/dry-run-tree/top"
+    assert_success
+    run test -f "$root/dry-run-tree/nested/leaf"
+    assert_success
+    run test -d "$root/dry-run-tree/nested/empty"
+    assert_success
+}
+
+@test "recursive dry-run terminates on a directory symlink cycle" {
+    local root=$BATS_TEST_TMPDIR/xrdfs-full-url
+    mkdir -p "$root/dry-run-cycle"
+    printf 'preserve' > "$root/dry-run-cycle/marker"
+    ln -s . "$root/dry-run-cycle/loop"
+
+    run "$XRDFS" rm -r --dry-run \
+        "$TEST_ENDPOINT//dry-run-cycle"
+    assert_failure
+    assert_output --partial $'/dry-run-cycle/loop'
+    run test -f "$root/dry-run-cycle/marker"
+    assert_success
+    run test -L "$root/dry-run-cycle/loop"
+    assert_success
+}
+
+@test "dry-run reports a missing root then plans later operands" {
+    local root=$BATS_TEST_TMPDIR/xrdfs-full-url
+    printf 'preserve' > "$root/dry-run-after-missing"
+
+    run "$XRDFS" rm --dry-run \
+        "$TEST_ENDPOINT//dry-run-missing" \
+        "$TEST_ENDPOINT//dry-run-after-missing"
+    assert_failure
+    assert_output --partial $'/dry-run-missing\tMISSING'
+    assert_output --partial $'/dry-run-after-missing\tSKIP'
+    run test -f "$root/dry-run-after-missing"
+    assert_success
+}
+
+@test "recursive dry-run combines with delimiter for a dash path" {
+    local root=$BATS_TEST_TMPDIR/xrdfs-full-url
+    mkdir -p "$root/-dry-run-tree/nested"
+    printf 'preserve' > "$root/-dry-run-tree/nested/file"
+
+    run bash -c \
+        'printf "cd /\nrm --dry-run -r -- -dry-run-tree\nexit\n" | "$1" "$2"' \
+        _ "$XRDFS" "$TEST_ENDPOINT"
+    assert_success
+    assert_output --partial $'/-dry-run-tree/nested/file\tSKIP'
+    assert_output --partial $'/-dry-run-tree\tSKIP DIR'
+    run test -f "$root/-dry-run-tree/nested/file"
+    assert_success
+}
+
+@test "nonrecursive dry-run rejects a directory without changing it" {
+    local root=$BATS_TEST_TMPDIR/xrdfs-full-url
+    mkdir -p "$root/dry-run-nonrecursive-directory"
+    printf 'preserve' > "$root/dry-run-nonrecursive-directory/marker"
+
+    run "$XRDFS" rm --dry-run \
+        "$TEST_ENDPOINT//dry-run-nonrecursive-directory"
+    assert_failure
+    refute_output --partial $'/dry-run-nonrecursive-directory\tSKIP DIR'
+    run test -f "$root/dry-run-nonrecursive-directory/marker"
+    assert_success
+}
+
 @test "WebDAV non-recursive removal verifies targets before DELETE" {
     local mock=$BATS_TEST_TMPDIR/webdav-removal
     local plugins=$mock/client.plugins.d
@@ -475,6 +581,83 @@ request_count() {
     "$ready"
 
     local endpoint=http://127.0.0.1:$(<"$port_file")
+
+    run env XRD_PLUGINCONFDIR="$plugins" \
+        "$XRDFS" rm --dry-run \
+        "$endpoint/dry-run-file?authz=file-secret&signature=signed-file"
+    assert_success
+    assert_output --partial $'/dry-run-file?authz=REDACTED&signature=signed-file\tSKIP'
+    refute_output --partial file-secret
+    run request_count DELETE /dry-run-file "$requests"
+    assert_success
+    assert_output 0
+    run request_count PROPFIND /dry-run-file "$requests"
+    assert_success
+    assert_output 1
+    run request_query_count PROPFIND /dry-run-file \
+        signature=signed-file "$requests"
+    assert_success
+    assert_output 1
+
+    run env XRD_PLUGINCONFDIR="$plugins" \
+        "$XRDFS" rm --dry-run \
+        "$endpoint/dry-run-missing?authz=return-secret&signature=signed-missing"
+    assert_failure
+    assert_output --partial \
+        $'/dry-run-missing?authz=REDACTED&signature=signed-missing\tMISSING'
+    refute_output --partial return-secret
+    run request_count DELETE /dry-run-missing "$requests"
+    assert_success
+    assert_output 0
+    run request_count PROPFIND /dry-run-missing "$requests"
+    assert_success
+    assert_output 1
+    run request_query_count PROPFIND /dry-run-missing \
+        signature=signed-missing "$requests"
+    assert_success
+    assert_output 1
+
+    run env XRD_PLUGINCONFDIR="$plugins" \
+        "$XRDFS" rm -r --dry-run \
+        "$endpoint/dry-run-tree?authz=tree-secret&signature=signed-tree"
+    assert_success
+    assert_output --partial \
+        $'/dry-run-tree/file?authz=REDACTED&signature=signed-tree\tSKIP'
+    assert_output --partial \
+        $'/dry-run-tree/nested/leaf?authz=REDACTED&signature=signed-tree\tSKIP'
+    assert_output --partial \
+        $'/dry-run-tree/nested?authz=REDACTED&signature=signed-tree\tSKIP DIR'
+    assert_output --partial \
+        $'/dry-run-tree?authz=REDACTED&signature=signed-tree\tSKIP DIR'
+    refute_output --partial tree-secret
+    run request_count DELETE /dry-run-tree "$requests"
+    assert_success
+    assert_output 0
+    run request_count DELETE /dry-run-tree/file "$requests"
+    assert_success
+    assert_output 0
+    run request_count DELETE /dry-run-tree/nested "$requests"
+    assert_success
+    assert_output 0
+    run request_count DELETE /dry-run-tree/nested/leaf "$requests"
+    assert_success
+    assert_output 0
+    run request_query_count PROPFIND /dry-run-tree signature=signed-tree \
+        "$requests"
+    assert_success
+    assert_output 2
+    run request_query_count PROPFIND /dry-run-tree/file signature=signed-tree \
+        "$requests"
+    assert_success
+    assert_output 1
+    run request_query_count PROPFIND /dry-run-tree/nested signature=signed-tree \
+        "$requests"
+    assert_success
+    assert_output 2
+    run request_query_count PROPFIND /dry-run-tree/nested/leaf \
+        signature=signed-tree "$requests"
+    assert_success
+    assert_output 1
 
     run env XRD_PLUGINCONFDIR="$plugins" \
         "$XRDFS" rm "$endpoint/file-a" "$endpoint/directory"

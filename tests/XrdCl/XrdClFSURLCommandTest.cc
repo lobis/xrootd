@@ -256,6 +256,27 @@ TEST( XrdClFSURLCommand, KeepsRecursiveRmOptionsOutsideURLNormalization )
   }
 }
 
+TEST( XrdClFSURLCommand, KeepsDryRunOptionsOutsideURLNormalization )
+{
+  NormalizedCommand command = Normalize(
+    {"rm", "--dry-run", "-r",
+     "root://root.example.org//store/tree?authz=value&signature=signed"} );
+  ASSERT_EQ( command.result, XrdCl::ValidURLCommand );
+  EXPECT_EQ( command.endpoint.GetProtocol(), "root" );
+  EXPECT_EQ( command.arguments,
+             (std::vector<std::string>{
+               "rm", "--dry-run", "-r",
+               "/store/tree?authz=value&signature=signed"}) );
+
+  NormalizedCommand delimited = Normalize(
+    {"rm", "--dry-run", "--",
+     "root://root.example.org//store/-tree"} );
+  ASSERT_EQ( delimited.result, XrdCl::ValidURLCommand );
+  EXPECT_EQ( delimited.arguments,
+             (std::vector<std::string>{
+               "rm", "--dry-run", "--", "/store/-tree"}) );
+}
+
 TEST( XrdClFSURLCommand, ReducesURLsUsingTheSameEffectiveEndpoint )
 {
   NormalizedCommand command = Normalize(

@@ -86,8 +86,22 @@ TEST( XrdClFSRemove, ParsesRecursiveOptionsAndOperands )
   ASSERT_TRUE( XrdCl::ParseRemoveCommand(
     {"rm", "/one", "/two"}, command, error ) );
   EXPECT_FALSE( command.recursive );
+  EXPECT_FALSE( command.dryRun );
   EXPECT_EQ( command.paths,
              (std::vector<std::string>{"/one", "/two"}) );
+}
+
+TEST( XrdClFSRemove, ParsesDryRunWithRecursiveOptionsAndDelimiter )
+{
+  XrdCl::RemoveCommand command;
+  std::string error;
+  ASSERT_TRUE( XrdCl::ParseRemoveCommand(
+    {"rm", "--dry-run", "/one", "-R", "--", "--dry-run", "-r"},
+    command, error ) ) << error;
+  EXPECT_TRUE( command.dryRun );
+  EXPECT_TRUE( command.recursive );
+  EXPECT_EQ( command.paths,
+             (std::vector<std::string>{"/one", "--dry-run", "-r"}) );
 }
 
 TEST( XrdClFSRemove, OptionDelimiterPreservesSpecialPathNames )
@@ -169,6 +183,273 @@ TEST( XrdClFSRemove, DescendsOnlyOnAnExplicitDirectoryResponse )
                          kXR_isDirectory ), true ) );
   EXPECT_FALSE( XrdCl::IsRecursiveRemovalDirectoryStatus(
     XrdCl::XRootDStatus(), true ) );
+}
+
+TEST( XrdClFSRemove, SanitizesRemovalStatusWithoutChangingItsClassification )
+{
+  const std::string secret =
+    "https://example.test/file?authz=return-secret&signature=signed";
+  const XrdCl::XRootDStatus original(
+    XrdCl::stError, XrdCl::errErrorResponse, kXR_NotAuthorized,
+    "metadata request failed for " + secret );
+
+  const XrdCl::XRootDStatus sanitized =
+    XrdCl::SanitizeRemovalStatus( original );
+
+  EXPECT_EQ( sanitized.status, original.status );
+  EXPECT_EQ( sanitized.code, original.code );
+  EXPECT_EQ( sanitized.errNo, original.errNo );
+  EXPECT_EQ( sanitized.GetErrorMessage().find( "return-secret" ),
+             std::string::npos );
+  EXPECT_NE( sanitized.GetErrorMessage().find( "authz=REDACTED" ),
+             std::string::npos );
+  EXPECT_NE( original.GetErrorMessage().find( "return-secret" ),
+             std::string::npos );
+}
+
+TEST( XrdClFSRemove, PlansNonrecursiveFilesAndContinuesAfterADirectory )
+{
+  std::vector<std::string> calls;
+  std::vector<std::string> reports;
+  XrdCl::DryRunRemoveOperations operations;
+  operations.stat = [&]( const std::string &path, bool &isDirectory )
+  {
+    calls.push_back( "stat " + path );
+    isDirectory = path == "/directory";
+    return XrdCl::XRootDStatus();
+  };
+  operations.list = [&]( const std::string &path,
+                          std::vector<std::string> & )
+  {
+    calls.push_back( "ls " + path );
+    return XrdCl::XRootDStatus();
+  };
+  operations.report = [&]( const std::string &path, bool isDirectory )
+  {
+    reports.push_back( std::string( isDirectory ? "dir " : "file " ) + path );
+  };
+  operations.reportFailure = [&]( const std::string &path,
+                                   const XrdCl::XRootDStatus & )
+  {
+    reports.push_back( "failed " + path );
+  };
+
+  std::string failedPath;
+  const XrdCl::XRootDStatus status = XrdCl::PlanRemoval(
+    {"/first", "/directory", "/later"}, false, operations, failedPath );
+  EXPECT_FALSE( status.IsOK() );
+  EXPECT_EQ( status.errNo, static_cast<unsigned int>( kXR_isDirectory ) );
+  EXPECT_EQ( failedPath, "/directory" );
+  EXPECT_EQ( calls, (std::vector<std::string>{
+    "stat /first", "stat /directory", "stat /later"
+  }) );
+  EXPECT_EQ( reports, (std::vector<std::string>{
+    "file /first", "failed /directory", "file /later"
+  }) );
+}
+
+TEST( XrdClFSRemove, PlansRecursiveTreesInPostorderAndPreservesQueries )
+{
+  const std::string root = "/tree?authz=top-secret&signature=signed";
+  const std::map<std::string, std::vector<std::string>> directories = {
+    {root, {"file", "nested"}},
+    {"/tree/nested?authz=top-secret&signature=signed", {"leaf"}}
+  };
+  std::vector<std::string> calls;
+  std::vector<std::string> reports;
+  XrdCl::DryRunRemoveOperations operations;
+  operations.stat = [&]( const std::string &path, bool &isDirectory )
+  {
+    calls.push_back( "stat " + path );
+    isDirectory = directories.find( path ) != directories.end();
+    return XrdCl::XRootDStatus();
+  };
+  operations.list = [&]( const std::string &path,
+                          std::vector<std::string> &children )
+  {
+    calls.push_back( "ls " + path );
+    children = directories.at( path );
+    return XrdCl::XRootDStatus();
+  };
+  operations.report = [&]( const std::string &path, bool isDirectory )
+  {
+    reports.push_back( XrdCl::RemovalDisplayPath( path ) +
+                       (isDirectory ? "\tSKIP DIR" : "\tSKIP") );
+  };
+  operations.reportFailure = []( const std::string &,
+                                  const XrdCl::XRootDStatus & ) {};
+
+  std::string failedPath;
+  EXPECT_TRUE( XrdCl::PlanRemoval(
+    {root}, true, operations, failedPath ).IsOK() );
+  EXPECT_TRUE( failedPath.empty() );
+  EXPECT_EQ( calls, (std::vector<std::string>{
+    "stat " + root,
+    "ls " + root,
+    "stat /tree/file?authz=top-secret&signature=signed",
+    "stat /tree/nested?authz=top-secret&signature=signed",
+    "ls /tree/nested?authz=top-secret&signature=signed",
+    "stat /tree/nested/leaf?authz=top-secret&signature=signed"
+  }) );
+  EXPECT_EQ( reports, (std::vector<std::string>{
+    "/tree/file?authz=REDACTED&signature=signed\tSKIP",
+    "/tree/nested/leaf?authz=REDACTED&signature=signed\tSKIP",
+    "/tree/nested?authz=REDACTED&signature=signed\tSKIP DIR",
+    "/tree?authz=REDACTED&signature=signed\tSKIP DIR"
+  }) );
+  for( const std::string &report : reports )
+    EXPECT_EQ( report.find( "top-secret" ), std::string::npos );
+}
+
+TEST( XrdClFSRemove, BoundsDryRunTraversalOnCyclicListings )
+{
+  int statCalls = 0;
+  int listCalls = 0;
+  int failureCalls = 0;
+  XrdCl::DryRunRemoveOperations operations;
+  operations.stat = [&]( const std::string &, bool &isDirectory )
+  {
+    ++statCalls;
+    isDirectory = true;
+    return XrdCl::XRootDStatus();
+  };
+  operations.list = [&]( const std::string &,
+                          std::vector<std::string> &children )
+  {
+    ++listCalls;
+    children = {"d"};
+    return XrdCl::XRootDStatus();
+  };
+  operations.report = []( const std::string &, bool ) {};
+  operations.reportFailure = [&]( const std::string &,
+                                   const XrdCl::XRootDStatus & )
+  {
+    ++failureCalls;
+  };
+
+  std::string failedPath;
+  const XrdCl::XRootDStatus status = XrdCl::PlanRemoval(
+    {"/tree"}, true, operations, failedPath );
+
+  EXPECT_FALSE( status.IsOK() );
+  EXPECT_EQ( status.code, XrdCl::errInvalidResponse );
+  EXPECT_NE( status.GetErrorMessage().find( "maximum directory depth" ),
+             std::string::npos );
+  EXPECT_FALSE( failedPath.empty() );
+  EXPECT_EQ( statCalls, 4097 );
+  EXPECT_EQ( listCalls, 4097 );
+  EXPECT_EQ( failureCalls, 1 );
+}
+
+TEST( XrdClFSRemove, RedactsMissingFailureAndPlansLaterRoots )
+{
+  const std::string missing = "/missing?authz=missing-secret&scope=read";
+  const std::string later = "/later?authz=later-secret&scope=read";
+  std::vector<std::string> reports;
+  XrdCl::DryRunRemoveOperations operations;
+  operations.stat = [&]( const std::string &path, bool &isDirectory )
+  {
+    isDirectory = false;
+    return path == missing ?
+      XrdCl::XRootDStatus(
+        XrdCl::stError, XrdCl::errErrorResponse, kXR_NotFound,
+        "metadata request failed for " + missing ) :
+      XrdCl::XRootDStatus();
+  };
+  operations.list = []( const std::string &,
+                         std::vector<std::string> & )
+  {
+    return XrdCl::XRootDStatus();
+  };
+  operations.report = [&]( const std::string &path, bool )
+  {
+    reports.push_back( XrdCl::RemovalDisplayPath( path ) + "\tSKIP" );
+  };
+  operations.reportFailure = [&]( const std::string &path,
+                                   const XrdCl::XRootDStatus &status )
+  {
+    reports.push_back( XrdCl::RemovalDisplayPath( path ) +
+                       (status.errNo == kXR_NotFound ? "\tMISSING" :
+                                                       "\tFAILED") );
+  };
+
+  std::string failedPath;
+  const XrdCl::XRootDStatus status = XrdCl::PlanRemoval(
+    {missing, later}, false, operations, failedPath );
+  EXPECT_FALSE( status.IsOK() );
+  EXPECT_EQ( status.status, XrdCl::stError );
+  EXPECT_EQ( status.code, XrdCl::errErrorResponse );
+  EXPECT_EQ( status.errNo, static_cast<unsigned int>( kXR_NotFound ) );
+  EXPECT_EQ( status.GetErrorMessage().find( "missing-secret" ),
+             std::string::npos );
+  EXPECT_NE( status.GetErrorMessage().find( "authz=REDACTED" ),
+             std::string::npos );
+  EXPECT_EQ( failedPath, missing );
+  EXPECT_EQ( reports, (std::vector<std::string>{
+    "/missing?authz=REDACTED&scope=read\tMISSING",
+    "/later?authz=REDACTED&scope=read\tSKIP"
+  }) );
+  for( const std::string &report : reports )
+  {
+    EXPECT_EQ( report.find( "missing-secret" ), std::string::npos );
+    EXPECT_EQ( report.find( "later-secret" ), std::string::npos );
+  }
+}
+
+TEST( XrdClFSRemove, DryRunRejectsIncompleteMetadataWithoutListing )
+{
+  int listCalls = 0;
+  XrdCl::DryRunRemoveOperations operations;
+  operations.stat = []( const std::string &, bool &isDirectory )
+  {
+    isDirectory = true;
+    return XrdCl::XRootDStatus( XrdCl::stOK, XrdCl::suPartial );
+  };
+  operations.list = [&]( const std::string &,
+                          std::vector<std::string> & )
+  {
+    ++listCalls;
+    return XrdCl::XRootDStatus();
+  };
+  operations.report = []( const std::string &, bool ) {};
+  operations.reportFailure = []( const std::string &,
+                                  const XrdCl::XRootDStatus & ) {};
+
+  std::string failedPath;
+  const XrdCl::XRootDStatus status = XrdCl::PlanRemoval(
+    {"/tree"}, true, operations, failedPath );
+  EXPECT_FALSE( status.IsOK() );
+  EXPECT_EQ( status.code, XrdCl::errInvalidResponse );
+  EXPECT_EQ( failedPath, "/tree" );
+  EXPECT_EQ( listCalls, 0 );
+}
+
+TEST( XrdClFSRemove, DryRunPrevalidatesEveryRecursiveRootBeforeMetadata )
+{
+  int metadataCalls = 0;
+  XrdCl::DryRunRemoveOperations operations;
+  operations.stat = [&]( const std::string &, bool & )
+  {
+    ++metadataCalls;
+    return XrdCl::XRootDStatus();
+  };
+  operations.list = [&]( const std::string &,
+                          std::vector<std::string> & )
+  {
+    ++metadataCalls;
+    return XrdCl::XRootDStatus();
+  };
+  operations.report = []( const std::string &, bool ) {};
+  operations.reportFailure = []( const std::string &,
+                                  const XrdCl::XRootDStatus & ) {};
+
+  std::string failedPath;
+  const XrdCl::XRootDStatus status = XrdCl::PlanRemoval(
+    {"/safe", "/"}, true, operations, failedPath );
+  EXPECT_FALSE( status.IsOK() );
+  EXPECT_EQ( status.code, XrdCl::errInvalidArgs );
+  EXPECT_EQ( failedPath, "/" );
+  EXPECT_EQ( metadataCalls, 0 );
 }
 
 TEST( XrdClFSRemove, RemovesNestedTreesInIterativePostorder )

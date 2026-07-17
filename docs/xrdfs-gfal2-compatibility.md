@@ -119,6 +119,8 @@ a second namespace implementation.
 | `gfal-rename "$FILE_A" "$FILE_B"` | `xrdfs mv "$FILE_A" "$FILE_B"` | Renames a file or directory through the existing XrdCl move operation on one ROOT endpoint. |
 | `gfal-rm "$FILE_A" "$FILE_B"` | `xrdfs rm "$FILE_A" "$FILE_B"` | Removes files through the existing XrdCl `Rm` operation. All URL operands must use one endpoint. |
 | `gfal-rm -r "$DIR"` | `xrdfs rm -r "$DIR"` | Adds `-r`, `-R`, and `--recursive`; native directory trees use an iterative CLI-local postorder traversal. |
+| `gfal-rm --dry-run "$FILE_A"` | `xrdfs rm --dry-run "$FILE_A"` | Uses XrdCl metadata operations to print tab-separated `<path>` and `SKIP` fields without issuing a removal operation. |
+| `gfal-rm -r --dry-run "$DIR"` | `xrdfs rm -r --dry-run "$DIR"` | Lists the tree and prints files before directories; directories use `SKIP DIR`. Remote storage is not changed. |
 
 `mkdir` deliberately retains xrdfs's historical default mode of `0750`.
 Scripts that depend on gfal-mkdir's different default should pass an explicit
@@ -194,6 +196,25 @@ namespace root, and dot or dot-dot traversal components (including encoded
 forms) are rejected. Child paths retain the operand's URL query parameters.
 Use `--` before a dash-prefixed path.
 
+`--dry-run` takes a separate metadata-only path before both the WebDAV safety
+guard and the destructive recursive walker. A non-recursive plan calls `Stat`
+for each operand. A recursive plan calls `Stat`, lists directories without the
+recursive listing flag, and uses an iterative postorder stack so planned files
+are reported before their parent directory. It never calls `Rm` or `RmDir`, and
+an HTTP(S) or DAV(S) dry-run never sends DELETE. If one tree cannot be fully
+inspected, that tree stops, later top-level operands are still planned, and the
+first failure is returned. Output uses gfal's `SKIP`, `SKIP DIR`, and `MISSING`
+labels where applicable.
+
+Signed query parameters are preserved on every descendant metadata request.
+`authz` values are redacted from dry-run output and diagnostics. XrdCl does not
+provide an lstat operation, so a metadata-only plan can follow a directory
+symlink and should be treated as advisory. The planner fails a tree before it
+would exceed 4096 directory levels, so cyclic or hostile listings cannot make
+the metadata traversal grow indefinitely. This limit applies only to dry-run;
+actual recursive removal continues to use its non-following `Rm`/`RmDir`
+checks.
+
 ## Remote-to-local copies with `xrdcp`
 
 `gfal-copy` and `gfal-cp` downloads map to the existing `xrdcp` application.
@@ -265,7 +286,10 @@ localhost fixture. They cover:
 - recursive native ROOT trees, empty directories, multiple operands, missing
   targets, special names, root and traversal guards, deep trees, and directory
   symlink target preservation;
-- successful WebDAV collection DELETE and terminal multi-status handling.
+- successful WebDAV collection DELETE and terminal multi-status handling;
+- metadata-only file and recursive removal plans, including postorder output,
+  continuation after a missing operand, signed-query preservation, authz
+  redaction, and zero native or WebDAV removal requests;
 
 The expected behavior is derived from the corresponding gfal2-util commands,
 but gfal2 is not a build-time or runtime dependency of `xrdfs`, and it is not
@@ -328,9 +352,8 @@ The following are intentionally outside the compatibility covered here:
 
 - a new `xrd` command;
 - raw `query` in command-first form;
-- gfal-rm auxiliary modes (`--dry-run`, `--just-delete`, `--from-file`, and
-  `--bulk`);
+- gfal-rm auxiliary modes (`--just-delete`, `--from-file`, and `--bulk`);
 - uploads, third-party copies, or any other copy with a remote destination;
-- exact recursive-copy layout, copy-chain, or dry-run parity;
+- exact recursive-copy layout, copy-chain, or `gfal-copy` dry-run parity;
 - full gfal2 common-option parity;
 - exact output, diagnostic, or exit-code parity.

@@ -12,12 +12,19 @@
 #include "XrdCl/XrdClFSRemove.hh"
 
 #include "XProtocol/XProtocol.hh"
+#include "XrdOuc/XrdOucPrivateUtils.hh"
 
 #include <cctype>
+#include <cstddef>
 #include <utility>
 
 namespace
 {
+  // Keep metadata planning finite when a remote endpoint repeatedly presents
+  // a child as another directory. The destructive walker is deliberately not
+  // affected by this dry-run-only safety limit.
+  constexpr std::size_t kMaximumRemovalPlanDepth = 4096;
+
   int HexDigit( char character )
   {
     const unsigned char value = static_cast<unsigned char>( character );
@@ -105,6 +112,12 @@ namespace
     return InvalidListingStatus(
       std::string( operation ) + " did not return a complete response" );
   }
+
+  XrdCl::XRootDStatus RemovalPlanDepthStatus()
+  {
+    return InvalidListingStatus(
+      "dry-run removal plan exceeded the maximum directory depth of 4096" );
+  }
 }
 
 namespace XrdCl
@@ -130,6 +143,11 @@ namespace XrdCl
            argument == "--recursive") )
       {
         command.recursive = true;
+        continue;
+      }
+      if( parseOptions && argument == "--dry-run" )
+      {
+        command.dryRun = true;
         continue;
       }
       if( parseOptions && argument.size() > 1 && argument[0] == '-' )
@@ -196,6 +214,187 @@ namespace XrdCl
     path += child;
     path += parameters;
     return path;
+  }
+
+  std::string RemovalDisplayPath( const std::string &path )
+  {
+    return obfuscateAuth( path );
+  }
+
+  XRootDStatus SanitizeRemovalStatus( const XRootDStatus &status )
+  {
+    XRootDStatus sanitized( status.status, status.code, status.errNo,
+                            status.GetErrorMessage() );
+    sanitized.SetErrorMessage(
+      RemovalDisplayPath( sanitized.GetErrorMessage() ) );
+    return sanitized;
+  }
+
+  XRootDStatus PlanRemoval(
+    const std::vector<std::string> &paths,
+    bool recursive,
+    const DryRunRemoveOperations &operations,
+    std::string &failedPath )
+  {
+    failedPath.clear();
+    std::string error;
+    if( recursive )
+    {
+      for( const std::string &path : paths )
+      {
+        if( !ValidateRecursiveRemovePath( path, error ) )
+        {
+          failedPath = path;
+          return InvalidRemovePathStatus( error );
+        }
+      }
+    }
+
+    struct StackEntry
+    {
+      std::string path;
+      bool postorder;
+      std::size_t depth;
+    };
+
+    bool haveFailure = false;
+    XRootDStatus firstFailure;
+    for( const std::string &root : paths )
+    {
+      bool rootFailed = false;
+      std::vector<StackEntry> stack;
+      stack.push_back( {root, false, 0} );
+      while( !stack.empty() )
+      {
+        StackEntry &entry = stack.back();
+        if( entry.postorder )
+        {
+          operations.report( entry.path, true );
+          stack.pop_back();
+          continue;
+        }
+
+        if( entry.depth > kMaximumRemovalPlanDepth )
+        {
+          const XRootDStatus failure = SanitizeRemovalStatus(
+            RemovalPlanDepthStatus() );
+          operations.reportFailure( entry.path, failure );
+          if( !haveFailure )
+          {
+            failedPath = entry.path;
+            firstFailure = failure;
+            haveFailure = true;
+          }
+          rootFailed = true;
+          break;
+        }
+
+        bool isDirectory = false;
+        XRootDStatus status = operations.stat( entry.path, isDirectory );
+        if( !status.IsOK() || status.code != suDone )
+        {
+          const XRootDStatus failure = SanitizeRemovalStatus(
+            status.IsOK() ? IncompleteOperationStatus(
+                              "metadata inspection" ) : status );
+          operations.reportFailure( entry.path, failure );
+          if( !haveFailure )
+          {
+            failedPath = entry.path;
+            firstFailure = failure;
+            haveFailure = true;
+          }
+          rootFailed = true;
+          break;
+        }
+
+        if( !isDirectory )
+        {
+          operations.report( entry.path, false );
+          stack.pop_back();
+          continue;
+        }
+
+        if( !recursive )
+        {
+          const XRootDStatus failure = SanitizeRemovalStatus( XRootDStatus(
+            stError, errErrorResponse, kXR_isDirectory,
+            "Target is a directory; recursive removal was not requested." ) );
+          operations.reportFailure( entry.path, failure );
+          if( !haveFailure )
+          {
+            failedPath = entry.path;
+            firstFailure = failure;
+            haveFailure = true;
+          }
+          rootFailed = true;
+          break;
+        }
+
+        std::vector<std::string> children;
+        status = operations.list( entry.path, children );
+        if( !status.IsOK() || status.code != suDone )
+        {
+          const XRootDStatus failure = SanitizeRemovalStatus(
+            status.IsOK() ? IncompleteOperationStatus(
+                              "directory listing" ) : status );
+          operations.reportFailure( entry.path, failure );
+          if( !haveFailure )
+          {
+            failedPath = entry.path;
+            firstFailure = failure;
+            haveFailure = true;
+          }
+          rootFailed = true;
+          break;
+        }
+
+        std::vector<std::string> childPaths;
+        childPaths.reserve( children.size() );
+        for( const std::string &child : children )
+        {
+          if( child == "." || child == ".." ) continue;
+          if( !ValidateChildName( child, error ) )
+          {
+            const XRootDStatus failure = SanitizeRemovalStatus(
+              InvalidListingStatus( error ) );
+            operations.reportFailure( entry.path, failure );
+            if( !haveFailure )
+            {
+              failedPath = entry.path;
+              firstFailure = failure;
+              haveFailure = true;
+            }
+            rootFailed = true;
+            break;
+          }
+          std::string childPath = RecursiveRemovalChildPath( entry.path, child );
+          if( !ValidateRecursiveRemovePath( childPath, error ) )
+          {
+            const XRootDStatus failure = SanitizeRemovalStatus(
+              InvalidListingStatus( error ) );
+            operations.reportFailure( childPath, failure );
+            if( !haveFailure )
+            {
+              failedPath = childPath;
+              firstFailure = failure;
+              haveFailure = true;
+            }
+            rootFailed = true;
+            break;
+          }
+          childPaths.push_back( std::move( childPath ) );
+        }
+
+        if( rootFailed ) break;
+
+        const std::size_t childDepth = entry.depth + 1;
+        entry.postorder = true;
+        for( auto child = childPaths.rbegin(); child != childPaths.rend();
+             ++child )
+          stack.push_back( {*child, false, childDepth} );
+      }
+    }
+    return haveFailure ? firstFailure : XRootDStatus();
   }
 
   XRootDStatus RemoveRecursively(

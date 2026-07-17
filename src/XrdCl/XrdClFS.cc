@@ -979,14 +979,16 @@ XRootDStatus DoRm( FileSystem                      *fs,
         !ValidateRecursiveRemovePath( path, parseError ) )
     {
       log->Error( AppMsg, "Invalid recursive removal path %s: %s",
-                          path.c_str(), parseError.c_str() );
+                          RemovalDisplayPath( path ).c_str(),
+                          parseError.c_str() );
       return XRootDStatus( stError, errInvalidArgs, 0, parseError );
     }
 
     std::string fullPath;
     if( !BuildPath( fullPath, env, path ).IsOK() )
     {
-      log->Error( AppMsg, "Invalid path: %s", path.c_str() );
+      log->Error( AppMsg, "Invalid path: %s",
+                          RemovalDisplayPath( path ).c_str() );
       return XRootDStatus( stError, errInvalidArgs );
     }
     fullPaths.emplace_back( std::move( fullPath ) );
@@ -1001,11 +1003,82 @@ XRootDStatus DoRm( FileSystem                      *fs,
       if( !ValidateRecursiveRemovePath( fullPath, parseError ) )
       {
         log->Error( AppMsg, "Invalid recursive removal path %s: %s",
-                            fullPath.c_str(), parseError.c_str() );
+                            RemovalDisplayPath( fullPath ).c_str(),
+                            parseError.c_str() );
         return XRootDStatus( stError, errInvalidArgs, 0, parseError );
       }
     }
+  }
 
+  if( command.dryRun )
+  {
+    DryRunRemoveOperations operations;
+    operations.stat = [fs]( const std::string &path, bool &isDirectory )
+    {
+      StatInfo *rawStat = nullptr;
+      XRootDStatus status = fs->Stat( path, rawStat );
+      std::unique_ptr<StatInfo> stat( rawStat );
+      if( !status.IsOK() || status.code != suDone ) return status;
+      if( !stat )
+        return XRootDStatus( stError, errInvalidResponse, 0,
+                             "Stat succeeded without target metadata." );
+      isDirectory = stat->TestFlags( StatInfo::IsDir );
+      return status;
+    };
+    operations.list = [fs]( const std::string &path,
+                            std::vector<std::string> &children )
+    {
+      DirectoryList *rawList = nullptr;
+      XRootDStatus status = fs->DirList( path, DirListFlags::None, rawList );
+      std::unique_ptr<DirectoryList> list( rawList );
+      if( !status.IsOK() || status.code != suDone ) return status;
+      if( !list )
+        return XRootDStatus( stError, errInvalidResponse, 0,
+                             "Directory listing succeeded without a response." );
+
+      children.reserve( list->GetSize() );
+      for( DirectoryList::ConstIterator entry = list->Begin();
+           entry != list->End(); ++entry )
+      {
+        if( !*entry )
+          return XRootDStatus( stError, errInvalidResponse, 0,
+                               "Directory listing contained a null entry." );
+        children.push_back( (*entry)->GetName() );
+      }
+      return status;
+    };
+    operations.report = []( const std::string &path, bool isDirectory )
+    {
+      std::cout << RemovalDisplayPath( path ) << '\t'
+                << (isDirectory ? "SKIP DIR" : "SKIP") << '\n';
+    };
+    operations.reportFailure = []( const std::string &path,
+                                   const XRootDStatus &status )
+    {
+      if( status.errNo == kXR_NotFound )
+        std::cout << RemovalDisplayPath( path ) << "\tMISSING\n";
+      else if( status.errNo != kXR_isDirectory )
+        std::cout << RemovalDisplayPath( path ) << "\tFAILED\n";
+    };
+
+    std::string failedPath;
+    XRootDStatus status = PlanRemoval(
+      fullPaths, command.recursive, operations, failedPath );
+    if( !status.IsOK() )
+    {
+      // ExecuteCommand prints a returned failure again, so sanitize the
+      // status itself rather than only the diagnostic emitted here.
+      const XRootDStatus sanitized = SanitizeRemovalStatus( status );
+      log->Error( AppMsg, "Unable to plan removal of %s: %s",
+                          RemovalDisplayPath( failedPath ).c_str(),
+                          sanitized.ToStr().c_str() );
+      return sanitized;
+    }
+    return XRootDStatus();
+  }
+
+  if( command.recursive )
+  {
     RecursiveRemoveOperations operations;
     operations.nativeXRootD = IsXRootDProtocol( env );
     operations.remove = [fs]( const std::string &path )
@@ -3004,11 +3077,15 @@ XRootDStatus PrintHelp( FileSystem *, Env *,
   printf( "     xattr          <path>   Extended attributes\n"            );
   printf( "     prepare        <reqid> [filenames]  Prepare request status\n\n" );
 
-  printf( "   rm [-r|-R|--recursive] [--] <path>...\n"                      );
+  printf( "   rm [-r|-R|--recursive] [--dry-run] [--] <path>...\n"          );
   printf( "     Remove one or more files or directory trees.\n"              );
   printf( "     -r, -R, --recursive remove directories and their contents\n" );
   printf( "                         without following directory symlinks\n"   );
   printf( "                         WebDAV uses collection DELETE directly\n"  );
+  printf( "     --dry-run inspect and print the removal plan without changing\n" );
+  printf( "               storage; files use SKIP and directories SKIP DIR\n"   );
+  printf( "               Plans are bounded to 4096 directory levels.\n"        );
+  printf( "               Directory-symlink plans are advisory (no lstat).\n"    );
   printf( "     Recursive root and traversal paths are rejected up front.\n"   );
   printf( "     Later operands continue after a failure; the first error is\n"   );
   printf( "     returned, so multi-path removal is not transactional.\n"        );
