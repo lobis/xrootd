@@ -16,7 +16,7 @@ License:	LGPL-3.0-or-later AND BSD-2-Clause AND BSD-3-Clause AND curl AND MIT AN
 URL:		https://xrootd.org
 
 %if !%{with git}
-Version:	6.0.3
+Version:	6.1.0
 Source0:	https://xrootd.web.cern.ch/download/v%{version}/%{name}-%{version}.tar.gz
 %else
 %define git_version %(tar xzf %{_sourcedir}/%{name}.tar.gz -O xrootd/VERSION)
@@ -82,7 +82,7 @@ BuildRequires:	python3-sphinx
 BuildRequires:	attr
 BuildRequires:	coreutils
 BuildRequires:	curl
-BuildRequires:	gtest-devel
+BuildRequires:	jq
 BuildRequires:	krb5-server
 BuildRequires:	krb5-workstation
 BuildRequires:	openssl
@@ -612,6 +612,7 @@ fi
 %{_libdir}/libXrdOfsPrepGPI-6.so
 %{_libdir}/libXrdOssArc-6.so
 %{_libdir}/libXrdOssCsi-6.so
+%{_libdir}/libXrdOssMirage-6.so
 %{_libdir}/libXrdOssSIgpfsT-6.so
 %{_libdir}/libXrdOssStats-6.so
 %{_libdir}/libXrdPfc-6.so
@@ -693,6 +694,12 @@ fi
 %endif
 
 %changelog
+
+* Fri Jun 19 2026 Guilherme Amadio <amadio@cern.ch> - 1:6.1.0-1
+- XRootD 6.1.0
+
+* Fri Jun 19 2026 Guilherme Amadio <amadio@cern.ch> - 1:5.9.6-1
+- XRootD 5.9.6
 
 * Mon Jun 01 2026 Guilherme Amadio <amadio@cern.ch> - 1:6.0.3-1
 - XRootD 6.0.3
