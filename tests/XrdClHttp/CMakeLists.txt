@@ -1,16 +1,32 @@
-# XrdClHttp tests depend on scitokens fixture for authentication
-if(NOT BUILD_SCITOKENS)
-  return()
-endif()
-
 # The final shared library has its symbols stripped; we need the symbols available
 # to allow unit tests to access them.  Rather than build the objects twice, we
 # create an internal object library and just link twice -- once stripping the symbols,
 # once without.
+find_package(CURL REQUIRED)
+
 add_library(XrdClHttpTesting SHARED)
 target_link_libraries(XrdClHttpTesting PRIVATE XrdClHttpObj)
 
 include(GoogleTest)
+
+add_executable(xrdcl-http-unit-tests
+  HeaderParserTest.cc
+  ParseTimeoutTest.cc
+  TapeTest.cc
+)
+
+target_link_libraries(xrdcl-http-unit-tests
+  XrdClHttpTesting XrdCl CURL::libcurl GTest::gtest_main)
+target_include_directories(xrdcl-http-unit-tests
+  PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../src")
+
+gtest_discover_tests(xrdcl-http-unit-tests TEST_PREFIX XrdClHttp::
+  PROPERTIES DISCOVERY_TIMEOUT 10)
+
+# XrdClHttp integration tests depend on scitokens fixture for authentication
+if(NOT BUILD_SCITOKENS)
+  return()
+endif()
 
 find_program(OPENSSL_BIN openssl REQUIRED)
 
@@ -27,7 +43,6 @@ add_executable(xrdcl-test
 # Tests depending on XrdClHttp linkage
 add_executable(xrdcl-http-test
   CopyTest.cc
-  ParseTimeoutTest.cc
   VectorReadTest.cc
 )
 
@@ -73,6 +88,10 @@ set_tests_properties(XrdClHttp::teardown
 add_test(NAME XrdClHttp::test
   COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/test.sh" curl)
 
+add_test(NAME XrdClHttp::tape
+  COMMAND "${PROJECT_SOURCE_DIR}/vendor/bats/bin/bats"
+    "${CMAKE_CURRENT_SOURCE_DIR}/tape.bats")
+
 list(APPEND CURL_TEST_LOGS ${CMAKE_CURRENT_BINARY_DIR}/tests/curl/origin.log)
 list(APPEND CURL_TEST_LOGS ${CMAKE_CURRENT_BINARY_DIR}/tests/curl/cache.log)
 list(APPEND CURL_TEST_LOGS ${CMAKE_CURRENT_BINARY_DIR}/tests/curl/client.log)
@@ -83,6 +102,16 @@ set_tests_properties(XrdClHttp::test
       XrdClHttp
     ENVIRONMENT
       "BINARY_DIR=${CMAKE_BINARY_DIR}"
+    ATTACHED_FILES_ON_FAIL
+      "${CURL_TEST_LOGS}"
+)
+
+set_tests_properties(XrdClHttp::tape
+  PROPERTIES
+    FIXTURES_REQUIRED
+      XrdClHttp
+    ENVIRONMENT
+      "BATS_LIB_PATH=${PROJECT_SOURCE_DIR}/vendor/bats/lib/bats;BINARY_DIR=${CMAKE_BINARY_DIR}"
     ATTACHED_FILES_ON_FAIL
       "${CURL_TEST_LOGS}"
 )
