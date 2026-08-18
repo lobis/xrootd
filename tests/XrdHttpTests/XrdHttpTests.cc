@@ -856,3 +856,120 @@ TEST(XrdHttpTests, parseTransferEncoding) {
     ASSERT_EQ(expected, res) << "input was: \"" << input << "\"";
   }
 }
+
+TEST(XrdHttpTests, requestBodyLifecycleTests) {
+  XrdHttpReadRangeHandler::Configuration rcfg(4, 20, 100);
+  XrdHttpReq req(nullptr, rcfg);
+
+  // 1. Initial state
+  EXPECT_FALSE(req.hasUnconsumedRequestBody());
+  EXPECT_FALSE(req.isRequestChunked());
+  EXPECT_TRUE(req.keepalive);
+
+  // 2. Bodyless GET request
+  {
+    req.reset();
+    char line1[] = "GET /resource HTTP/1.1\r\n";
+    ASSERT_EQ(0, req.parseFirstLine(line1, strlen(line1)));
+    char line2[] = "Host: example.com\r\n";
+    ASSERT_EQ(0, req.parseLine(line2, strlen(line2)));
+    EXPECT_FALSE(req.hasUnconsumedRequestBody());
+    EXPECT_FALSE(req.isRequestChunked());
+    EXPECT_TRUE(req.keepalive);
+  }
+
+  // 3. GET with Content-Length: 0
+  {
+    req.reset();
+    char line1[] = "GET /resource HTTP/1.1\r\n";
+    ASSERT_EQ(0, req.parseFirstLine(line1, strlen(line1)));
+    char line2[] = "Content-Length: 0\r\n";
+    ASSERT_EQ(0, req.parseLine(line2, strlen(line2)));
+    EXPECT_FALSE(req.hasUnconsumedRequestBody());
+    EXPECT_FALSE(req.isRequestChunked());
+    EXPECT_TRUE(req.keepalive);
+  }
+
+  // 4. GET with positive Content-Length (unconsumed framed body)
+  {
+    req.reset();
+    char line1[] = "GET /resource HTTP/1.1\r\n";
+    ASSERT_EQ(0, req.parseFirstLine(line1, strlen(line1)));
+    char line2[] = "Content-Length: 42\r\n";
+    ASSERT_EQ(0, req.parseLine(line2, strlen(line2)));
+    EXPECT_TRUE(req.hasUnconsumedRequestBody());
+    EXPECT_FALSE(req.isRequestChunked());
+  }
+
+  // 5. HEAD with Transfer-Encoding: chunked (unconsumed framed body)
+  {
+    req.reset();
+    char line1[] = "HEAD /resource HTTP/1.1\r\n";
+    ASSERT_EQ(0, req.parseFirstLine(line1, strlen(line1)));
+    char line2[] = "Transfer-Encoding: chunked\r\n";
+    ASSERT_EQ(0, req.parseLine(line2, strlen(line2)));
+    EXPECT_TRUE(req.hasUnconsumedRequestBody());
+    EXPECT_TRUE(req.isRequestChunked());
+  }
+
+  // 6. Request with X-Transfer-Status: true (should NOT set request body pending)
+  {
+    req.reset();
+    char line1[] = "GET /resource HTTP/1.1\r\n";
+    ASSERT_EQ(0, req.parseFirstLine(line1, strlen(line1)));
+    char line2[] = "X-Transfer-Status: true\r\n";
+    ASSERT_EQ(0, req.parseLine(line2, strlen(line2)));
+    EXPECT_FALSE(req.hasUnconsumedRequestBody());
+    EXPECT_FALSE(req.isRequestChunked());
+  }
+
+  // 7. Request smuggling prevention (Transfer-Encoding + Content-Length)
+  {
+    req.reset();
+    char line1[] = "POST /resource HTTP/1.1\r\n";
+    ASSERT_EQ(0, req.parseFirstLine(line1, strlen(line1)));
+    char line2[] = "Transfer-Encoding: chunked\r\n";
+    ASSERT_EQ(0, req.parseLine(line2, strlen(line2)));
+    char line3[] = "Content-Length: 10\r\n";
+    ASSERT_EQ(-8, req.parseLine(line3, strlen(line3)));
+    EXPECT_EQ(XrdHttpReq::rtMalformed, req.request);
+  }
+
+  // 8. Request smuggling prevention (Content-Length + Transfer-Encoding)
+  {
+    req.reset();
+    char line1[] = "POST /resource HTTP/1.1\r\n";
+    ASSERT_EQ(0, req.parseFirstLine(line1, strlen(line1)));
+    char line2[] = "Content-Length: 10\r\n";
+    ASSERT_EQ(0, req.parseLine(line2, strlen(line2)));
+    char line3[] = "Transfer-Encoding: chunked\r\n";
+    ASSERT_EQ(-8, req.parseLine(line3, strlen(line3)));
+    EXPECT_EQ(XrdHttpReq::rtMalformed, req.request);
+  }
+
+  // 9. Reset clears all pending state
+  {
+    req.reset();
+    char line1[] = "PUT /resource HTTP/1.1\r\n";
+    ASSERT_EQ(0, req.parseFirstLine(line1, strlen(line1)));
+    char line2[] = "Content-Length: 100\r\n";
+    ASSERT_EQ(0, req.parseLine(line2, strlen(line2)));
+    EXPECT_TRUE(req.hasUnconsumedRequestBody());
+    req.reset();
+    EXPECT_FALSE(req.hasUnconsumedRequestBody());
+    EXPECT_FALSE(req.isRequestChunked());
+    EXPECT_TRUE(req.keepalive);
+  }
+
+  // 10. Manual body consumption / discard (e.g. after PROPFIND body is read)
+  {
+    req.reset();
+    char line1[] = "PROPFIND /resource HTTP/1.1\r\n";
+    ASSERT_EQ(0, req.parseFirstLine(line1, strlen(line1)));
+    char line2[] = "Content-Length: 128\r\n";
+    ASSERT_EQ(0, req.parseLine(line2, strlen(line2)));
+    EXPECT_TRUE(req.hasUnconsumedRequestBody());
+    req.setRequestBodyPending(false);
+    EXPECT_FALSE(req.hasUnconsumedRequestBody());
+  }
+}

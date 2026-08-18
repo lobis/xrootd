@@ -187,7 +187,7 @@ int XrdHttpReq::parseLine(char *line, int len) {
         request = rtMalformed;
         return -6;
       }
-      if (m_transfer_encoding_chunked) {
+      if (m_request_chunked) {
         // A request that already declared Transfer-Encoding: chunked and
         // now also sends Content-Length is the classic smuggling vector
         // (the frontend and backend may disagree on which header wins).
@@ -204,6 +204,9 @@ int XrdHttpReq::parseLine(char *line, int len) {
       }
       length = parsed;
       length_seen = true;
+      if (length > 0) {
+        m_request_body_pending = true;
+      }
 
     } else if (!strcasecmp(key, "destination")) {
       destination.assign(val, line+len-val);
@@ -244,6 +247,8 @@ int XrdHttpReq::parseLine(char *line, int len) {
         return -8;
       }
       m_transfer_encoding_chunked = true;
+      m_request_chunked = true;
+      m_request_body_pending = true;
     } else if (!strcasecmp(key, "x-transfer-status") && strstr(val, "true")) {
       m_transfer_encoding_chunked = true;
       m_status_trailer = true;
@@ -696,6 +701,13 @@ bool XrdHttpReq::Redir(XrdXrootd::Bridge::Context &info, //!< the result context
   }
 
   TRACE(REQ, " XrdHttpReq::Redir Redirecting to " << redirdest.c_str());
+
+  // If the request contains an unconsumed body (e.g. PUT/POST or GET with framed content),
+  // we must not keep the connection alive since unconsumed body bytes would
+  // corrupt parsing of subsequent pipelined HTTP requests on this connection.
+  if (hasUnconsumedRequestBody()) {
+    keepalive = false;
+  }
 
   if (request != rtGET)
     prot->SendSimpleResp(307, NULL, (char *) redirdest.c_str(), 0, 0, keepalive);
@@ -1376,6 +1388,8 @@ int XrdHttpReq::ProcessHTTPReq() {
               // set the bytes written and length appropriately; on next callback,
               // we will hit the close() block below.
               m_transfer_encoding_chunked = false;
+              m_request_chunked = false;
+              m_request_body_pending = false;
               length = writtenbytes;
               return ProcessHTTPReq();
             }
@@ -1613,7 +1627,7 @@ int XrdHttpReq::ProcessHTTPReq() {
               return -1;
             }
 
-
+            m_request_body_pending = false;
             parseBody(p, length);
           }
 
@@ -2364,8 +2378,12 @@ int XrdHttpReq::PostProcessHTTPReq(bool final_) {
           prot->BuffConsume(ntohl(xrdreq.write.dlen));
           writtenbytes += l;
 
+          if (length_seen && length > 0 && writtenbytes >= length) {
+            m_request_body_pending = false;
+          }
+
           // Update the chunk offset
-          if (m_transfer_encoding_chunked) {
+          if (m_request_chunked) {
             m_current_chunk_offset += l;
           }
 
@@ -2820,6 +2838,8 @@ void XrdHttpReq::reset() {
   sendcontinue = false;
 
   m_transfer_encoding_chunked = false;
+  m_request_chunked = false;
+  m_request_body_pending = false;
   m_current_chunk_size = -1;
   m_current_chunk_offset = 0;
 
