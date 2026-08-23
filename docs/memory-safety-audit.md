@@ -70,6 +70,9 @@ changing successful-path behavior, callback ownership, or public interfaces.
 - `XrdSutPFile::RemoveEntries`: release the temporary offset array after the
   removal loop.  Successful and error-visible behavior is unchanged; only
   temporary offset storage is reclaimed.
+- `XrdSutPFile::Trim`: retain an internally generated `<name>.bak` with RAII
+  through every exit; caller-supplied backup names remain borrowed.  Filesystem
+  operations, diagnostics, and return behavior are unchanged.
 - `XrdXrootdGSReal`: remove an unmatched CGI-header formatting conversion.
   Malformed/undefined prior output behavior could append arbitrary memory or
   crash during CGI g-stream construction; it now emits the intended header

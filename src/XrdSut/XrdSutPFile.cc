@@ -34,6 +34,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <ctime>
+#include <memory>
 
 #include "XrdSut/XrdSutAux.hh"
 #include "XrdSut/XrdSutPFEntry.hh"
@@ -1812,13 +1813,15 @@ kXR_int32 XrdSutPFile::Trim(const char *fbak)
    }
 
    // Get name of backup file
-   char *nbak = (char *)fbak;
+   std::unique_ptr<char[]> defaultBackup;
+   const char *nbak = fbak;
    if (!nbak) {
       // Use default
-      nbak = new char[strlen(name)+5];
-      if (!nbak)
+      defaultBackup.reset(new char[strlen(name)+5]);
+      if (!defaultBackup)
          return Err(kPFErrOutOfMemory,"Trim");
-      sprintf(nbak,"%s.bak",name);
+      sprintf(defaultBackup.get(),"%s.bak",name);
+      nbak = defaultBackup.get();
       DEBUG("backup file: "<<nbak);
    }
 
