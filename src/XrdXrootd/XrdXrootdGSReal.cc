@@ -393,7 +393,7 @@ int XrdXrootdGSReal::hdrCGI(const XrdXrootdGSReal::GSParms &gs,
 // Format the header
 //
    hdr = "code=%c&pseq=$12&stod=%u&sid=%s%s&gs.type=%c"
-         "&gs.tbeg=$123456789&gs.tend=$123456789%s\n";
+         "&gs.tbeg=$123456789&gs.tend=$123456789\n";
 
    n = snprintf(buff, blen, hdr, XROOTD_MON_MAPGSTA, ntohl(startTime),
                                  kySID, plug, gs.Type);

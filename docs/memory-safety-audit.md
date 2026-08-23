@@ -56,6 +56,11 @@ changing successful-path behavior, callback ownership, or public interfaces.
 - `XrdSecgsiGMAPFunDN`: delete only the locally allocated mapping probe.
 - `XrdConfig`: free invalid trailing-argument cipher storage; successful cipher
   storage remains intentionally persistent.
+- `XrdXrootdGSReal`: remove an unmatched CGI-header formatting conversion.
+  Malformed/undefined prior output behavior could append arbitrary memory or
+  crash during CGI g-stream construction; it now emits the intended header
+  ending in a newline.  Valid intended functionality otherwise remains
+  unchanged.
 
 ## Deferred and expected analyzer reports
 
