@@ -64,6 +64,11 @@ changing successful-path behavior, callback ownership, or public interfaces.
 - `XrdCl::MessageUtils::RewriteCGIAndPath`: reject malformed `kXR_mv` payloads
   before size underflow or out-of-bounds access.  Such move requests now remain
   unchanged no-ops, while valid requests retain their existing behavior.
+- `XrdOucString`: format into an independently owned temporary and adopt it
+  only after success; allocation or formatting failure now returns `-1` with
+  the destination unchanged.  `setbuffer` retains the adopted buffer if its
+  shrink realloc fails instead of losing ownership.  Valid formatted output is
+  unchanged.
 
 ## Deferred and expected analyzer reports
 

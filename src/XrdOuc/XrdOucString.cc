@@ -29,6 +29,7 @@
 #include <cstdio>
 #include <cstring>
 #include <climits>
+#include <cstdarg>
 
 #include "XrdOuc/XrdOucString.hh"
 
@@ -41,26 +42,43 @@
 #define kMAXINT64LEN   25
 
 #if !defined(WINDOWS)
-//
-// Macro for 'form'-like operations
-#define XOSINTFORM(f,b) \
-   int buf_len = 256; \
-   va_list ap; \
-   va_start(ap, f); \
-again: \
-   b = (char *)realloc(b, buf_len); \
-   int n = vsnprintf(b, buf_len, f, ap); \
-   if (n == -1 || n >= buf_len) { \
-      if (n == -1) \
-         buf_len *= 2; \
-      else \
-         buf_len = n+1; \
-      va_end(ap); \
-      va_start(ap, f); \
-      goto again; \
-   } \
-   va_end(ap);
-// End-Of-Macro for 'form'-like operations
+namespace
+{
+int formatString( char *&buffer, const char *fmt, va_list args )
+{
+   int   bufLen = 256;
+   char *tmp    = 0;
+
+   while( true )
+   {
+      char *newBuffer = (char *)realloc( tmp, bufLen );
+      if( !newBuffer )
+         {free( tmp ); return -1;}
+      tmp = newBuffer;
+
+      va_list attempt;
+      va_copy( attempt, args );
+      int n = vsnprintf( tmp, bufLen, fmt, attempt );
+      va_end( attempt );
+
+      if( n >= 0 && n < bufLen )
+         {buffer = tmp; return n;}
+
+      if( n < 0 )
+         {
+          if( bufLen > INT_MAX/2 )
+             {free( tmp ); return -1;}
+          bufLen *= 2;
+         }
+      else
+         {
+          if( n >= INT_MAX )
+             {free( tmp ); return -1;}
+          bufLen = n+1;
+         }
+   }
+}
+}
 #endif
 
 // Default blksize for (re-)allocations; active if > 0.
@@ -216,7 +234,9 @@ void XrdOucString::setbuffer(char *buf)
       str = buf;
       len = strlen(buf);
       siz = len + 1;
-      str = (char *)realloc(str, siz);
+      char *resized = (char *)realloc(str, siz);
+      if (resized)
+         str = resized;
    }
 }
 
@@ -227,15 +247,14 @@ int XrdOucString::form(const char *fmt, ...)
    // Recreate the string according to 'fmt' and the arguments
    // Return -1 in case of failure, or the new length.
 
-   // Decode the arguments
-   XOSINTFORM(fmt, str);
-   siz = buf_len;
+   va_list ap;
+   va_start(ap, fmt);
+   char *buf = 0;
+   int n = formatString( buf, fmt, ap );
+   va_end(ap);
+   if( n < 0 ) return -1;
 
-   // Re-adjust the length
-   len = strlen(str);
-   str = bufalloc(len+1);
-
-   // Return the new length (in n)
+   setbuffer( buf );
    return n;
 }
 
@@ -244,14 +263,14 @@ int XrdOucString::form(XrdOucString &str, const char *fmt, ...)
 {
    // Format a string in 'str' according to 'fmt' and the arguments
 
-   // Decode the arguments
+   va_list ap;
+   va_start(ap, fmt);
    char *buf = 0;
-   XOSINTFORM(fmt, buf);
+   int n = formatString( buf, fmt, ap );
+   va_end(ap);
+   if( n < 0 ) return -1;
 
-   // Adopt the new formatted buffer in the string
-   str.setbuffer(buf);
-
-   // Done
+   str.setbuffer( buf );
    return n;
 }
 #endif
