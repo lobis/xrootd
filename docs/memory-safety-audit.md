@@ -63,6 +63,10 @@ changing successful-path behavior, callback ownership, or public interfaces.
 - `XrdConfig::xprot`: release a copied protocol library when `GetRest` rejects
   too many parameters; parser behavior is unchanged except that no allocation
   remains after rejection.
+- `XrdAccAccess_Tables`: delete the owned domain-list head `D_List`; `E_List`
+  is only a borrowed tail alias and is not deleted separately.  Access-control
+  and configuration behavior are unchanged; this only cleans storage when
+  tables are destroyed or replaced.
 - `XrdXrootdGSReal`: remove an unmatched CGI-header formatting conversion.
   Malformed/undefined prior output behavior could append arbitrary memory or
   crash during CGI g-stream construction; it now emits the intended header

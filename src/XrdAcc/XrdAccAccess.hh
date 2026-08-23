@@ -113,6 +113,7 @@ struct XrdAccAccess_Tables
                                if (S_Hash) delete S_Hash; //Deletes SX & SYList
                                if (T_Hash) delete T_Hash;
                                if (U_Hash) delete U_Hash;
+                               if (D_List) delete D_List;
                                if (X_List) delete X_List;
                                if (Z_List) delete Z_List;
                               }
