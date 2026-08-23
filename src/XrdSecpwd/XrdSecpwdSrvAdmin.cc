@@ -2185,6 +2185,8 @@ bool SavePuk()
    char *bout = new char[lout];
    if (!bout) {
       PRT("SavePuk: Cannot create output buffer");
+      for (i = 0; i < ncrypt; i++) delete bck[i];
+      delete[] bck;
       close(fd);
       return 0;
    }
@@ -2224,6 +2226,7 @@ bool SavePuk()
    //
    // Close file
    close (fd);
+   delete[] bout;
 
    // We are done
    return 1;

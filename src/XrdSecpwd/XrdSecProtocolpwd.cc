@@ -1154,6 +1154,7 @@ if ((hs->Step == kXPS_init) || (hs->Step == kXPS_puk))
       DEBUG("returned " << nser <<" bytes of credentials");
       return new XrdSecCredentials(bser, nser);
    } else {
+      delete[] bser;
       DEBUG("problems with final serialization");
       return (XrdSecCredentials *)0;
    }
@@ -1514,6 +1515,7 @@ if (hs->Step == kXPC_normal)
                // Put in hex
                char *out = new char[2*sz+1];
                XrdSutToHex(buf, sz, out);
+               free(buf);
                // Cleanup any existing info
                SafeDelete(clientCreds);
                clientCreds = new XrdSecCredentials(out, 2*sz+1);
@@ -2141,6 +2143,7 @@ int XrdSecProtocolpwd::SaveCreds(XrdSutBucket *creds)
    }
    XrdSutBucket *salt = new XrdSutBucket(tmps,8);
    if (!salt) {
+      delete[] tmps;
       PRINT("Could not create salt bucket");
       return -1;
    }
@@ -2148,6 +2151,7 @@ int XrdSecProtocolpwd::SaveCreds(XrdSutBucket *creds)
    //
    // Now we sign the creds with the salt
    DoubleHash(hs->CF,creds,salt);
+   delete salt;
    // and fill in the creds
    cent->buf2.SetBuf(creds->buffer,creds->size);
    //
@@ -2348,12 +2352,13 @@ XrdSutBucket *XrdSecProtocolpwd::QueryCreds(XrdSutBuffer *bm,
    //
    // If creds are available in the environment pick them up and use them
    char *cf = 0;
+   char *out = 0;
    char *cbuf = getenv("XrdSecCREDS");
    if (cbuf) {
       int len = strlen(cbuf);
       // From hex
       int sz = len;
-      char *out = new char[sz/2+2];
+      out = new char[sz/2+2];
       XrdSutFromHex((const char *)cbuf, out, len);
       if ((cf = strstr(out, "&pwd"))) {
          cf += 5;
@@ -2389,6 +2394,7 @@ XrdSutBucket *XrdSecProtocolpwd::QueryCreds(XrdSutBuffer *bm,
                      // Update status
                      status = kpCI_exact; 
                      // We are done
+                     delete[] out;
                      return creds;
                   } else {
                      // Cleanup
@@ -2397,12 +2403,15 @@ XrdSutBucket *XrdSecProtocolpwd::QueryCreds(XrdSutBuffer *bm,
                   }
                } else {
                   PRINT("Could create new entry in cache");
+                  delete[] out;
+                  delete creds;
                   return (XrdSutBucket *)0;
                }
             }
          }
       }
    }
+   delete[] out;
    pfeRef.UnLock(); // Unlock pointer if we got a lock on it!
 
    //
@@ -2479,6 +2488,7 @@ XrdSutBucket *XrdSecProtocolpwd::QueryCreds(XrdSutBuffer *bm,
             return creds;
          } else {
             PRINT("Could create new entry in cache");
+            delete creds;
             return (XrdSutBucket *)0;
          }
       }
@@ -2487,6 +2497,7 @@ XrdSutBucket *XrdSecProtocolpwd::QueryCreds(XrdSutBuffer *bm,
    // Create or Fill entry in cache
    if (!(hs->Pent) && !(hs->Pent = cacheAlog.Add(pfeRef, wTag.c_str()))) {
       PRINT("Could create new entry in cache");
+      delete creds;
       return (XrdSutBucket *)0;
    }
 
@@ -2545,6 +2556,7 @@ XrdSutBucket *XrdSecProtocolpwd::QueryCreds(XrdSutBuffer *bm,
    // connected to a terminal
    if (!(hs->Tty)) {
       NOTIFY("Not connected to tty: cannot prompt user for credentials");
+      delete creds;
       return (XrdSutBucket *)0;
    }
 
@@ -3402,6 +3414,7 @@ void XrdSecProtocolpwd::ErrF(XrdOucErrInfo *einfo, kXR_int32 ecode,
          for (k = 0; k < i; k++)
             strcat(bout, msgv[k]);
          PRINT(bout);
+         delete[] bout;
       } else {
          for (k = 0; k < i; k++)
             PRINT(msgv[k]);
@@ -3487,7 +3500,7 @@ int XrdSecProtocolpwd::DoubleHash(XrdCryptoFactory *cf, XrdSutBucket *bck,
    }
    //
    // Apply first salt, if defined
-   char *nhash = 0, *thash = bck->buffer;
+   char *nhash = 0, *thash = bck->buffer, *oldhash = 0;
    int nhlen = bck->size;
    if (s1 && s1->size > 0) {
       if (!(nhash = new char[(*KDFunLen)() + ltag])) {
@@ -3505,19 +3518,21 @@ int XrdSecProtocolpwd::DoubleHash(XrdCryptoFactory *cf, XrdSutBucket *bck,
    //
    // Apply second salt, if defined
    if (s2 && s2->size > 0) {
+      oldhash = nhash;
       if (!(nhash = new char[(*KDFunLen)() + ltag])) {
+         delete[] oldhash;
          PRINT("Could not allocate memory for hash - s2");
          return -1;
       }
-      if (thash && thash != bck->buffer) thash += ltag;
+      if (oldhash) thash += ltag;
       if ((nhlen = (*KDFun)(thash,nhlen,
                             s2->buffer,s2->size,nhash+ltag,0)) <= 0) {
          PRINT("Problems hashing - s2");
          delete[] nhash;
-         if (thash && thash != bck->buffer) delete[] thash;
+         delete[] oldhash;
          return -1;
       }
-      if (thash && thash != bck->buffer) delete[] thash;
+      delete[] oldhash;
       thash = nhash;
    }
    //
