@@ -2575,18 +2575,33 @@ int XrdHttpProtocol::xstaticpreload(XrdOucStream & Config) {
   }
 
   StaticPreloadInfo *nfo = new StaticPreloadInfo;
+  if (!nfo) {
+    close(fp);
+    eDest.Emsg("Config", "Unable to allocate preloadstatic metadata");
+    return 1;
+  }
   // Max 64Kb ok?
   nfo->data = (char *)malloc(65536);
+  if (!nfo->data) {
+    close(fp);
+    delete nfo;
+    eDest.Emsg("Config", "Unable to allocate preloadstatic buffer");
+    return 1;
+  }
   nfo->len = read(fp, (void *)nfo->data, 65536);
   close(fp);
 
   if (nfo->len <= 0) {
       eDest.Emsg("Config", errno, "read from preloadstatic filename", val);
+      free(nfo->data);
+      delete nfo;
       return 1;
   }
 
   if (nfo->len >= 65536) {
       eDest.Emsg("Config", "Truncated preloadstatic filename. Max is 64 KB '", val, "'");
+      free(nfo->data);
+      delete nfo;
       return 1;
   }
 
