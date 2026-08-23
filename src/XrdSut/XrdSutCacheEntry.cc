@@ -171,14 +171,16 @@ XrdSutCacheEntry& XrdSutCacheEntry::operator=(const XrdSutCacheEntry &e)
 {
    // Assign entry e to local entry.
 
-   SetName(name);
+   if (this == &e) return *this;
+
+   SetName(e.name);
    status = e.status;
    cnt    = e.cnt;            // counter
    mtime  = e.mtime;          // time of last modification / creation
-   buf1.SetBuf(e.buf1.buf);
-   buf2.SetBuf(e.buf2.buf);
-   buf3.SetBuf(e.buf3.buf);
-   buf4.SetBuf(e.buf4.buf);
+   buf1.SetBuf(e.buf1.buf, e.buf1.len);
+   buf2.SetBuf(e.buf2.buf, e.buf2.len);
+   buf3.SetBuf(e.buf3.buf, e.buf3.len);
+   buf4.SetBuf(e.buf4.buf, e.buf4.len);
 
    return (*this);
 }

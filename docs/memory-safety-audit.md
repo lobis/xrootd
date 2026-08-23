@@ -8,6 +8,9 @@ changing successful-path behavior, callback ownership, or public interfaces.
 - `XrdPssConfig`: release the local origin string on the empty-host parse exit.
 - `XrdSutPFEntry`: make copy assignment safe for self-assignment and copy the
   source name rather than freeing the destination name before rereading it.
+- `XrdSutCacheEntry`: make copy assignment safe for self-assignment, copy the
+  source name, and preserve all four source buffers by passing their lengths.
+  This intentionally corrects assignment, which previously cleared the buffers.
 - `XrdNetRegistry`: validate arguments and aliases before duplicating host
   lists, and handle a failed duplication.
 - `XrdSecServer`: release the temporary host string on `protbind` parse errors.
