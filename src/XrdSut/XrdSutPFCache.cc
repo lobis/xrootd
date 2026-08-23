@@ -682,7 +682,7 @@ int XrdSutPFCache::Rehash(bool force, bool lock)
          kXR_int32 *key = new kXR_int32(i);
          if (key) {
             TRACE(Dump, "Adding ID: "<<cachent[i]->name<<"; key: "<<*key);
-            hashtable.Add(cachent[i]->name,key);
+            if (hashtable.Add(cachent[i]->name,key)) delete key;
             nht++;
          }
       }

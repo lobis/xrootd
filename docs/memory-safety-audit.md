@@ -84,6 +84,12 @@ changing successful-path behavior, callback ownership, or public interfaces.
   duplicate hash insertion; first-record-wins matching, unique-entry ownership,
   parsing, logging, and return behavior are unchanged.  This is separate from
   the `XrdSecgsiGMAPFunDN` mapping-probe cleanup.
+- `XrdSutPFCache::Rehash`: delete a newly allocated index rejected because its
+  name is already present in the hash (for example during a concurrent or
+  repeated same-second rebuild); accepted keys remain hash-owned.  Lookup,
+  first-entry-wins behavior, counters, locking, tracing, timing, and return
+  behavior are unchanged; only the unreachable rejected allocation is
+  reclaimed.
 - `XrdSutPFile::RemoveEntries`: release the temporary offset array after the
   removal loop.  Successful and error-visible behavior is unchanged; only
   temporary offset storage is reclaimed.
