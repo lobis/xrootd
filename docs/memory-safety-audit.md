@@ -61,6 +61,9 @@ changing successful-path behavior, callback ownership, or public interfaces.
   crash during CGI g-stream construction; it now emits the intended header
   ending in a newline.  Valid intended functionality otherwise remains
   unchanged.
+- `XrdCl::MessageUtils::RewriteCGIAndPath`: reject malformed `kXR_mv` payloads
+  before size underflow or out-of-bounds access.  Such move requests now remain
+  unchanged no-ops, while valid requests retain their existing behavior.
 
 ## Deferred and expected analyzer reports
 

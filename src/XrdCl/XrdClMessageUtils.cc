@@ -22,6 +22,8 @@
 // or submit itself to any jurisdiction.
 //------------------------------------------------------------------------------
 
+#include <cstring>
+
 #include "XrdCl/XrdClMessageUtils.hh"
 #include "XrdCl/XrdClLog.hh"
 #include "XrdCl/XrdClDefaultEnv.hh"
@@ -272,22 +274,25 @@ namespace XrdCl
         size_t length = req->header.dlen;
         if( req->header.requestid == kXR_mv )
         {
-          for( int i = 0; i < req->header.dlen; ++i, ++path, --length )
-            if( *path == ' ' )
-              break;
-          ++path;
-          --length;
+          if( req->header.dlen <= 0 )
+            return;
+
+          const size_t dataLength = static_cast<size_t>( req->header.dlen );
+          char *dataEnd = path + dataLength;
+          char *separator = static_cast<char *>( memchr( path, ' ', dataLength ) );
+          if( !separator || separator + 1 == dataEnd )
+            return;
+
+          path = separator + 1;
+          length = dataEnd - path;
         }
 
         //----------------------------------------------------------------------
         // Create a fake URL from an existing CGI
         //----------------------------------------------------------------------
-        char *pathWithNull = new char[length+1];
-        memcpy( pathWithNull, path, length );
-        pathWithNull[length] = 0;
+        std::string strpath( path, length );
         std::ostringstream o;
-        o << "fake://fake:111/" << pathWithNull;
-        delete [] pathWithNull;
+        o << "fake://fake:111/" << strpath;
 
         URL currentPath( o.str() );
         URL::ParamsMap currentCgi = currentPath.GetParams();

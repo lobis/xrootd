@@ -12,6 +12,12 @@ target_link_libraries(xrdcl-unit-tests
 gtest_discover_tests(xrdcl-unit-tests TEST_PREFIX XrdCl:: 
   PROPERTIES DISCOVERY_TIMEOUT 10)
 
+add_executable(xrdcl-messageutils-tests XrdClMessageUtilsTests.cc)
+
+target_link_libraries(xrdcl-messageutils-tests XrdCl)
+
+add_test(NAME xrdcl-messageutils-tests COMMAND xrdcl-messageutils-tests)
+
 if(NOT ENABLE_SERVER_TESTS)
   return()
 endif()
