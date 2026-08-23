@@ -260,7 +260,11 @@ int XrdFrcReqFile::Init()
 // Read the full file
 //
    for (Offs = ReqSize; Offs < buf.st_size; Offs += ReqSize)
-       {if (!reqRead((void *)&tmpReq, Offs)) return FailIni("read file");
+       {if (!reqRead((void *)&tmpReq, Offs))
+           {while((tP = RegList)) {RegList = tP->Next; delete tP;}
+            while((tP = First))   {First = tP->Next; delete tP;}
+            return FailIni("read file");
+           }
         if (*tmpReq.LFN == '\0' || !tmpReq.addTOD
         ||  tmpReq.Opaque >= int(sizeof(tmpReq.LFN))) continue;
         pP = 0; rP = First; tP = new recEnt(tmpReq); numreq++;

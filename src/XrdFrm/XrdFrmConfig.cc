@@ -1608,10 +1608,10 @@ int XrdFrmConfig::xmon()
          {     if (!strcmp("ident", val))
                 {if (!(val = cFile->GetWord()))
                     {Say.Emsg("Config", "monitor ident value not specified");
-                     return 1;
+                     goto xmon_error;
                     }
                  if (XrdOuca2x::a2tm(Say,"monitor ident",val,
-                                         &monIdent,0)) return 1;
+                                         &monIdent,0)) goto xmon_error;
                 }
           else break;
          }
@@ -1626,11 +1626,11 @@ int XrdFrmConfig::xmon()
               else if (!strcmp("purge",val)) monMode[i] |=  XROOTD_MON_PURGE;
               else break;
           if (!val) {Say.Emsg("Config","monitor dest value not specified");
-                     return 1;
+                     goto xmon_error;
                     }
           if (!(cp = index(val, (int)':')) || !atoi(cp+1))
              {Say.Emsg("Config","monitor dest port missing or invalid in",val);
-              return 1;
+              goto xmon_error;
              }
           monDest[i] = strdup(val);
          if (!(val = cFile->GetWord())) break;
@@ -1652,12 +1652,21 @@ int XrdFrmConfig::xmon()
 
 // Don't bother doing any more if monitoring is not enabled
 //
-   if (!monMode[0] && !monMode[1]) return 0;
+   if (!monMode[0] && !monMode[1])
+      {if (monDest[0]) free(monDest[0]);
+       if (monDest[1]) free(monDest[1]);
+       return 0;
+      }
 
 // Set the monitor defaults
 //
    XrdFrmMonitor::Defaults(monDest[0],monMode[0],monDest[1],monMode[1],monIdent);
    return 0;
+
+xmon_error:
+   if (monDest[0]) free(monDest[0]);
+   if (monDest[1]) free(monDest[1]);
+   return 1;
 }
 
 /******************************************************************************/

@@ -184,7 +184,8 @@ int XrdFrmAdmin::QuerySpace(const char *Pfn, char *Lnk, int Lsz)
 int XrdFrmAdmin::QueryUsage(XrdOucArgs &Spec)
 {
    XrdOssSpace::uEnt myUsage;
-   XrdFrmConfig::VPInfo myVP((char *)""), *vP = Config.VPList;
+   XrdFrmConfig::VPInfo *vP = Config.VPList;
+   const char *vpName;
    long long Actual;
    char buff[4096];
 
@@ -195,13 +196,14 @@ int XrdFrmAdmin::QueryUsage(XrdOucArgs &Spec)
 
 // Get the optional space name
 //
-   if ((myVP.Name = Spec.getarg())) {myVP.Next = 0; vP = &myVP;}
-      else if (!vP) {Emsg("No outplace space has been configured."); return 0;}
+   if (!(vpName = Spec.getarg()) && !vP)
+      {Emsg("No outplace space has been configured."); return 0;}
 
 // Process all of the files
 //
-   do {if (XrdOssSpace::Usage(vP->Name, myUsage, 1) < 0)
-          Emsg("Space ", vP->Name, " not found.");
+   do {const char *spName = (vpName ? vpName : vP->Name);
+       if (XrdOssSpace::Usage(spName, myUsage, 1) < 0)
+          Emsg("Space ", spName, " not found.");
           else
          {Actual = myUsage.Bytes[XrdOssSpace::Serv]
                  + myUsage.Bytes[XrdOssSpace::Pstg]
@@ -209,13 +211,13 @@ int XrdFrmAdmin::QueryUsage(XrdOucArgs &Spec)
                  + myUsage.Bytes[XrdOssSpace::Admin];
           sprintf(buff,"Space %s\n%20lld Used\n%20lld Staged\n"
                        "%20lld Purged\n%20lld Adjust\n%20lld Effective",
-                  vP->Name, myUsage.Bytes[XrdOssSpace::Serv],
+                  spName, myUsage.Bytes[XrdOssSpace::Serv],
                             myUsage.Bytes[XrdOssSpace::Pstg],
                             myUsage.Bytes[XrdOssSpace::Purg],
                             myUsage.Bytes[XrdOssSpace::Admin], Actual);
           Msg(buff);
          }
-      } while((vP = vP->Next));
+      } while(!vpName && (vP = vP->Next));
    return 0;
 }
   

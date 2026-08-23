@@ -402,6 +402,7 @@ void XrdFrmTransfer::ffMake(int nofile){
 void *InitXfer(void *parg)
 {   XrdFrmTransfer *xP = new XrdFrmTransfer;
     if (parg) xP->Start(*(int *)parg);
+    delete xP;
     return (void *)0;
 }
   
