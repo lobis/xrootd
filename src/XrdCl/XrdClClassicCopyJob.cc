@@ -831,6 +831,7 @@ namespace
           pCurrentOffset += chunkSize;
           if( !st.IsOK() )
           {
+            delete [] buffer;
             ch->status = st;
             ch->sem->Post();
             break;

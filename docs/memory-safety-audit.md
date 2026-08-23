@@ -132,6 +132,10 @@ changing successful-path behavior, callback ownership, or public interfaces.
   `aio_*` call rejects it, using the captured errno for diagnostics and status.
   Synchronous cleanup, asynchronous `LocalFileTask` ownership, callback timing,
   response handling, and successful submission behavior remain unchanged.
+- `XrdCl::XRootDSource::FillQueue`: release a chunk buffer when `Read` or
+  `PgRead` rejects submission before transferring it to a completion response.
+  Submitted buffers retain their existing response/cleanup ownership; queueing,
+  status, offsets, and copy behavior are unchanged.
 - `XrdXrootdGSReal`: remove an unmatched CGI-header formatting conversion.
   Malformed/undefined prior output behavior could append arbitrary memory or
   crash during CGI g-stream construction; it now emits the intended header
