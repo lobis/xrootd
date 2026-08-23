@@ -73,6 +73,9 @@ changing successful-path behavior, callback ownership, or public interfaces.
 - `XrdSutPFile::Trim`: retain an internally generated `<name>.bak` with RAII
   through every exit; caller-supplied backup names remain borrowed.  Filesystem
   operations, diagnostics, and return behavior are unchanged.
+- `XrdSecProtocolgsi::ErrF`: release the temporary combined debug message after
+  synchronous logging consumes it.  Only the debug buffer lifetime changes;
+  fallback logging, messages, and error behavior are unchanged.
 - `XrdXrootdGSReal`: remove an unmatched CGI-header formatting conversion.
   Malformed/undefined prior output behavior could append arbitrary memory or
   crash during CGI g-stream construction; it now emits the intended header

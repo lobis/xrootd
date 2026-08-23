@@ -4200,6 +4200,7 @@ void XrdSecProtocolgsi::ErrF(XrdOucErrInfo *einfo, kXR_int32 ecode,
          for (k = 0; k < i; k++)
             strcat(bout, msgv[k]);
          DEBUG(bout);
+         delete[] bout;
       } else {
          for (k = 0; k < i; k++)
             DEBUG(msgv[k]);
@@ -5813,4 +5814,3 @@ XrdSutCacheEntry *XrdSecProtocolgsi::GetSrvCertEnt(XrdSutCERef &ceref,
    // Done
    return cent;
 }
-
