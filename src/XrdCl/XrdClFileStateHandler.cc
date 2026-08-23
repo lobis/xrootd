@@ -3077,6 +3077,8 @@ namespace XrdCl
 
     if( callbackOnFailure )
       self->FailMessage( rd, st );
+    else
+      delete rd.handler;
 
     return st;
   }

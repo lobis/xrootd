@@ -151,6 +151,12 @@ changing successful-path behavior, callback ownership, or public interfaces.
   every post-allocation template/source validation failure.  Validation order,
   statuses, messages, and successful clone/send/recovery behavior remain
   unchanged.
+- `XrdCl::FileStateHandler::SendOrQueue`: destroy a stateful request handler
+  when recovery setup rejects it before queue ownership begins.  This releases
+  the handler-owned message and any request-owned chunk list or kernel buffer
+  for ReadV, WriteV, WriteKernelBuffer, Clone, and the other stateful send
+  paths.  Successful send/queue/recovery handling, returned status, callbacks,
+  and caller-owned I/O buffers remain unchanged.
 - `XrdXrootdGSReal`: remove an unmatched CGI-header formatting conversion.
   Malformed/undefined prior output behavior could append arbitrary memory or
   crash during CGI g-stream construction; it now emits the intended header
