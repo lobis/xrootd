@@ -156,7 +156,7 @@ namespace
           Log *log = DefaultEnv::GetLog();
           log->Error( FileMsg, GetErrMsg( me->opcode ), XrdSysE2T( errcode ) );
           XRootDStatus *error = new XRootDStatus( stError, errLocalError, errcode ) ;
-          QueueTask( error, 0, me->hosts, me->handler );
+          QueueTask( error, 0, me->hosts.release(), me->handler );
         }
         else
         {
@@ -170,7 +170,7 @@ namespace
             resp->Set( chunk );
           }
 
-          QueueTask( new XRootDStatus(), resp, me->hosts, me->handler );
+          QueueTask( new XRootDStatus(), resp, me->hosts.release(), me->handler );
         }
       }
 
@@ -212,7 +212,7 @@ namespace
       
       std::unique_ptr<aiocb>  cb;
       Opcode                  opcode;
-      XrdCl::HostList        *hosts;
+      std::unique_ptr<XrdCl::HostList> hosts;
       XrdCl::ResponseHandler *handler;
   };
 
@@ -338,9 +338,11 @@ namespace XrdCl
 
     if( rc < 0 )
     {
+      int errcode = errno;
+      delete ctx;
       Log *log = DefaultEnv::GetLog();
-      log->Error( FileMsg, "Read: failed %s", XrdSysE2T( errno ) );
-      return XRootDStatus( stError, errLocalError, errno );
+      log->Error( FileMsg, "Read: failed %s", XrdSysE2T( errcode ) );
+      return XRootDStatus( stError, errLocalError, errcode );
     }
 
     return XRootDStatus();
@@ -420,9 +422,11 @@ namespace XrdCl
 
     if( rc < 0 )
     {
+      int errcode = errno;
+      delete ctx;
       Log *log = DefaultEnv::GetLog();
-      log->Error( FileMsg, "Write: failed %s", XrdSysE2T( errno ) );
-      return XRootDStatus( stError, errLocalError, errno );
+      log->Error( FileMsg, "Write: failed %s", XrdSysE2T( errcode ) );
+      return XRootDStatus( stError, errLocalError, errcode );
     }
 
     return XRootDStatus();
@@ -452,9 +456,11 @@ namespace XrdCl
     int rc = aio_fsync( O_SYNC, *ctx );
     if( rc < 0 )
     {
+      int errcode = errno;
+      delete ctx;
       Log *log = DefaultEnv::GetLog();
-      log->Error( FileMsg, "Sync: failed %s", XrdSysE2T( errno ) );
-      return XRootDStatus( stError, errLocalError, errno );
+      log->Error( FileMsg, "Sync: failed %s", XrdSysE2T( errcode ) );
+      return XRootDStatus( stError, errLocalError, errcode );
     }
 #endif
     return XRootDStatus();
