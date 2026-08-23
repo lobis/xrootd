@@ -78,6 +78,10 @@ changing successful-path behavior, callback ownership, or public interfaces.
 - `XrdAccGroupList`: clamp constructor counts before copying and zero-filling.
   Oversized counts are safely truncated and negative counts produce an empty
   list instead of undefined out-of-bounds access; valid inputs are unchanged.
+- `XrdOucGMap`: delete a newly constructed grid-map entry rejected by a
+  duplicate hash insertion; first-record-wins matching, unique-entry ownership,
+  parsing, logging, and return behavior are unchanged.  This is separate from
+  the `XrdSecgsiGMAPFunDN` mapping-probe cleanup.
 - `XrdSutPFile::RemoveEntries`: release the temporary offset array after the
   removal loop.  Successful and error-visible behavior is unchanged; only
   temporary offset storage is reclaimed.

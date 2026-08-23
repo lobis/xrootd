@@ -258,7 +258,9 @@ int XrdOucGMap::load(const char *mf, bool force)
 
       // Register
       if (usr.length() > 0) {
-         mappings.Add(p, new XrdSecGMapEntry_t(udn.c_str(), usr.c_str(), type));
+         XrdSecGMapEntry_t *entry =
+            new XrdSecGMapEntry_t(udn.c_str(), usr.c_str(), type);
+         if (mappings.Add(p, entry)) delete entry;
          DEBUG(dbg, tracer, "XrdOucGMap::load", "mapping DN: '"<<udn<<"' to user: '"<< usr <<"' (type:'"<< stype <<"')");
       } else {
          PRINT(tracer, "OucGMap::load", "ERROR: incomplete line found in file '"
