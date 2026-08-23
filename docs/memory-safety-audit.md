@@ -147,6 +147,10 @@ changing successful-path behavior, callback ownership, or public interfaces.
   message when `FillFhTempl` fails before handler or send ownership begins.
   Recovery status/state transitions and successful reopen behavior remain
   unchanged.
+- `XrdCl::FileStateHandler::Clone`: release the locally created request on
+  every post-allocation template/source validation failure.  Validation order,
+  statuses, messages, and successful clone/send/recovery behavior remain
+  unchanged.
 - `XrdXrootdGSReal`: remove an unmatched CGI-header formatting conversion.
   Malformed/undefined prior output behavior could append arbitrary memory or
   crash during CGI g-stream construction; it now emits the intended header

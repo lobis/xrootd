@@ -3537,27 +3537,42 @@ namespace XrdCl
     for(auto &loc: locs.locations)
     {
       if( !loc.file )
+      {
+        delete msg;
         return XRootDStatus( stError, errInvalidOp, 0,
                              "Template file not available" );
+      }
 
       FileStateHandlerTemplate *fht = dynamic_cast<FileStateHandlerTemplate*>(loc.file.get());
       if( !fht )
+      {
+        delete msg;
         return XRootDStatus( stError, errInvalidOp, 0,
                              "Template file invalid" );
+      }
 
       std::shared_ptr<FileStateHandler> tfp = fht->pTemplateFileWp.lock();
       if( !tfp )
+      {
+        delete msg;
         return XRootDStatus( stError, errInvalidOp, 0,
                              "Template file object does not exist" );
+      }
 
       XrdSysMutexHelper scopedLock( tfp->pMutex );
       if( tfp->pFileState != Opened )
+      {
+        delete msg;
         return XRootDStatus( stError, errInvalidOp, 0,
                              "Template file not open" );
+      }
 
       if( tfp->pSessionId != self->pSessionId )
+      {
+        delete msg;
         return XRootDStatus( stError, errInvalidOp, 0,
                              "Clone source not at same location as destination" );
+      }
 
       memcpy( cl[idx].srcFH, tfp->pFileHandle, 4 );
       cl[idx].srcOffs = loc.srcOffs;
