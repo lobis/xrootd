@@ -3,6 +3,76 @@
 This is a conservative, ownership-focused pass.  It intentionally avoids
 changing successful-path behavior, callback ownership, or public interfaces.
 
+## Final verification snapshot
+
+At source commit `f3da0cf800089d7753b9ff04481244f9efc9a0fe`, clang-tidy 22.1.8
+covered 558 unique production translation units under `src/` with
+`clang-analyzer-cplusplus.NewDeleteLeaks`, `clang-analyzer-unix.Malloc`,
+`clang-analyzer-cplusplus.NewDelete`, and
+`clang-analyzer-core.StackAddressEscape`:
+
+The production-only baseline at branch point
+`2332ed2ac661074336008b5d7860bfa29710e05c` used the same top-level `src/`
+scope.
+
+| Sweep | Emitted | Unique diagnostics | Unique locations | Errors |
+| --- | ---: | ---: | ---: | ---: |
+| Production-only baseline | 119 | 117 | 114 | 0 |
+| Final exact sweep | 100 | 98 | 95 | 0 |
+
+The final sweep reduced emitted, unique-diagnostic, and unique-location counts
+by 19 each.
+
+The final emitted-diagnostic checker split was 91 `NewDeleteLeaks`, 6
+`unix.Malloc`, and 3 `NewDelete`.  The three remaining `FileStateHandler` reports are
+interprocedural ownership/alias-modeling false positives, dynamically checked
+by targeted recovery harnesses.  Other residuals fall into callback ownership
+transfers, intentional process-lifetime ownership, analyzer alias/modeling
+false positives, and semantics-sensitive paths requiring dedicated tests.
+`XrdPfc` multi-response handling and `XrdXrootdConfigMon` g-stream teardown
+remain deferred in the last category.
+
+Run the sweep from the repository root with the production translation-unit
+regex as follows; add platform-specific `-extra-arg` sysroot flags only when
+the local compile commands require them:
+
+```sh
+run-clang-tidy -p build -j 8 -quiet \
+  -checks='-*,clang-analyzer-cplusplus.NewDeleteLeaks,clang-analyzer-unix.Malloc,clang-analyzer-cplusplus.NewDelete,clang-analyzer-core.StackAddressEscape' \
+  "^${PWD}/src/.*"
+```
+
+When run from the repository root, the regex expands to select the 558
+translation units under the top-level `src/` tree, excluding separate
+top-level `vendor/` and `tests/` trees.
+
+The emitted count is the number of raw warning lines matching the analyzer
+checker tag.  The unique-diagnostic count is exact full warning-line
+deduplication, for example `rg '^.*: warning: .*\[clang-analyzer-' LOG | sort -u | wc -l`.  The unique-location count maps those warning lines to
+`path:line:column` with `sed -E 's/^([^:]+:[0-9]+:[0-9]+):.*/\1/'`, then
+applies `sort -u | wc -l`.
+
+On Linux host `lobis-eos-dev` (EL10 x86_64, GCC 14.3, Valgrind 3.25.1),
+`xrdcl-unit-tests` passed 12/12 with zero bytes definitely lost, indirectly
+lost, or possibly lost and zero errors.  `xrdcl-messageutils-tests` had the
+same zero lost-byte and error counts, with 61,291 bytes still reachable in 492
+blocks.  The corresponding Memcheck shape was:
+
+```sh
+valgrind --tool=memcheck --leak-check=full --show-leak-kinds=all \
+  --errors-for-leak-kinds=definite,indirect,possible --error-exitcode=1 \
+  build/bin/xrdcl-unit-tests
+```
+
+Targeted rejected-call harnesses reported zero bytes definitely lost, indirectly
+lost, or possibly lost on the exercised formerly leaking xattr/template open,
+reopen, clone, and recovery paths.  A nested-handler harness exercised 64
+successful buffered local writes and reported zero bytes definitely or
+indirectly lost on those paths: the baseline 2,560 bytes definitely lost plus
+512 bytes indirectly lost became zero bytes definitely or indirectly lost.
+The patched run retained 336 bytes possibly lost from glibc AIO worker TLS (a
+known runtime origin).
+
 ## Fixed findings
 
 - `XrdPssConfig`: release the local origin string on the empty-host parse exit.
