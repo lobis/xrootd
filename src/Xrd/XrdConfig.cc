@@ -2067,7 +2067,8 @@ int XrdConfig::xprot(XrdSysError *eDest, XrdOucStream &Config)
 
     *buff = 0;
     if (!Config.GetRest(buff, sizeof(buff)))
-       {eDest->Emsg("Config", "Too many parms for protocol", proname);
+       {if (lib) free(lib);
+        eDest->Emsg("Config", "Too many parms for protocol", proname);
         return 1;
        }
     parms = (*buff ? strdup(buff) : 0);
