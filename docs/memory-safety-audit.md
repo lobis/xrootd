@@ -1,0 +1,64 @@
+# Memory safety audit (first pass)
+
+This is a conservative, ownership-focused pass.  It intentionally avoids
+changing successful-path behavior, callback ownership, or public interfaces.
+
+## Fixed findings
+
+- `XrdPssConfig`: release the local origin string on the empty-host parse exit.
+- `XrdSutPFEntry`: make copy assignment safe for self-assignment and copy the
+  source name rather than freeing the destination name before rereading it.
+- `XrdNetRegistry`: validate arguments and aliases before duplicating host
+  lists, and handle a failed duplication.
+- `XrdSecServer`: release the temporary host string on `protbind` parse errors.
+- `XrdFrmTransfer`: delete the temporary transfer object after `Start` returns,
+  including the no-argument thread path.
+- `XrdSutPFile`: release serialization buffers after writes and on the
+  post-allocation header error exits.
+- `XrdTlsContext`: delete an invalid non-null CRL-refresh clone before retrying.
+- `XrdFfsQueue`: check and clean worker ID/thread allocations on failure.
+- `XrdOfsPrepGPI`: defer request allocation until after the maximum-file check.
+- `XrdClCopy`: delete the per-job result object when `getcwd` fails.
+- `XrdHttpProtocol`: clean preload metadata and data buffers on allocation,
+  read, and truncation failures.
+- `XrdFrmConfig`: clean monitor destinations on parser errors and when
+  monitoring is disabled; destinations remain owned by `Defaults` on success.
+- `XrdFrmAdminQuery`: avoid allocating the default virtual-place name before
+  replacing it with borrowed `getarg()` storage.
+- `XrdSsiLogging`: release configured plugin path copies after the plugin has
+  consumed them, including error exits.
+- `XrdFrcReqFile`: clean locally recovered request chains on a read abort.
+- `XrdXrootdConfig`: retain checksum algorithm chains locally until validation
+  succeeds, then transfer them to `JobCKTLST`.
+- `XrdXrootdConfigMon`: delete an invalid constructed g-stream.
+- `XrdFfsFsinfo`: handle allocation failure and free transient cache entries
+  that cannot be inserted.
+- `XrdXmlRdrXml2`: clear `name` after `xmlFree` within scan loops.
+- `XrdSecProtocolpwd` / `XrdSecpwdSrvAdmin`: clean temporary salt, serialized,
+  debug, and public-key-output buffers without freeing transferred buffers.
+- `XrdSendQ`: free a newly allocated message when `QMsg` rejects ownership.
+- `XrdPfcDirStateSnapshot`: remove calls through a data-file pointer after it
+  has already been closed and deleted.
+- `XrdSecgsiGMAPFunDN`: delete only the locally allocated mapping probe.
+- `XrdConfig`: free invalid trailing-argument cipher storage; successful cipher
+  storage remains intentionally persistent.
+
+## Deferred and expected analyzer reports
+
+- `XrdCl` `HandleResponse`/`QueueTask`, `XrdClHttp`, and `XrdClS3` response
+  paths transfer response/status ownership to their handlers.
+- `XrdXrootdAioPgrw` wrapper lifetime, `XrdPfc` direct-response-handler
+  self-deletion (including synchronous `ReadV` behavior), and `XrdRmcData`
+  failed-`Detach` ownership need dedicated semantic tests before changes.
+- `XrdOucString` analyzer reports require API-level ownership tests rather than
+  local cleanup edits.
+- `XrdFfsQueue` worker-removal warnings depend on asynchronous dequeue and
+  completion signaling; the analyzer cannot model the task being removed before
+  its completed task is freed.
+- `XrdXrootdConfigMon` successful g-stream placement depends on the configured
+  environment route; only the invalid-construction path is changed here.
+- `XrdConfig` reports successful `tlsciphers` storage as leaked, but
+  `SetDefaultCiphers` deliberately retains it.  `XrdSecgsiGMAPFunDN` reports
+  mappings passed to `gMappings.Add`; that hash owns the installed entries.
+- Storage intentionally retained for `putenv`, `XrdOucEnv::Export`, and
+  successful `XrdTlsContext::SetDefaultCiphers` calls must not be freed.
