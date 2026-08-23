@@ -84,6 +84,12 @@ changing successful-path behavior, callback ownership, or public interfaces.
   duplicate hash insertion; first-record-wins matching, unique-entry ownership,
   parsing, logging, and return behavior are unchanged.  This is separate from
   the `XrdSecgsiGMAPFunDN` mapping-probe cleanup.
+- `XrdOucGMap::load`: stop identity scans at the record terminator and reject
+  empty identities before marker handling.  Malformed records with no unquoted
+  separator, an unterminated quote, or an empty identity now log the existing
+  incomplete-line error and are skipped instead of reading beyond the record;
+  valid quoted and unquoted mappings, including marker-only patterns, retain
+  their prior parsing and lookup behavior.
 - `XrdSutPFCache::Rehash`: delete a newly allocated index rejected because its
   name is already present in the hash (for example during a concurrent or
   repeated same-second rebuild); accepted keys remain hash-owned.  Lookup,

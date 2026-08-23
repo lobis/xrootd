@@ -224,8 +224,13 @@ int XrdOucGMap::load(const char *mf, bool force)
       }
       char *p = p0;
       int l0 = 0;
-      while (p0[l0] != cr)
+      while (p0[l0] && p0[l0] != cr)
          l0++;
+      if (!p0[l0] || !l0) {
+         PRINT(tracer, "OucGMap::load", "ERROR: incomplete line found in file '"
+               <<mf_name <<"': "<<var<<" - skipping");
+         continue;
+      }
       p0 = (p0 + l0 + 1);
       while (*p0 == ' ')
          p0++;

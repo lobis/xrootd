@@ -10,3 +10,9 @@ add_executable(xrdoucstring-memory-tests XrdOucStringMemoryTests.cc)
 target_link_libraries(xrdoucstring-memory-tests XrdUtils)
 
 add_test(NAME xrdoucstring-memory-tests COMMAND xrdoucstring-memory-tests)
+
+add_executable(xrdouc-gmap-parse-tests XrdOucGMapParseTests.cc)
+
+target_link_libraries(xrdouc-gmap-parse-tests XrdUtils)
+
+add_test(NAME xrdouc-gmap-parse-tests COMMAND xrdouc-gmap-parse-tests)
