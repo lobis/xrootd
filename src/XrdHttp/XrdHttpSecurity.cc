@@ -261,7 +261,7 @@ int XrdHttpProtocol::GetVOMSData(XrdLink *lp)
 
     int r = secxtractor->GetSecData(lp, SecEntity, ssl);
 
-    if (servGMap && savestr) {
+    if (savestr) {
       if (SecEntity.name) free(SecEntity.name);
       SecEntity.name = savestr;
     }

@@ -24,6 +24,10 @@ changing successful-path behavior, callback ownership, or public interfaces.
 - `XrdClCopy`: delete the per-job result object when `getcwd` fails.
 - `XrdHttpProtocol`: clean preload metadata and data buffers on allocation,
   read, and truncation failures.
+- `XrdHttpProtocol::GetVOMSData`: restore the captured original name whenever
+  it exists after the extractor callback, preventing a leak if the static
+  mapping pointer changes during that callback.  Stable configured behavior is
+  unchanged.
 - `XrdFrmConfig`: clean monitor destinations on parser errors and when
   monitoring is disabled; destinations remain owned by `Defaults` on success.
 - `XrdFrmAdminQuery`: avoid allocating the default virtual-place name before
