@@ -183,6 +183,7 @@ bool XrdXmlRdrXml2::GetAttributes(const char **aname, char **aval)
             {i = 0;
              while(aname[i] && strcmp(name, aname[i])) i++;
              xmlFree(name);
+             name = 0;
              if (aname[i])
                 {if (!(value = (char *)xmlTextReaderValue(reader))) continue;
                  found = true;
@@ -228,10 +229,12 @@ int XrdXmlRdrXml2::GetElement(const char **ename, bool reqd)
                   if (ename[i])
                      {if (debug) Debug("getelem:",ename[i],name,ename[0],nType);
                       xmlFree(name);
+                      name = 0;
                       return i;
                      }
                   if (debug) Debug("getelem:",ename[1],name,ename[0],nType);
                   xmlFree(name);
+                  name = 0;
                  }
         }
 
