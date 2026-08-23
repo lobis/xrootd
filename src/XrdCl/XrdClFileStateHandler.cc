@@ -3187,6 +3187,7 @@ namespace XrdCl
     XRootDStatus st = FillFhTempl( self, url, msg, sendUrl );
     if( !st.IsOK() )
     {
+      delete msg;
       self->pStatus    = st;
       self->pFileState = Closed;
       return st;

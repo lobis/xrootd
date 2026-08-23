@@ -143,6 +143,10 @@ changing successful-path behavior, callback ownership, or public interfaces.
 - `XrdCl::FileStateHandler::OpenImpl`: delete the request message when
   `FillFhTempl` fails before any handler or send path can own it.  The same
   failure status/state transition and all valid/send behavior remain unchanged.
+- `XrdCl::FileStateHandler::ReOpenFileAtServer`: delete the recovery request
+  message when `FillFhTempl` fails before handler or send ownership begins.
+  Recovery status/state transitions and successful reopen behavior remain
+  unchanged.
 - `XrdXrootdGSReal`: remove an unmatched CGI-header formatting conversion.
   Malformed/undefined prior output behavior could append arbitrary memory or
   crash during CGI g-stream construction; it now emits the intended header
