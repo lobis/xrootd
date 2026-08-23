@@ -75,6 +75,9 @@ changing successful-path behavior, callback ownership, or public interfaces.
 - `XrdAccGroups`: delete a newly built group list when a concurrent duplicate
   cache insertion is rejected; first-entry-wins semantics, returned copies,
   empty results, and list contents remain unchanged.
+- `XrdAccGroupList`: clamp constructor counts before copying and zero-filling.
+  Oversized counts are safely truncated and negative counts produce an empty
+  list instead of undefined out-of-bounds access; valid inputs are unchanged.
 - `XrdSutPFile::RemoveEntries`: release the temporary offset array after the
   removal loop.  Successful and error-visible behavior is unchanged; only
   temporary offset storage is reclaimed.

@@ -53,11 +53,12 @@ const char *Next()  {if (grouptab[nextgroup]) return grouptab[nextgroup++];
       void  Reset() {nextgroup = 0;}
 
       XrdAccGroupList(const int cnt=0, const char **gtable=0)
-                     {int j = (cnt > NGROUPS_MAX ? NGROUPS_MAX : cnt);
-             if (cnt){memcpy((void *)grouptab, (const void *)gtable,
+                     {int j = (cnt < 0 ? 0 :
+                              (cnt > NGROUPS_MAX ? NGROUPS_MAX : cnt));
+             if (j){memcpy((void *)grouptab, (const void *)gtable,
                              (size_t)(j * sizeof(char *)));
                      }
-                      memset((void *)&grouptab[cnt], 0,
+                      memset((void *)&grouptab[j], 0,
                              (size_t)((NGROUPS_MAX-j+1)*sizeof(char *)));
                       nextgroup = 0;
                      }
