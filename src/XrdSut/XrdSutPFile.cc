@@ -2004,7 +2004,7 @@ kXR_int32 XrdSutPFile::UpdateHashTable(bool force)
          ne++;
          // Fill the table 
          kXR_int32 *key = new kXR_int32(nxtofs);
-         fHashTable->Add(ind.name,key);
+         if (fHashTable->Add(ind.name,key)) delete key;
          // Go to next
          nxtofs = ind.nxtofs;
       }

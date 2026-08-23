@@ -90,6 +90,11 @@ changing successful-path behavior, callback ownership, or public interfaces.
   first-entry-wins behavior, counters, locking, tracing, timing, and return
   behavior are unchanged; only the unreachable rejected allocation is
   reclaimed.
+- `XrdSutPFile::UpdateHashTable`: delete a newly allocated offset rejected when
+  an inactive and active record share a name after remove/re-add history;
+  first-entry-wins ordering, counters, locking, logging, errors, and returns
+  are unchanged, and accepted keys remain hash-owned.  Only unreachable
+  rejected storage is reclaimed.
 - `XrdSutPFile::RemoveEntries`: release the temporary offset array after the
   removal loop.  Successful and error-visible behavior is unchanged; only
   temporary offset storage is reclaimed.
