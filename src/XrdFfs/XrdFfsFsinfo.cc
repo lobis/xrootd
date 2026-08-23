@@ -72,7 +72,7 @@ int XrdFfsFsinfo_cache_search(int (*func)(const char*, const char*, struct statv
     if (!sname) {
         pthread_mutex_unlock(&XrdFfsFsinfo_cache_mutex_rd);
         if (wlock == 0) pthread_mutex_unlock(&XrdFfsFsinfo_cache_mutex_wr);
-        return ENOMEM;
+        return -ENOMEM;
     }
     s = XrdFfsFsinfoHtab.Find(sname);
     if (s != NULL)
@@ -89,7 +89,7 @@ int XrdFfsFsinfo_cache_search(int (*func)(const char*, const char*, struct statv
             pthread_mutex_unlock(&XrdFfsFsinfo_cache_mutex_rd);
             if (wlock == 0) pthread_mutex_unlock(&XrdFfsFsinfo_cache_mutex_wr);
             free(sname);
-            return ENOMEM;
+            return -ENOMEM;
         }
         s->t = 0;
         dofree = 1;

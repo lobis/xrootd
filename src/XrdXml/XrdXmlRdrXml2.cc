@@ -236,6 +236,7 @@ int XrdXmlRdrXml2::GetElement(const char **ename, bool reqd)
                   xmlFree(name);
                   name = 0;
                  }
+         if (name) {xmlFree(name); name = 0;}
         }
 
 // Free any allocate storage

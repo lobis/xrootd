@@ -31,11 +31,16 @@ changing successful-path behavior, callback ownership, or public interfaces.
 - `XrdXrootdConfig`: retain checksum algorithm chains locally until validation
   succeeds, then transfer them to `JobCKTLST`.
 - `XrdXrootdConfigMon`: delete an invalid constructed g-stream.
-- `XrdFfsFsinfo`: handle allocation failure and free transient cache entries
-  that cannot be inserted.
-- `XrdXmlRdrXml2`: clear `name` after `xmlFree` within scan loops.
+- `XrdFfsFsinfo`: return `-ENOMEM` from allocation failures, as required by
+  the FUSE callback convention, and free transient cache entries that cannot
+  be inserted.
+- `XrdXmlRdrXml2`: release `name` on every scan-loop iteration, including
+  unmatched end elements and named non-element nodes.
 - `XrdSecProtocolpwd` / `XrdSecpwdSrvAdmin`: clean temporary salt, serialized,
   debug, and public-key-output buffers without freeing transferred buffers.
+  `Serialized(..., 'f')` and `XrdSecCredentials` payloads use `malloc`/`free`,
+  while `DoubleHash` releases its copied `new[]` result after `SetBuf`.
+  Stored client credentials now follow the protocol object's `Delete()` path.
 - `XrdSendQ`: free a newly allocated message when `QMsg` rejects ownership.
 - `XrdPfcDirStateSnapshot`: remove calls through a data-file pointer after it
   has already been closed and deleted.

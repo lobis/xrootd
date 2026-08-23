@@ -855,6 +855,7 @@ void XrdSecProtocolpwd::Delete()
 {
    // Deletes the protocol
    if (Entity.host) free(Entity.host);
+   SafeDelete(clientCreds);
    // Cleanup the handshake variables, if still there
    SafeDelete(hs);
    delete this;
@@ -1154,7 +1155,7 @@ if ((hs->Step == kXPS_init) || (hs->Step == kXPS_puk))
       DEBUG("returned " << nser <<" bytes of credentials");
       return new XrdSecCredentials(bser, nser);
    } else {
-      delete[] bser;
+      free(bser);
       DEBUG("problems with final serialization");
       return (XrdSecCredentials *)0;
    }
@@ -1513,12 +1514,14 @@ if (hs->Step == kXPC_normal)
                buf[4] = 0;
                memcpy(buf+5, bck->buffer, bck->size);
                // Put in hex
-               char *out = new char[2*sz+1];
-               XrdSutToHex(buf, sz, out);
+               char *out = (char *)malloc(2*sz+1);
+               if (out) {
+                  XrdSutToHex(buf, sz, out);
+                  // Cleanup any existing info
+                  SafeDelete(clientCreds);
+                  clientCreds = new XrdSecCredentials(out, 2*sz+1);
+               }
                free(buf);
-               // Cleanup any existing info
-               SafeDelete(clientCreds);
-               clientCreds = new XrdSecCredentials(out, 2*sz+1);
             }
          }
          // Export creds to a file, if required
@@ -3542,6 +3545,7 @@ int XrdSecProtocolpwd::DoubleHash(XrdCryptoFactory *cf, XrdSutBucket *bck,
    //
    // Save result
    bck->SetBuf(thash,nhlen+ltag);
+   delete[] nhash;
    //
    // We are done
    return 0;
