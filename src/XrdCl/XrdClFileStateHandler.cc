@@ -633,6 +633,13 @@ namespace
       {
         if (handler)
           handler->HandleResponseWithHosts( status, response, hostList );
+        else
+        {
+          delete status;
+          delete response;
+          delete hostList;
+        }
+        delete this;
       }
 
       //------------------------------------------------------------------------
@@ -1209,9 +1216,9 @@ namespace XrdCl
     {
       DefaultEnv::GetLog()->Debug( FileMsg, "[%p@%s] PgRead not supported; substituting with Read.",
                                   (void*)self.get(), self->pFileUrl->GetObfuscatedURL().c_str() );
-      ResponseHandler *substitHandler = new PgReadSubstitutionHandler( self, handler );
-      auto st = Read( self, offset, size, buffer, substitHandler, timeout );
-      if( !st.IsOK() ) delete substitHandler;
+      std::unique_ptr<ResponseHandler> substitHandler( new PgReadSubstitutionHandler( self, handler ) );
+      auto st = Read( self, offset, size, buffer, substitHandler.get(), timeout );
+      if( st.IsOK() ) substitHandler.release();
       return st;
     }
 
@@ -1233,9 +1240,9 @@ namespace XrdCl
       return XRootDStatus( stError, errInvalidArgs, EINVAL,
                           "PgRead retry size exceeded 4KB." );
 
-    ResponseHandler *retryHandler = new PgReadRetryHandler( handler, pgnb );
-    XRootDStatus st = PgReadImpl( self, offset, size, buffer, PgReadFlags::Retry, retryHandler, timeout );
-    if( !st.IsOK() ) delete retryHandler;
+    std::unique_ptr<ResponseHandler> retryHandler( new PgReadRetryHandler( handler, pgnb ) );
+    XRootDStatus st = PgReadImpl( self, offset, size, buffer, PgReadFlags::Retry, retryHandler.get(), timeout );
+    if( st.IsOK() ) retryHandler.release();
     return st;
   }
 
@@ -1363,14 +1370,15 @@ namespace XrdCl
 
       void     *buff = buffer.GetBuffer();
       uint32_t  size = buffer.GetSize();
-      ReleaseBufferHandler *wrtHandler =
-          new ReleaseBufferHandler( std::move( buffer ), handler );
-      XRootDStatus st = self->Write( self, offset, size, buff, wrtHandler, timeout );
+      std::unique_ptr<ReleaseBufferHandler> wrtHandler(
+          new ReleaseBufferHandler( std::move( buffer ), handler ) );
+      XRootDStatus st = self->Write( self, offset, size, buff, wrtHandler.get(), timeout );
       if( !st.IsOK() )
       {
         buffer = std::move( wrtHandler->GetBuffer() );
-        delete wrtHandler;
       }
+      else
+        wrtHandler.release();
       return st;
     }
 

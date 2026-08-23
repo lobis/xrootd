@@ -157,6 +157,12 @@ changing successful-path behavior, callback ownership, or public interfaces.
   for ReadV, WriteV, WriteKernelBuffer, Clone, and the other stateful send
   paths.  Successful send/queue/recovery handling, returned status, callbacks,
   and caller-owned I/O buffers remain unchanged.
+- `XrdCl::FileStateHandler::PgRead` and `PgReadRetry`: guard nested response
+  handlers until an OK submission transfers ownership; failed submissions
+  restore/delete them as before, while successful callback behavior remains
+  unchanged.  Buffered `Write` retains its failure guard, and
+  `ReleaseBufferHandler` now forwards or cleans callback arguments, then
+  self-deletes so its buffer is released immediately after the callback.
 - `XrdXrootdGSReal`: remove an unmatched CGI-header formatting conversion.
   Malformed/undefined prior output behavior could append arbitrary memory or
   crash during CGI g-stream construction; it now emits the intended header
