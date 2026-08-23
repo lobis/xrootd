@@ -2044,6 +2044,7 @@ kXR_int32 XrdSutPFile::RemoveEntries(const char *tag, char opt)
             DEBUG("entry for tag '"<<tag<<"' not found in file");
          }
       }
+      delete[] ofs;
    } else {
       DEBUG("no entry for tag '"<<tag<<"' found in file: "<<Name());
    }

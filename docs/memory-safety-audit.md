@@ -67,6 +67,9 @@ changing successful-path behavior, callback ownership, or public interfaces.
   is only a borrowed tail alias and is not deleted separately.  Access-control
   and configuration behavior are unchanged; this only cleans storage when
   tables are destroyed or replaced.
+- `XrdSutPFile::RemoveEntries`: release the temporary offset array after the
+  removal loop.  Successful and error-visible behavior is unchanged; only
+  temporary offset storage is reclaimed.
 - `XrdXrootdGSReal`: remove an unmatched CGI-header formatting conversion.
   Malformed/undefined prior output behavior could append arbitrary memory or
   crash during CGI g-stream construction; it now emits the intended header
