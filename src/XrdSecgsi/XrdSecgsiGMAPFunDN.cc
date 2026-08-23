@@ -150,6 +150,7 @@ char *XrdSecgsiGMAPFun(const char *dn, int now)
          name = new char[mc->user.length() + 1];
          strcpy(name, mc->user.c_str());
       }
+      delete mc;
    }
    if (name) {
       DEBUG("mapping DN '"<<dn<<"' to '"<<name<<"'");
