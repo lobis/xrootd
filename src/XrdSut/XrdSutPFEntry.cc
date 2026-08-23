@@ -171,7 +171,9 @@ XrdSutPFEntry& XrdSutPFEntry::operator=(const XrdSutPFEntry &e)
 {
    // Assign entry e to local entry.
 
-   SetName(name);
+   if (this == &e) return *this;
+
+   SetName(e.name);
    status = e.status;
    cnt    = e.cnt;            // counter
    mtime  = e.mtime;          // time of last modification / creation

@@ -566,10 +566,13 @@ kXR_int32 XrdSutPFile::WriteHeader(XrdSutPFHeader hd)
    //
    // Ready to write: check we got the file
    if (fFd < 0)
-      return Err(kPFErrFileNotOpen,"WriteHeader");
+      {delete[] bout;
+       return Err(kPFErrFileNotOpen,"WriteHeader");
+      }
    //
    // Set the offset
    if (lseek(fFd, 0, SEEK_SET) == -1) {
+      delete[] bout;
       return Err(kPFErrSeek,"WriteHeader","SEEK_SET",(const char *)&fFd);
    }
 
@@ -577,7 +580,7 @@ kXR_int32 XrdSutPFile::WriteHeader(XrdSutPFHeader hd)
    // Now write the buffer to the stream
    while ((nw = write(fFd, bout, ltot)) < 0 && errno == EINTR)
       errno = 0;
- 
+   delete[] bout;
    return nw;
 }
 
@@ -1342,7 +1345,7 @@ kXR_int32 XrdSutPFile::WriteInd(kXR_int32 ofs, XrdSutPFEntInd ind)
    // Now write the buffer to the stream
    while ((nw = write(fFd, bout, ltot)) < 0 && errno == EINTR)
       errno = 0;
- 
+   delete[] bout;
    return nw;
 }
 
@@ -1424,7 +1427,7 @@ kXR_int32 XrdSutPFile::WriteEnt(kXR_int32 ofs, XrdSutPFEntry ent)
    // Now write the buffer to the stream
    while ((nw = write(fFd, bout, ltot)) < 0 && errno == EINTR)
       errno = 0;
- 
+   delete[] bout;
    return nw;
 }
 
