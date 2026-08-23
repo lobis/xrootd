@@ -19,7 +19,9 @@ changing successful-path behavior, callback ownership, or public interfaces.
 - `XrdSutPFile`: release serialization buffers after writes and on the
   post-allocation header error exits.
 - `XrdTlsContext`: delete an invalid non-null CRL-refresh clone before retrying.
-- `XrdFfsQueue`: check and clean worker ID/thread allocations on failure.
+- `XrdFfsQueue`: recheck task completion in a mutex-held predicate loop so
+  spurious condition-variable wakes cannot expose a task to premature free;
+  worker ID/thread allocations are also checked and cleaned on failure.
 - `XrdOfsPrepGPI`: defer request allocation until after the maximum-file check.
 - `XrdClCopy`: delete the per-job result object when `getcwd` fails.
 - `XrdHttpProtocol`: clean preload metadata and data buffers on allocation,
@@ -106,9 +108,9 @@ changing successful-path behavior, callback ownership, or public interfaces.
   failed-`Detach` ownership need dedicated semantic tests before changes.
 - `XrdOucString`: the remaining pass-by-value temporary destructor report is
   analyzer alias modeling and remains deferred.
-- `XrdFfsQueue` worker-removal warnings depend on asynchronous dequeue and
-  completion signaling; the analyzer cannot model the task being removed before
-  its completed task is freed.
+- `XrdFfsQueue` normal worker-removal warnings remain deferred: they depend on
+  asynchronous dequeue and completion signaling that the analyzer cannot model
+  when a task is removed before its completed task is freed.
 - `XrdXrootdConfigMon` successful g-stream placement depends on the configured
   environment route; only the invalid-construction path is changed here.
 - `XrdConfig` reports successful `tlsciphers` storage as leaked, but

@@ -123,7 +123,7 @@ void XrdFfsQueue_free_task(struct XrdFfsQueueTasks *task)
 void XrdFfsQueue_wait_task(struct XrdFfsQueueTasks *task)
 {
     pthread_mutex_lock(&task->mutex);
-    if (task->done != 1)
+    while (task->done != 1)
         pthread_cond_wait(&task->cond, &task->mutex);
     pthread_mutex_unlock(&task->mutex);
 }
