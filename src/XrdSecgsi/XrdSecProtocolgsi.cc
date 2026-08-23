@@ -4805,6 +4805,8 @@ int XrdSecProtocolgsi::GetCA(const char *cahash,
                (int)(verified)<<")");
          rc = -1;
       }
+   } else if (createchain) {
+      SafeDelete(chain);
    }
 
    // We are done: release the lock

@@ -104,6 +104,11 @@ changing successful-path behavior, callback ownership, or public interfaces.
 - `XrdSecProtocolgsi::ErrF`: release the temporary combined debug message after
   synchronous logging consumes it.  Only the debug buffer lifetime changes;
   fallback logging, messages, and error behavior are unchanged.
+- `XrdSecProtocolgsi::GetCA`: release a locally allocated `X509Chain` when the
+  parser hook is unavailable; borrowed handshake chains remain untouched.  If
+  allocation returned null, the guarded `SafeDelete` is harmless.  A missing
+  parser hook still returns exactly as before; only unreachable local storage
+  is reclaimed.
 - `XrdOfsTPC::Init`: pass delegated-auth text directly to `XrdOucEnv::Export`,
   removing only the redundant caller-side copy.  `Export`'s internal `Var=Val`
   allocation remains intentionally persistent for `putenv`; exported value,
