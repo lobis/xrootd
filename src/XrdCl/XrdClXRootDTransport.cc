@@ -2896,7 +2896,9 @@ namespace XrdCl
       sign->ReAllocate( size + msg->GetSize() );
       char* buffer = sign->GetBuffer( size );
       memcpy( buffer, msg->GetBuffer(), msg->GetSize() );
-      msg->Grab( sign->GetBuffer(), sign->GetSize() );
+      const uint32_t combinedSize = sign->GetSize();
+      msg->Grab( sign->Release(), combinedSize );
+      delete sign;
     }
 
     return msg;

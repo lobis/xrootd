@@ -82,6 +82,10 @@ changing successful-path behavior, callback ownership, or public interfaces.
   removing only the redundant caller-side copy.  `Export`'s internal `Var=Val`
   allocation remains intentionally persistent for `putenv`; exported value,
   timing, and process-environment behavior are unchanged.
+- `XrdCl::XRootDTransport::GenerateEndSession`: transfer the combined signature
+  buffer into the request and delete the now-empty signature wrapper.  Only
+  wrapper/buffer ownership changes; wire bytes, marshalling, and session
+  behavior are unchanged.
 - `XrdXrootdGSReal`: remove an unmatched CGI-header formatting conversion.
   Malformed/undefined prior output behavior could append arbitrary memory or
   crash during CGI g-stream construction; it now emits the intended header
