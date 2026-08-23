@@ -365,8 +365,8 @@ int XrdConfig::Configure(int argc, char **argv)
 
 // Setup the initial required protocol. The program name matches the protocol
 // name but may be arbitrarily suffixed. We need to ignore this suffix. So we
-// look for it here and it it exists we duplicate argv[0] (yes, loosing some
-// bytes - sorry valgrind) without the suffix.
+// look for it here and, if it exists, duplicate it so we can remove the suffix
+// without modifying argv[0]. The local copy is released after protocol setup.
 //
   {char *p = dfltProt = strdup(myProg);
    while(*p && (*p == '.' || *p == '-')) p++;
@@ -756,6 +756,7 @@ int XrdConfig::Configure(int argc, char **argv)
 // Now initialize the protocols and other stuff
 //
    if (!NoGo) NoGo = Setup(dfltProt, libProt);
+   free(dfltProt);
 
 // End config capture
 //

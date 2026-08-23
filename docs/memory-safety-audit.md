@@ -62,6 +62,9 @@ changing successful-path behavior, callback ownership, or public interfaces.
 - `XrdSecgsiGMAPFunDN`: delete only the locally allocated mapping probe.
 - `XrdConfig`: free invalid trailing-argument cipher storage; successful cipher
   storage remains intentionally persistent.
+- `XrdConfig::Configure`: release the local default protocol-name copy after
+  synchronous `Setup`; `Firstcp` owns its separate duplicate, while intentional
+  `tlsciphers` retention is unchanged.
 - `XrdConfig::xprot`: release a copied protocol library when `GetRest` rejects
   too many parameters; parser behavior is unchanged except that no allocation
   remains after rejection.
