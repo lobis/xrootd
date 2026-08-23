@@ -84,6 +84,10 @@ changing successful-path behavior, callback ownership, or public interfaces.
   duplicate hash insertion; first-record-wins matching, unique-entry ownership,
   parsing, logging, and return behavior are unchanged.  This is separate from
   the `XrdSecgsiGMAPFunDN` mapping-probe cleanup.
+- `XrdOucGMap`: release the constructor-owned `XrdOucTrace` during normal and
+  invalid-construction destruction.  The error destination (`eDest`/`elogger`)
+  remains borrowed; mapping behavior is unchanged and only tracer lifetime is
+  corrected.
 - `XrdOucGMap::load`: stop identity scans at the record terminator and reject
   empty identities before marker handling.  Malformed records with no unquoted
   separator, an unterminated quote, or an empty identity now log the existing

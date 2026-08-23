@@ -158,6 +158,11 @@ XrdOucGMap::XrdOucGMap(XrdOucGMapArgs)
    valid = 1;
 }
 
+XrdOucGMap::~XrdOucGMap()
+{
+   delete tracer;
+}
+
 // Loader
 //
 int XrdOucGMap::load(const char *mf, bool force)

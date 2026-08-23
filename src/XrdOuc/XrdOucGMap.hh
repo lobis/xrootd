@@ -95,7 +95,7 @@ virtual int  dn2user(const char *dn, char *user, int ulen, time_t now = 0);
 //! Destructor
 //------------------------------------------------------------------------------
 
-virtual     ~XrdOucGMap() {}
+virtual     ~XrdOucGMap();
 
 //------------------------------------------------------------------------------
 //! Validity checker
