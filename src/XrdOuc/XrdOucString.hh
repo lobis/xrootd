@@ -298,8 +298,12 @@ public:
    int           tokenize(XrdOucString &tok, int from, char del = ':');
 
    // Modifiers
-   void          resize(int lmx = 0) { int ns = (lmx > 0) ? lmx + 1 : 0;
-                                       str = bufalloc(ns); }
+   void          resize(int lmx = 0) {
+      int ns = (lmx > 0) ? lmx + 1 : 0;
+      if (ns <= 0) { bufalloc(ns); return; }
+      char *nstr = bufalloc(ns);
+      if (nstr) str = nstr;
+   }
    void          append(const int i);
    void          append(const char c);
    void          append(const char *s);
@@ -383,4 +387,3 @@ XrdOucString const operator+(const char c, const XrdOucString s);
 XrdOucString const operator+(const int i, const XrdOucString s);
 
 #endif
-

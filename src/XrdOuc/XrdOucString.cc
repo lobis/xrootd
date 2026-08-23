@@ -545,8 +545,11 @@ void XrdOucString::assign(const char *s, int j, int k)
       // Adjust range and get length of portion to copy
       int nlen = adjust(ls, j, k);
       // Resize, if needed
-      if (nlen > (siz-1)) 
-         str = bufalloc(nlen+1);
+      if (nlen > (siz-1)) {
+         char *nstr = bufalloc(nlen+1);
+         if (!nstr) return;
+         str = nstr;
+      }
       if (str) {
          if (nlen > 0) {
             strncpy(str,s+j,nlen);
@@ -598,8 +601,11 @@ int XrdOucString::keep(int start, int size)
       return len;
 
    // Allocated new string
-   if (nlen > (siz-1))
-      str = bufalloc(nlen+1);
+   if (nlen > (siz-1)) {
+      char *nstr = bufalloc(nlen+1);
+      if (!nstr) return rc;
+      str = nstr;
+   }
    if (str) {
       // Copy the bytes
       memmove(str,str+st,nlen);
@@ -664,8 +670,11 @@ void XrdOucString::insert(const char *s, int start, int ls)
       int lstr = (ls > 0) ? ls : strlen(s);
       if (str) {
          int lnew = len + lstr;
-         if (lnew > (siz-1))
-            str = bufalloc(lnew+1);
+         if (lnew > (siz-1)) {
+            char *nstr = bufalloc(lnew+1);
+            if (!nstr) return;
+            str = nstr;
+         }
          if (str) {
             // Move the rest of the existing string, if any
             if (at < len)
@@ -785,8 +794,11 @@ int XrdOucString::replace(const char *s1, const char *s2, int from, int to)
    int nlen = (nr > 0) ? (len + nr*(l2-l1)) : len ;
 
    // Reallocate, if needed
-   if (nlen > (siz-1))
-      str = bufalloc(nlen+1);
+   if (nlen > (siz-1)) {
+      char *nstr = bufalloc(nlen+1);
+      if (!nstr) return 0;
+      str = nstr;
+   }
 
    // Now act
    int dd = l2-l1;

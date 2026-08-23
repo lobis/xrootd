@@ -69,6 +69,9 @@ changing successful-path behavior, callback ownership, or public interfaces.
   the destination unchanged.  `setbuffer` retains the adopted buffer if its
   shrink realloc fails instead of losing ownership.  Valid formatted output is
   unchanged.
+- `XrdOucString`: failed growth or shrink reallocations preserve the prior
+  value and capacity and abort the requested mutation or resize.  Successful
+  resize, assignment, append, and replacement behavior remains unchanged.
 
 ## Deferred and expected analyzer reports
 
@@ -77,8 +80,8 @@ changing successful-path behavior, callback ownership, or public interfaces.
 - `XrdXrootdAioPgrw` wrapper lifetime, `XrdPfc` direct-response-handler
   self-deletion (including synchronous `ReadV` behavior), and `XrdRmcData`
   failed-`Detach` ownership need dedicated semantic tests before changes.
-- `XrdOucString` analyzer reports require API-level ownership tests rather than
-  local cleanup edits.
+- `XrdOucString`: the remaining pass-by-value temporary destructor report is
+  analyzer alias modeling and remains deferred.
 - `XrdFfsQueue` worker-removal warnings depend on asynchronous dequeue and
   completion signaling; the analyzer cannot model the task being removed before
   its completed task is freed.

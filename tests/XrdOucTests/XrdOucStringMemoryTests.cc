@@ -40,5 +40,39 @@ int main()
    success &= Check( std::string( target.c_str(), target.length() ) == expected,
                      "static form produced the wrong content" );
 
+   XrdOucString resized( "resize me" );
+   resized.resize( 128 );
+   success &= Check( std::string( resized.c_str(), resized.length() ) == "resize me",
+                     "resize did not preserve content" );
+   success &= Check( resized.capacity() >= 129,
+                     "resize did not grow capacity" );
+   resized.resize( 0 );
+   success &= Check( resized.c_str() == 0 && resized.length() == 0
+                     && resized.capacity() == 0,
+                     "resize(0) did not reset the string" );
+
+   const std::string assignedValue( 300, 'a' );
+   XrdOucString assigned( "seed" );
+   assigned.assign( assignedValue.c_str(), 0 );
+   success &= Check( std::string( assigned.c_str(), assigned.length() ) == assignedValue,
+                     "assign growth produced the wrong content" );
+
+   const std::string appendedValue( 300, 'b' );
+   XrdOucString appended( "prefix" );
+   appended.append( appendedValue.c_str() );
+   success &= Check( std::string( appended.c_str(), appended.length() )
+                     == "prefix" + appendedValue,
+                     "append growth produced the wrong content" );
+
+   XrdOucString replaced( "a-b-a" );
+   const std::string replacement( 80, 'r' );
+   const std::string replacedValue = replacement + "-b-" + replacement;
+   const int delta = replaced.replace( "a", replacement.c_str() );
+   success &= Check( delta == static_cast<int>( replacedValue.size() - 5 ),
+                     "expanding replace returned the wrong delta" );
+   success &= Check( std::string( replaced.c_str(), replaced.length() )
+                     == replacedValue,
+                     "expanding replace produced the wrong content" );
+
    return success ? 0 : 1;
 }
