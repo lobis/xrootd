@@ -76,6 +76,10 @@ changing successful-path behavior, callback ownership, or public interfaces.
 - `XrdSecProtocolgsi::ErrF`: release the temporary combined debug message after
   synchronous logging consumes it.  Only the debug buffer lifetime changes;
   fallback logging, messages, and error behavior are unchanged.
+- `XrdOfsTPC::Init`: pass delegated-auth text directly to `XrdOucEnv::Export`,
+  removing only the redundant caller-side copy.  `Export`'s internal `Var=Val`
+  allocation remains intentionally persistent for `putenv`; exported value,
+  timing, and process-environment behavior are unchanged.
 - `XrdXrootdGSReal`: remove an unmatched CGI-header formatting conversion.
   Malformed/undefined prior output behavior could append arbitrary memory or
   crash during CGI g-stream construction; it now emits the intended header

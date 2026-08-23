@@ -435,7 +435,7 @@ void XrdOfsTPC::Init()
 // Export the delegated auths
 //
    if (aStr.length())
-      XrdOucEnv::Export("XRDTPCDLG", strdup(aStr.c_str()+1));
+      XrdOucEnv::Export("XRDTPCDLG", aStr.c_str()+1);
 }
 
 /******************************************************************************/
