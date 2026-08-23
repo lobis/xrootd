@@ -803,7 +803,8 @@ int XrdPssSys::xorig(XrdSysError *errp, XrdOucStream &Config)
 // At this point, make sure we actually have a host name
 //
    if (!(*mval))
-      {errp->Emsg("Config","origin host name not specified"); return 1;}
+      {free(mval);
+       errp->Emsg("Config","origin host name not specified"); return 1;}
 
 // Validate the port number
 //

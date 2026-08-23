@@ -179,7 +179,7 @@ bool XrdNetRegistry::Register(const char *hName,
 bool XrdNetRegistry::Register(const char *hName, const char *hList,
                               std::string *eText, bool rotate)
 {
-   char *comma, *hosts = strdup(hList);
+   char *comma, *hosts;
    std::vector<const char*> hVec;
 
 // Make sure we have valid parameters
@@ -192,6 +192,12 @@ bool XrdNetRegistry::Register(const char *hName, const char *hList,
 // Check for alias creation
 //
    if (*hList == pfx) return SetAlias(hName, hList, eText);
+
+   hosts = strdup(hList);
+   if (!hosts)
+      {if (eText) *eText = "unable to allocate host list";
+       return false;
+      }
 
 // Construct a vector of contacts
 //

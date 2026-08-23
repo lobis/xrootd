@@ -2630,6 +2630,7 @@ int XrdConfig::xtlsci(XrdSysError *eDest, XrdOucStream &Config)
 
    if ((val = Config.GetWord()))
       {eDest->Emsg("Config","Invalid tlsciphers argument -",val);
+       free(ciphers);
        return 1;
       }
 

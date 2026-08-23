@@ -831,10 +831,12 @@ int XrdSecServer::xpbind(XrdOucStream &Config, XrdSysError &Eroute)
          else if (!PManager.Find(val))
                  {Eroute.Emsg("Config","protbind", val,
                               "protocol not previously defined.");
+                  free(thost);
                   return 1;
                  }
          else if (add2token(Eroute, val, &secbuff, sectlen, PMask))
                  {Eroute.Emsg("Config","Unable to bind protocols to",thost);
+                  free(thost);
                   return 1;
                  } else anyprot = 1;
         }
@@ -843,13 +845,16 @@ int XrdSecServer::xpbind(XrdOucStream &Config, XrdSysError &Eroute)
 //
    if (val && (val = Config.GetWord()))
       {Eroute.Emsg("Config","conflicting protbind:", thost, val);
+       free(thost);
        return 1;
       }
 
 // Make sure we have some protocols bound to this host
 //
    if (!(anyprot || noprot))
-      {Eroute.Emsg("Config","no protocols bound to", thost); return 1;}
+      {Eroute.Emsg("Config","no protocols bound to", thost);
+       free(thost); return 1;
+      }
    DEBUG("XrdSecConfig: Bound "<< thost<< " to "
          << (noprot ? "none" : (phost ? "host" : sectoken)));
 
