@@ -907,6 +907,7 @@ namespace XrdCl
     XRootDStatus st = FillFhTempl( self, *self->pFileUrl, msg, sendUrl );
     if( !st.IsOK() )
     {
+      delete msg;
       delete openHandler;
       self->pStatus    = st;
       self->pFileState = Closed;

@@ -140,6 +140,9 @@ changing successful-path behavior, callback ownership, or public interfaces.
   request message when `CreateXAttrBody` rejects the attributes before any
   handler or queue can own it.  The exact validation status and all valid/send
   behavior remain unchanged.
+- `XrdCl::FileStateHandler::OpenImpl`: delete the request message when
+  `FillFhTempl` fails before any handler or send path can own it.  The same
+  failure status/state transition and all valid/send behavior remain unchanged.
 - `XrdXrootdGSReal`: remove an unmatched CGI-header formatting conversion.
   Malformed/undefined prior output behavior could append arbitrary memory or
   crash during CGI g-stream construction; it now emits the intended header
