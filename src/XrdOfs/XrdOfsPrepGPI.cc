@@ -401,7 +401,7 @@ namespace XrdOfsPrepGPIReal
 PrepRequest *PrepGPI::Assemble(int &rc, const char *tid, const char *reqName,
                                XrdSfsPrep &pargs, const char *xOpt)
 {
-   PrepRequest *rP = new PrepRequest;
+   PrepRequest *rP;
    int n;
    char buff[1024];
 
@@ -415,6 +415,8 @@ PrepRequest *PrepGPI::Assemble(int &rc, const char *tid, const char *reqName,
 //
    if (n > maxFiles) {rc = E2BIG; return 0;}
    rc = 0;
+
+   rP = new PrepRequest;
 
 // Size the vector to accomodate the file arguments
 //
