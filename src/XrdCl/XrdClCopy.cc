@@ -823,6 +823,7 @@ int main( int argc, char **argv )
         if( !cwd )
         {
           XRootDStatus st( stError, XProtocol::mapError( errno ), errno );
+          delete results;
           std::cerr <<  st.GetErrorMessage() << std::endl;
           return st.GetShellCode();
         }
@@ -970,4 +971,3 @@ int main( int argc, char **argv )
   CleanUpResults( resultVect );
   return 0;
 }
-
