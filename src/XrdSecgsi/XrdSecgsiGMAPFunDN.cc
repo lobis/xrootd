@@ -229,7 +229,8 @@ int XrdSecgsiGMAPInit(const char *parms)
                }
             }
             // Register
-            gMappings.Add(p, new XrdSecgsiMapEntry_t(p, usr, type));
+            XrdSecgsiMapEntry_t *entry = new XrdSecgsiMapEntry_t(p, usr, type);
+            if (gMappings.Add(p, entry)) delete entry;
             //
             DEBUG("mapping DNs "<<stype<<" '"<<p<<"' to '"<<usr<<"'");
          }

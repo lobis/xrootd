@@ -59,7 +59,9 @@ changing successful-path behavior, callback ownership, or public interfaces.
 - `XrdSendQ`: free a newly allocated message when `QMsg` rejects ownership.
 - `XrdPfcDirStateSnapshot`: remove calls through a data-file pointer after it
   has already been closed and deleted.
-- `XrdSecgsiGMAPFunDN`: delete only the locally allocated mapping probe.
+- `XrdSecgsiGMAPFunDN`: delete the locally allocated mapping probe after
+  scanning, and delete a newly allocated configuration entry rejected by a
+  duplicate hash insertion; accepted entries remain owned by `gMappings`.
 - `XrdConfig`: free invalid trailing-argument cipher storage; successful cipher
   storage remains intentionally persistent.
 - `XrdConfig::Configure`: release the local default protocol-name copy after
@@ -131,8 +133,9 @@ changing successful-path behavior, callback ownership, or public interfaces.
 - `XrdXrootdConfigMon` successful g-stream placement depends on the configured
   environment route; only the invalid-construction path is changed here.
 - `XrdConfig` reports successful `tlsciphers` storage as leaked, but
-  `SetDefaultCiphers` deliberately retains it.  `XrdSecgsiGMAPFunDN` reports
-  mappings passed to `gMappings.Add`; that hash owns the installed entries.
+  `SetDefaultCiphers` deliberately retains it.  `XrdSecgsiGMAPFunDN` may still
+  report accepted entries passed to `gMappings.Add`; that hash owns them, while
+  duplicate rejected entries are explicitly deleted.
 - `XrdAcc` capability-list and `SYList` ownership reports remain analyzer false
   positives: capability chains are transferred to owning hashes/tables, and
   `SYList` entries are owned by `S_Hash` and released during table teardown.
