@@ -252,7 +252,9 @@ int XrdSendQ::Send(const char *buff, int blen)
 
 // Queue the message.
 //
-   return (QMsg(theMsg) ? blen : -1);
+   if (QMsg(theMsg)) return blen;
+   free(theMsg);
+   return -1;
 }
 
 /******************************************************************************/
@@ -310,7 +312,9 @@ int XrdSendQ::Send(const struct iovec *iov, int iovcnt, int iotot)
 
 // Queue the message.
 //
-   return (QMsg(theMsg) ? iotot : 0);
+   if (QMsg(theMsg)) return iotot;
+   free(theMsg);
+   return 0;
 }
 
 /******************************************************************************/
