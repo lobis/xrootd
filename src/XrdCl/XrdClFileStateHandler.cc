@@ -2959,7 +2959,11 @@ namespace XrdCl
     req->options   = options;
     memcpy( req->fhandle, self->pFileHandle, 4 );
     XRootDStatus st = MessageUtils::CreateXAttrBody( msg, attrs );
-    if( !st.IsOK() ) return st;
+    if( !st.IsOK() )
+    {
+      delete msg;
+      return st;
+    }
 
     MessageSendParams params;
     params.timeout         = timeout;

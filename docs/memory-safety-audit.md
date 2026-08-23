@@ -136,6 +136,10 @@ changing successful-path behavior, callback ownership, or public interfaces.
   `PgRead` rejects submission before transferring it to a completion response.
   Submitted buffers retain their existing response/cleanup ownership; queueing,
   status, offsets, and copy behavior are unchanged.
+- `XrdCl::FileStateHandler::XAttrOperationImpl`: delete the locally created
+  request message when `CreateXAttrBody` rejects the attributes before any
+  handler or queue can own it.  The exact validation status and all valid/send
+  behavior remain unchanged.
 - `XrdXrootdGSReal`: remove an unmatched CGI-header formatting conversion.
   Malformed/undefined prior output behavior could append arbitrary memory or
   crash during CGI g-stream construction; it now emits the intended header
