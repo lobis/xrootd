@@ -103,7 +103,8 @@ struct XrdXrootdGSReal::GSParms gsObj[] =
 
 bool XrdXrootdProtocol::ConfigGStream(XrdOucEnv &myEnv, XrdOucEnv *urEnv)
 {
-   XrdXrootdGStream *gs;
+   XrdXrootdGSReal *gs;
+   XrdXrootdGStream *gsp;
    static const int numgs=sizeof(gsObj)/sizeof(struct XrdXrootdGSReal::GSParms);
    char vbuff[64];
    bool aOK, gXrd[numgs] = {false, false, true, false, true, false, true};
@@ -115,7 +116,7 @@ bool XrdXrootdProtocol::ConfigGStream(XrdOucEnv &myEnv, XrdOucEnv *urEnv)
        {if (gsObj[i].dest || XrdXrootdMonitor::ModeEnabled(gsObj[i].Mode))
            {if (MP && gsObj[i].maxL <= 0) gsObj[i].maxL = MP->monGBval;
             gs = new XrdXrootdGSReal(gsObj[i], aOK);
-            if (!aOK) return false;
+            if (!aOK) {delete gs; return false;}
             snprintf(vbuff, sizeof(vbuff), "%s.gStream*", gsObj[i].pin);
             if (!gXrd[i]) myEnv.PutPtr(vbuff, (void *)gs);
                else if (urEnv) urEnv->PutPtr(vbuff, (void *)gs);
@@ -124,8 +125,8 @@ bool XrdXrootdProtocol::ConfigGStream(XrdOucEnv &myEnv, XrdOucEnv *urEnv)
 
 // Configure the TPC monitor if we have a gStream for it
 //
-   if (urEnv && (gs = (XrdXrootdGStream*)urEnv->GetPtr("Tpc.gStream*")))
-      {XrdXrootdTpcMon* tpcMon = new XrdXrootdTpcMon("xroot",eDest.logger(),*gs);
+   if (urEnv && (gsp = (XrdXrootdGStream*)urEnv->GetPtr("Tpc.gStream*")))
+      {XrdXrootdTpcMon* tpcMon = new XrdXrootdTpcMon("xroot",eDest.logger(),*gsp);
        myEnv.PutPtr("TpcMonitor*", (void*)tpcMon);
       }
 

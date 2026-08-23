@@ -1115,32 +1115,35 @@ int XrdXrootdProtocol::xcksum(XrdOucStream &Config)
               continue;
              }
           if (!(palg = Config.GetWord()))
-             {eDest.Emsg("Config", "chksum max not specified"); return 1;}
-          if (XrdOuca2x::a2i(eDest, "chksum max", palg, &jmax, 0)) return 1;
+             {eDest.Emsg("Config", "chksum max not specified");
+              while((tP = algFirst)) {algFirst = tP->next; delete tP;}
+              return 1;
+             }
+          if (XrdOuca2x::a2i(eDest, "chksum max", palg, &jmax, 0))
+             {while((tP = algFirst)) {algFirst = tP->next; delete tP;}
+              return 1;
+             }
          }
 
 // Verify we have an algoritm
 //
    if (!algFirst)
       {eDest.Emsg("Config", "chksum algorithm not specified"); return 1;}
-   if (JobCKT) free(JobCKT);
-   JobCKT = strdup(algFirst->text);
-
-// Handle alternate checksums
-//
-   while((tP = JobCKTLST)) {JobCKTLST = tP->next; delete tP;}
-   JobCKTLST = algFirst;
-   if (algFirst->next) JobCKCGI = 2;
-
 // Handle program if we have one
 //
    if (palg)
       {int n = strlen(palg);
        if (n+2 >= (int)sizeof(prog))
-          {eDest.Emsg("Config", "cksum program too long"); return 1;}
+          {eDest.Emsg("Config", "cksum program too long");
+           while((tP = algFirst)) {algFirst = tP->next; delete tP;}
+           return 1;
+          }
        strcpy(prog, palg); palg = prog+n; *palg++ = ' '; n = sizeof(prog)-n-1;
        if (!Config.GetRest(palg, n))
-          {eDest.Emsg("Config", "cksum parameters too long"); return 1;}
+          {eDest.Emsg("Config", "cksum parameters too long");
+           while((tP = algFirst)) {algFirst = tP->next; delete tP;}
+           return 1;
+          }
       } else *prog = 0;
 
 // Check if we have a program. If not, then this will be a local checksum and
@@ -1152,7 +1155,18 @@ int XrdXrootdProtocol::xcksum(XrdOucStream &Config)
 // Set up the program and job
 //
    if (!theProg) theProg = new XrdOucProg(0);
-   if (theProg->Setup(prog, &eDest, Proc)) return 1;
+   if (theProg->Setup(prog, &eDest, Proc))
+      {while((tP = algFirst)) {algFirst = tP->next; delete tP;}
+       return 1;
+      }
+
+// The configured job now owns the validated checksum chain.
+//
+   if (JobCKT) free(JobCKT);
+   JobCKT = strdup(algFirst->text);
+   while((tP = JobCKTLST)) {JobCKTLST = tP->next; delete tP;}
+   JobCKTLST = algFirst;
+   if (algFirst->next) JobCKCGI = 2;
    if (JobCKS) delete JobCKS;
    if (jmax) JobCKS = new XrdXrootdJob(Sched, theProg, "chksum", jmax);
       else   JobCKS = 0;
