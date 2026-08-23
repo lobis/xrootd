@@ -127,6 +127,10 @@ changing successful-path behavior, callback ownership, or public interfaces.
   buffer into the request and delete the now-empty signature wrapper.  Only
   wrapper/buffer ownership changes; wire bytes, marshalling, and session
   behavior are unchanged.
+- `XrdCl::AioCtx::QueueTask`: release the separately allocated host list after
+  synchronous response handling; asynchronous `LocalFileTask` ownership is
+  unchanged.  Callback timing, response handling, and queueing behavior remain
+  unchanged.
 - `XrdXrootdGSReal`: remove an unmatched CGI-header formatting conversion.
   Malformed/undefined prior output behavior could append arbitrary memory or
   crash during CGI g-stream construction; it now emits the intended header

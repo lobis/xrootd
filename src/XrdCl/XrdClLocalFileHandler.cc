@@ -201,6 +201,7 @@ namespace
         // and return there is no need to execute this in the thread-pool
         if(SyncResponseHandler *syncHandler = dynamic_cast<SyncResponseHandler*>( handler )) {
           syncHandler->HandleResponse( status, resp );
+          delete hosts;
         } else if(auto postmaster = DefaultEnv::GetPostMaster()) {
           if (JobManager *jmngr = postmaster->GetJobManager()) {
             LocalFileTask *task = new LocalFileTask( status, resp, hosts, handler );
