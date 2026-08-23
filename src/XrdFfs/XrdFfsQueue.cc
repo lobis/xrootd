@@ -204,17 +204,22 @@ int XrdFfsQueue_create_workers(int n)
     for (i = 0; i < n; i++)
     {
         id = (int*) malloc(sizeof(int));
+        if (id == NULL)
+            break;
         *id = XrdFfsQueueWorker_id++;
         thread = (pthread_t*) malloc(sizeof(pthread_t));
         if (thread == NULL) 
         {
             XrdFfsQueueWorker_id--;
+            free(id);
             break;
         }
         rc = pthread_create(thread, &attr, XrdFfsQueue_worker, id);
         if (rc != 0) 
         {
             XrdFfsQueueWorker_id--;
+            free(thread);
+            free(id);
             break;
         }
         pthread_detach(*thread);

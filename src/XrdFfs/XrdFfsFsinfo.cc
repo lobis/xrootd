@@ -69,6 +69,11 @@ int XrdFfsFsinfo_cache_search(int (*func)(const char*, const char*, struct statv
         sname = strdup(p+11);
     else
         sname = strdup(" ");
+    if (!sname) {
+        pthread_mutex_unlock(&XrdFfsFsinfo_cache_mutex_rd);
+        if (wlock == 0) pthread_mutex_unlock(&XrdFfsFsinfo_cache_mutex_wr);
+        return ENOMEM;
+    }
     s = XrdFfsFsinfoHtab.Find(sname);
     if (s != NULL)
     {
@@ -80,6 +85,12 @@ int XrdFfsFsinfo_cache_search(int (*func)(const char*, const char*, struct statv
     {
         rc = (*func)(rdrurl, path, stbuf, user_uid);
         s = (struct XrdFfsFsInfo*) malloc(sizeof(struct XrdFfsFsInfo));
+        if (!s) {
+            pthread_mutex_unlock(&XrdFfsFsinfo_cache_mutex_rd);
+            if (wlock == 0) pthread_mutex_unlock(&XrdFfsFsinfo_cache_mutex_wr);
+            free(sname);
+            return ENOMEM;
+        }
         s->t = 0;
         dofree = 1;
     }
@@ -100,12 +111,16 @@ int XrdFfsFsinfo_cache_search(int (*func)(const char*, const char*, struct statv
             s->f_bfree = stbuf->f_bfree;
 
             if (s->f_blocks != 0)  // if s->f_blocks is zero, then this space token probably does not exist
-                XrdFfsFsinfoHtab.Rep(sname, s, 0, (XrdOucHash_Options)(Hash_default | Hash_keepdata));
-               else if (dofree) free(s);
+                {XrdFfsFsinfoHtab.Rep(sname, s, 0, (XrdOucHash_Options)(Hash_default | Hash_keepdata));
+                 dofree = 0;
+                }
+               else if (dofree) {free(s); dofree = 0;}
             pthread_mutex_unlock(&XrdFfsFsinfo_cache_mutex_rd);
         }   
         pthread_mutex_unlock(&XrdFfsFsinfo_cache_mutex_wr);
     }
+    if (dofree)
+        free(s);
     free(sname);
     return rc;
 } 
