@@ -72,6 +72,9 @@ changing successful-path behavior, callback ownership, or public interfaces.
   is only a borrowed tail alias and is not deleted separately.  Access-control
   and configuration behavior are unchanged; this only cleans storage when
   tables are destroyed or replaced.
+- `XrdAccGroups`: delete a newly built group list when a concurrent duplicate
+  cache insertion is rejected; first-entry-wins semantics, returned copies,
+  empty results, and list contents remain unchanged.
 - `XrdSutPFile::RemoveEntries`: release the temporary offset array after the
   removal loop.  Successful and error-visible behavior is unchanged; only
   temporary offset storage is reclaimed.
@@ -123,5 +126,8 @@ changing successful-path behavior, callback ownership, or public interfaces.
 - `XrdConfig` reports successful `tlsciphers` storage as leaked, but
   `SetDefaultCiphers` deliberately retains it.  `XrdSecgsiGMAPFunDN` reports
   mappings passed to `gMappings.Add`; that hash owns the installed entries.
+- `XrdAcc` capability-list and `SYList` ownership reports remain analyzer false
+  positives: capability chains are transferred to owning hashes/tables, and
+  `SYList` entries are owned by `S_Hash` and released during table teardown.
 - Storage intentionally retained for `putenv`, `XrdOucEnv::Export`, and
   successful `XrdTlsContext::SetDefaultCiphers` calls must not be freed.

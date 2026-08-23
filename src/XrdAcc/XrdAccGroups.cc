@@ -225,7 +225,8 @@ char *Gtab[NGROUPS_MAX];
 // Add this user to the group cache to speed things up the next time
 //
    Group_Cache_Context.Lock();
-   Group_Cache.Add(user, glist, LifeTime);
+   if (Group_Cache.Add(user, glist, LifeTime))
+      delete glist;
    Group_Cache_Context.UnLock();
 
 // Return a copy of the group list since the original may be deleted
@@ -288,7 +289,8 @@ int XrdAccCheckNetGroup(const char *netgroup, char *key, void *Arg);
 // Add this user to the group cache to speed things up the next time
 //
    NetGroup_Cache_Context.Lock();
-   NetGroup_Cache.Add((const char *)uh_key, glist, LifeTime);
+   if (NetGroup_Cache.Add((const char *)uh_key, glist, LifeTime))
+      delete glist;
    NetGroup_Cache_Context.UnLock();
 
 // Return a copy of the group list
