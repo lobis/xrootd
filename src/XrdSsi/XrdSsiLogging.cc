@@ -112,8 +112,9 @@ void ConfigLog(const char *cFN)
 // Check if we have a logPath (we must)
 //
    if (!NoGo && !logPath)
-      {std::cerr <<"Config neither ssi.loglib nor ssi.svclib directive specified in "
+       {std::cerr <<"Config neither ssi.loglib nor ssi.svclib directive specified in "
             <<cFN <<std::endl;
+       if (svcPath) free(svcPath);
        return;
       }
 
@@ -122,6 +123,8 @@ void ConfigLog(const char *cFN)
    if (!(myLib = new XrdSysPlugin(eBuff, sizeof(eBuff), logPath, lName,
                                   &myVersion)))
       {std::cerr <<"Config " <<eBuff <<std::endl;
+       free(logPath);
+       if (svcPath) free(svcPath);
        return;
       }
 
@@ -140,6 +143,8 @@ void ConfigLog(const char *cFN)
 // All done
 //
    delete myLib;
+   free(logPath);
+   if (svcPath) free(svcPath);
 }
 }
   
