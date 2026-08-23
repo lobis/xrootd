@@ -45,7 +45,7 @@
 /******************************************************************************/
   
 XrdNetMsg::XrdNetMsg(XrdSysError *erp, const char *dest, bool *aOK, bool refr) 
-                    : eDest(erp)
+                    : eDest(erp), dfltDest(0)
 {
    XrdNet myNet(erp);
    bool aok = true;
@@ -112,7 +112,7 @@ XrdNetMsg::~XrdNetMsg()
 
 // Close the socket
 //
-   if (close(FD) < 0)
+   if (FD >= 0 && close(FD) < 0)
       eDest->Emsg("NetMsg", errno, "close socket for", dfltDest);
 
 // Free the poiinter to the default dest

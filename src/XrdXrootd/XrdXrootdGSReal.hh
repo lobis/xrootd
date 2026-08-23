@@ -111,7 +111,7 @@ int       Space();
 //! Destructor. Normally, this object is never deleted.
 //-----------------------------------------------------------------------------
 
-         ~XrdXrootdGSReal() {}
+         ~XrdXrootdGSReal();
 
 private:
 
@@ -148,6 +148,7 @@ int                    rsvbytes;
 int                    monType;
 int                    afTime;
 bool                   afRunning;
+bool                   isReady;
 bool                   isCGI;
 
 XrdXrootdMonitor::User gMon;

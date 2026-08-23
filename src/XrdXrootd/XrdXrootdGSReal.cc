@@ -64,10 +64,13 @@ using namespace XrdXrootdMonInfo;
 XrdXrootdGSReal::XrdXrootdGSReal(const XrdXrootdGSReal::GSParms &gsParms,
                                  bool &aOK)
                                 : XrdJob("GStream"), XrdXrootdGStream(*this),
-                                  Hello(gsParms.Opt & XrdXrootdGSReal::optNoID
-                                    || gsParms.Hdr == XrdXrootdGSReal::hdrNone
-                                     ? 0 : gsParms.dest, gsParms.Fmt),
-                                  pSeq(0), pSeqID(0), pSeqDID(0), binHdr(0),
+                                  Hello(0, gsParms.Fmt),
+                                  dictHdr(0), idntHdr0(0), idntHdr1(0),
+                                  idntHsz1(0), pSeq(0), pSeqID(0), pSeqDID(0),
+                                  udpDest(0), binHdr(0), udpBuffer(0),
+                                  udpBFirst(0), udpBNext(0), udpBEnd(0),
+                                  tBeg(0), tEnd(0), rsvbytes(0), monType(0),
+                                  afTime(0), afRunning(false), isReady(false),
                                   isCGI(false)
 {
    static const int minSZ = 1024;
@@ -137,6 +140,17 @@ XrdXrootdGSReal::XrdXrootdGSReal(const XrdXrootdGSReal::GSParms &gsParms,
    if (gsParms.dest) udpDest = new XrdNetMsg(eDest, gsParms.dest, &aOK, true);
       else udpDest = 0;
 
+// Do not register or schedule a stream whose network destination is invalid.
+// ConfigGStream deletes this partial object when aOK is false.
+//
+   if (!aOK) return;
+
+// Register for identity records only after the destination has been accepted.
+// This keeps an invalid partial object out of Hello's static list.
+//
+   if (!(gsParms.Opt & optNoID) && gsParms.Hdr != hdrNone)
+      Hello::Register(gsParms.dest, gsParms.Fmt);
+
 // Setup autoflush (a negative value uses the default)
 //
    if (gsParms.flsT < 0) flsT = XrdXrootdMonitor::Flushing();
@@ -152,6 +166,22 @@ XrdXrootdGSReal::XrdXrootdGSReal(const XrdXrootdGSReal::GSParms &gsParms,
 // Register ourselves
 //
    gMon.Register(idBuff, monHost, "xroot");
+   isReady = true;
+}
+
+/******************************************************************************/
+/*                            D e s t r u c t o r                             */
+/******************************************************************************/
+
+XrdXrootdGSReal::~XrdXrootdGSReal()
+{
+   if (!isReady)
+      {delete udpDest;
+       free(udpBuffer);
+       free(dictHdr);
+       free(idntHdr0);
+       free(idntHdr1);
+      }
 }
 
 /******************************************************************************/

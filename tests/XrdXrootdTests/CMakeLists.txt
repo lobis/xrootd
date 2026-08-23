@@ -15,3 +15,11 @@ target_link_libraries(xrdxrootd-redir-helper-tests
 
 gtest_discover_tests(xrdxrootd-redir-helper-tests
     PROPERTIES DISCOVERY_TIMEOUT 10)
+
+add_executable(xrdxrootd-gstream-tests XrdXrootdGStreamTests.cc)
+
+target_link_libraries(xrdxrootd-gstream-tests
+    XrdServer
+    XrdUtils)
+
+add_test(NAME xrdxrootd-gstream-tests COMMAND xrdxrootd-gstream-tests)

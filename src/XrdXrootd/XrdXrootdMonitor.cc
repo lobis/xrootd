@@ -229,6 +229,15 @@ XrdSysMutex XrdXrootdMonitorLock::monLock;
 XrdXrootdMonitor::Hello::Hello(const char *dest, char mode)
                               : Next(0), theDest(0), theMode(0)
 {
+   Register(dest, mode);
+}
+
+/******************************************************************************/
+/*             X r d X r o o t d M o n i t o r : : H e l l o                 */
+/*******************************************************************************/
+
+void XrdXrootdMonitor::Hello::Register(const char *dest, char mode)
+{
    if (dest)
       {Hello *nP = First;
        while(nP) {if (!strcmp(dest, nP->theDest) && mode == theMode) return;

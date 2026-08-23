@@ -30,7 +30,13 @@ changing successful-path behavior, callback ownership, or public interfaces.
 - `XrdFrcReqFile`: clean locally recovered request chains on a read abort.
 - `XrdXrootdConfig`: retain checksum algorithm chains locally until validation
   succeeds, then transfer them to `JobCKTLST`.
-- `XrdXrootdConfigMon`: delete an invalid constructed g-stream.
+- `XrdXrootdConfigMon` / `XrdXrootdGSReal`: reject a failed g-stream network
+  destination before registering its monitor identity or scheduling autoflush;
+  destruction of that unscheduled partial object releases its relay, buffer,
+  and separately allocated text headers.  `Hello` now supports deferred
+  registration so invalid streams never enter its static identity list.
+  `XrdNetMsg` initializes its default-destination pointer before validation so
+  destroying the failed relay is valid.
 - `XrdFfsFsinfo`: return `-ENOMEM` from allocation failures, as required by
   the FUSE callback convention, and free transient cache entries that cannot
   be inserted.

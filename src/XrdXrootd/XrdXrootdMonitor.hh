@@ -162,6 +162,9 @@ virtual void       Ident() {};
 
 virtual           ~Hello() {if (theDest) free(theDest);}
 
+protected:
+       void        Register(const char *dest, char mode);
+
 private:
 static  Hello     *First;
         Hello     *Next;
