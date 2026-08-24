@@ -31,6 +31,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
@@ -40,6 +41,7 @@ struct curl_slist;
 
 namespace XrdCl {
 
+class Env;
 class ResponseHandler;
 class Log;
 
@@ -55,11 +57,40 @@ bool HTTPStatusIsError(unsigned status);
 
 std::pair<uint16_t, uint32_t> HTTPStatusConvert(unsigned status);
 
+// Returns true if the use of a client X.509 credential is enabled in the
+// XrdCl environment (the HttpDisableX509 knob).
+bool ClientX509Enabled(XrdCl::Env *env);
+
+// Returns the client X.509 certificate and key file configured in the
+// XrdCl environment.
+std::tuple<std::string, std::string> ClientX509CertKeyFromEnv(XrdCl::Env *env);
+
+// Apply a client X.509 certificate and optional separate key file to a curl
+// handle. A no-op when the certificate is empty. When the key is empty,
+// libcurl can load it from a combined certificate and key file. Returns false
+// if libcurl rejects either credential option.
+bool SetClientX509(CURL *curl, const std::string &cert, const std::string &key,
+                   XrdCl::Log *log);
+
+// Read a bearer token from the standard XrdCl environment options, falling
+// back to the corresponding process environment variables.
+std::string GetBearerToken();
+
+// Return whether bearer-token authentication is the first available method
+// requested through XrdSecPROTOCOL.  With no explicit preference, use a token
+// whenever one is available.
+bool ShouldUseBearerToken(const std::string &protocols,
+                          bool hasX509Credential,
+                          bool hasBearerToken);
+
 // Trim the left side of a string_view for space
 std::string_view ltrim_view(const std::string_view &input_view);
 
 // Trim the left and right side of a string_view of whitespace
 std::string_view trim_view(const std::string_view &input_view);
+
+// Apply the common XrdClHttp configuration to a curl handle.
+void ConfigureHandle(CURL *curl, bool verbose);
 
 // Returns a newly-created curl handle (no internal caching) with the
 // various configurations needed to be used by XrdClHttp
@@ -125,7 +156,9 @@ public:
     static void ParseDigest(const std::string &digest, XrdClHttp::ChecksumInfo &info);
 
     // Decode a base64-encoded string into a binary buffer.
-    static bool Base64Decode(std::string_view input, std::array<unsigned char, 32> &output);
+    static bool Base64Decode(
+        std::string_view input,
+        std::array<unsigned char, g_max_checksum_length> &output);
 
     // Convert a checksum type to a RFC 3230 digest name.
     static std::string ChecksumTypeToDigestName(XrdClHttp::ChecksumType type);
