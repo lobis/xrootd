@@ -263,6 +263,23 @@ Only downloads to a local path or stdout are in scope here. Uploads and any
 other copy with a remote destination, including third-party copies, are not
 part of this read-only compatibility work.
 
+## Tape REST and HSM operations
+
+Tape staging, locality queries, cancellation, and eviction use the native XRootD
+prepare/query engine and the XrdClHttp WLCG Tape REST client.
+
+| gfal2-util | `xrdfs` | Compatibility provided |
+| --- | --- | --- |
+| `gfal-bringonline "$FILE"` | `xrdfs prepare -s "$FILE"` | Submits a stage request from tape to disk buffer and prints the Request ID. |
+| `gfal-bringonline --pin-lifetime 86400 "$FILE"` | `xrdfs prepare -s --pin-lifetime 86400 "$FILE"` | Passes the requested disk retention lifetime (`diskLifetime`). |
+| `gfal-bringonline --polling-timeout 600 "$FILE"` | `xrdfs prepare -s --wait --timeout 600 "$FILE"` | Polls synchronously until all staged files reach a terminal state (`COMPLETED` or `FAILED`). |
+| `gfal-stage-status "$ENDPOINT" "$REQ_ID"` | `xrdfs "$ENDPOINT" query prepare "$REQ_ID"` | Queries the status and per-file state of an existing stage request. |
+| `gfal-stage-cancel "$ENDPOINT" "$REQ_ID" "$FILE"` | `xrdfs "$ENDPOINT" prepare -a "$REQ_ID" "$FILE"` | Cancels/aborts a stage request for the specified paths. |
+| `gfal-evict "$FILE" "$REQ_ID"` | `xrdfs "$ENDPOINT" prepare -e "$REQ_ID" "$FILE"` | Releases disk-pinned files back to tape-only. |
+| `gfal-archivepoll "$FILE"` | `xrdfs "$ENDPOINT" query tape archiveinfo "$FILE"` | Queries archive locality information (`ONLINE`, `NEARLINE`, `ONLINE_AND_NEARLINE`). |
+| — | `xrdfs "$ENDPOINT" query tape discover` | Discovers WLCG Tape REST API endpoint version, site name, and base URI. |
+| — | `xrdfs "$ENDPOINT" query prepare -d "$REQ_ID"` | Deletes a stage request record from the tape REST server. |
+
 ## Testing approach
 
 The XRootD tests exercise the compatibility behavior against a local XRootD
