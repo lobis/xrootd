@@ -2,8 +2,13 @@
 
 import http.server
 import pathlib
+import socketserver
 import sys
 import urllib.parse
+
+
+WEBDAV_LAST_MODIFIED = "Sun, 06 Nov 1994 08:49:37 GMT"
+HEAD_LAST_MODIFIED = "Wed, 21 Oct 2015 07:28:00 GMT"
 
 
 def resource_response(path, directory):
@@ -17,6 +22,7 @@ def resource_response(path, directory):
       <D:prop>
         <D:resourcetype>{resource_type}</D:resourcetype>
         {size}
+        <D:getlastmodified>{WEBDAV_LAST_MODIFIED}</D:getlastmodified>
       </D:prop>
       <D:status>HTTP/1.1 200 OK</D:status>
     </D:propstat>
@@ -50,8 +56,21 @@ class WebDAVHandler(http.server.BaseHTTPRequestHandler):
     def do_OPTIONS(self):
         self.record()
         self.send_response(200)
-        self.send_header("Allow", "PROPFIND")
+        allow = "HEAD" if self.server.head_only else "PROPFIND"
+        self.send_header("Allow", allow)
         self.send_header("Content-Length", "0")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+
+    def do_HEAD(self):
+        path = self.record()
+        if path != "/head-file":
+            self.respond(404)
+            return
+        self.send_response(200)
+        self.send_header("Content-Length", "4")
+        self.send_header("Last-Modified", HEAD_LAST_MODIFIED)
         self.send_header("Connection", "close")
         self.end_headers()
         self.close_connection = True
@@ -63,6 +82,7 @@ class WebDAVHandler(http.server.BaseHTTPRequestHandler):
             "/dry-run-tree",
             "/dry-run-tree/nested",
             "/empty",
+            "/json-directory",
             "/nonempty",
         }
         files = {
@@ -71,6 +91,7 @@ class WebDAVHandler(http.server.BaseHTTPRequestHandler):
             "/dry-run-tree/nested/leaf",
             "/file",
             "/file-a",
+            "/json-file",
         }
         if path not in directories and path not in files:
             self.respond(404)
@@ -79,6 +100,13 @@ class WebDAVHandler(http.server.BaseHTTPRequestHandler):
         responses = [resource_response(path, path in directories)]
         if path == "/nonempty" and self.headers.get("Depth") == "1":
             responses.append(resource_response("/nonempty/child", False))
+        if (
+            path == "/json-directory"
+            and self.headers.get("Depth") == "1"
+        ):
+            responses.append(
+                resource_response("/json-directory/child", False)
+            )
         if path == "/dry-run-tree" and self.headers.get("Depth") == "1":
             responses.append(resource_response("/dry-run-tree/file", False))
             responses.append(
@@ -110,16 +138,28 @@ class WebDAVHandler(http.server.BaseHTTPRequestHandler):
         self.respond(204)
 
 
+class WebDAVServer(http.server.HTTPServer):
+    def server_bind(self):
+        # HTTPServer resolves the bound address to populate server_name. That
+        # lookup can block on macOS CI and is not useful to this local mock.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name = "localhost"
+        self.server_port = self.server_address[1]
+
+
 def main():
-    if len(sys.argv) != 3:
-        raise SystemExit("usage: webdav-removal-mock.py PORT_FILE LOG_FILE")
+    if len(sys.argv) not in (3, 4):
+        raise SystemExit(
+            "usage: webdav-removal-mock.py PORT_FILE LOG_FILE [head]"
+        )
 
     port_path = pathlib.Path(sys.argv[1])
     log_path = pathlib.Path(sys.argv[2])
     log_path.touch()
 
-    server = http.server.HTTPServer(("127.0.0.1", 0), WebDAVHandler)
+    server = WebDAVServer(("127.0.0.1", 0), WebDAVHandler)
     server.log_path = log_path
+    server.head_only = len(sys.argv) == 4 and sys.argv[3] == "head"
     port_path.write_text(str(server.server_port), encoding="ascii")
     server.serve_forever()
 

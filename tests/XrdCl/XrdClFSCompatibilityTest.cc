@@ -10,6 +10,7 @@
 //------------------------------------------------------------------------------
 
 #include "XrdCl/XrdClFSCompatibility.hh"
+#include "XProtocol/XProtocol.hh"
 
 #include <gtest/gtest.h>
 
@@ -123,4 +124,37 @@ TEST( XrdClFSCompatibility, MapsGFALDiskAndTapeStatus )
   EXPECT_STREQ( XrdCl::GetGFALFileStatus( false, true ),
                 "ONLINE_AND_NEARLINE" );
   EXPECT_STREQ( XrdCl::GetGFALFileStatus( true, false ), "UNKNOWN" );
+}
+
+TEST( XrdClFSCompatibility, FormatsGFALXAttrFailuresWithoutServerDetails )
+{
+  const XrdCl::XRootDStatus status(
+    XrdCl::stError, XrdCl::errErrorResponse, kXR_Unsupported,
+    "Unable to query xattrs.\n/eos/pilot/private/path" );
+
+  EXPECT_EQ( XrdCl::FormatGFALXAttrFailure( "xroot.xattr", status ),
+             "Failed to get the xattr \"xroot.xattr\" "
+             "(Operation not supported)" );
+}
+
+TEST( XrdClFSCompatibility, FormatsGFALXAttrFailuresWithoutErrno )
+{
+  const XrdCl::XRootDStatus status(
+    XrdCl::stError, XrdCl::errNotSupported, 0,
+    "Protocol-specific detail" );
+
+  EXPECT_EQ( XrdCl::FormatGFALXAttrFailure( "xroot.xattr", status ),
+             "Failed to get the xattr \"xroot.xattr\" "
+             "(Operation not supported)" );
+}
+
+TEST( XrdClFSCompatibility, FormatsMissingXAttrsPortably )
+{
+  const XrdCl::XRootDStatus status(
+    XrdCl::stError, XrdCl::errErrorResponse, kXR_AttrNotFound,
+    "Attribute not found" );
+
+  EXPECT_EQ( XrdCl::FormatGFALXAttrFailure( "user.missing", status ),
+             "Failed to get the xattr \"user.missing\" "
+             "(No data available)" );
 }

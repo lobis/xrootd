@@ -439,6 +439,17 @@ TEST(TapeRestApi, RejectsArchiveInfoAcrossStorageEndpoints)
   EXPECT_FALSE(operation.Start(request).IsOK());
 }
 
+TEST(TapeRestApi, RejectsArchiveInfoOutsideStorageEndpoint)
+{
+  XrdCl::Buffer arg;
+  arg.FromString("tape.archiveinfo\n"
+    "https://other.example.org/store/file");
+  XrdClHttp::TapeOperation operation(
+    kStorageUrl, XrdCl::QueryCode::Opaque, arg);
+  XrdClHttp::TapeHttpRequest request;
+  EXPECT_FALSE(operation.Start(request).IsOK());
+}
+
 TEST(TapeRestApi, RejectsAmbiguousPrepareFlags)
 {
   XrdClHttp::TapeOperation mixed(kStorageUrl, {"/store/file"},

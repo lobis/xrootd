@@ -27,6 +27,7 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <ctime>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -89,6 +90,10 @@ std::string_view ltrim_view(const std::string_view &input_view);
 // Trim the left and right side of a string_view of whitespace
 std::string_view trim_view(const std::string_view &input_view);
 
+// Parse an HTTP date using libcurl's supported formats.  Missing or malformed
+// dates fall back to the current time.
+time_t ParseHttpDate(std::string_view value);
+
 // Apply the common XrdClHttp configuration to a curl handle.
 void ConfigureHandle(CURL *curl, bool verbose);
 
@@ -148,6 +153,7 @@ public:
     const std::string &GetLocation() const {return m_location;}
     const std::string &GetETag() const {return m_etag;}
     const std::string &GetCacheControl() const {return m_cache_control;}
+    const std::string &GetLastModified() const {return m_last_modified;}
 
     // Returns a reference to the checksums parsed from the headers.
     const XrdClHttp::ChecksumInfo &GetChecksums() const {return m_checksums;}
@@ -183,6 +189,7 @@ private:
     std::string m_multipart_sep;
     std::string m_etag;
     std::string m_cache_control;
+    std::string m_last_modified;
 
     ResponseInfo::HeaderMap m_headers;
 

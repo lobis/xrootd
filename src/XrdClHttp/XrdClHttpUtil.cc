@@ -151,6 +151,16 @@ bool XrdClHttp::HTTPStatusIsError(unsigned status) {
      return (status < 100) || (status >= 400);
 }
 
+time_t XrdClHttp::ParseHttpDate(std::string_view value)
+{
+    if (!value.empty()) {
+        const std::string date(value);
+        const auto parsed = curl_getdate(date.c_str(), nullptr);
+        if (parsed != -1) return parsed;
+    }
+    return time(NULL);
+}
+
 bool XrdClHttp::ClientX509Enabled(XrdCl::Env *env) {
     if (!env) return false;
     int disable_x509 = 0;
@@ -552,6 +562,10 @@ bool HeaderParser::Parse(const std::string &header_line)
     else if (header_name == "Cache-Control")
     {
         m_cache_control = header_value;
+    }
+    else if (header_name == "Last-Modified")
+    {
+        m_last_modified = header_value;
     }
 
     return true;
