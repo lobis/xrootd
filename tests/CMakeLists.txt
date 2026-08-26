@@ -4,6 +4,10 @@ endif()
 
 include(GoogleTest)
 
+# Keep the headers paired with the bundled GoogleTest libraries ahead of any
+# system installation exposed by another dependency's include path.
+include_directories(BEFORE SYSTEM "${gtest_SOURCE_DIR}/include")
+
 add_subdirectory(unit)
 
 add_subdirectory(common)
