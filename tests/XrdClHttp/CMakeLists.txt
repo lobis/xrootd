@@ -28,12 +28,14 @@ add_executable(xrdcl-http-unit-tests
   HeaderParserTest.cc
   ParseTimeoutTest.cc
   TapeTest.cc
+  WebDavParserTest.cc
 )
 
 target_link_libraries(xrdcl-http-unit-tests
-  XrdClHttpTesting XrdCl CURL::libcurl GTest::gtest_main)
+  XrdClHttpTesting XrdCl XrdXml CURL::libcurl GTest::gtest_main)
 target_include_directories(xrdcl-http-unit-tests
-  PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../src")
+  PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../src"
+)
 
 gtest_discover_tests(xrdcl-http-unit-tests TEST_PREFIX XrdClHttp::
   PROPERTIES DISCOVERY_TIMEOUT 10)
@@ -68,7 +70,6 @@ add_executable(xrdcl-http-test
   CopyTest.cc
   HandlerQueueTest.cc
   VectorReadTest.cc
-  WebDavParserTest.cc
 )
 
 target_link_libraries(xrdcl-test XrdClHttpTransferTest GTest::gtest_main)

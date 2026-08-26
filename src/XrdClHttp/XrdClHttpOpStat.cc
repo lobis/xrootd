@@ -21,25 +21,17 @@
 #include "XrdClHttpOps.hh"
 #include "XrdClHttpResponses.hh"
 #include "XrdClHttpUtil.hh"
+#include "XrdClHttpWebDav.hh"
 
 #include <XrdCl/XrdClLog.hh>
 
 #include <tinyxml.h>
 
 #include <algorithm>
-#include <cstring>
 
 using namespace XrdClHttp;
 
 namespace {
-
-bool ElementNameEquals(const TiXmlElement *element, const char *expected)
-{
-    if (!element || !element->Value()) return false;
-    const char *name = element->Value();
-    const char *separator = std::strrchr(name, ':');
-    return !strcasecmp(separator ? separator + 1 : name, expected);
-}
 
 void SetDepthHeader(
     std::vector<std::pair<std::string, std::string>> &headers,
@@ -162,38 +154,6 @@ CurlStatOp::WriteCallback(char *buffer, size_t size, size_t nitems, void *this_p
 }
 
 std::pair<int64_t, bool>
-CurlStatOp::ParseProp(TiXmlElement *prop) {
-    if (prop == nullptr) {
-        return {-1, false};
-    }
-    for (auto child = prop->FirstChildElement(); child != nullptr; child = child->NextSiblingElement()) {
-        if (ElementNameEquals(child, "getcontentlength")) {
-            auto len = child->GetText();
-            if (len) {
-                m_length = std::stoll(len);
-            }
-        } else if (ElementNameEquals(child, "resourcetype")) {
-            m_is_dir = false;
-            for (auto type = child->FirstChildElement(); type != nullptr;
-                 type = type->NextSiblingElement()) {
-                if (ElementNameEquals(type, "collection")) {
-                    m_is_dir = true;
-                    break;
-                }
-            }
-        } else if (ElementNameEquals(child, "getlastmodified")) {
-            auto last_modified = child->GetText();
-            if (last_modified) m_last_modified = last_modified;
-        }
-    }
-    if (m_length < 0 && m_is_dir) {
-        // Don't require length for directories; fake it as zero
-        m_length = 0;
-    }
-    return {m_length, m_is_dir};
-}
-
-std::pair<int64_t, bool>
 CurlStatOp::GetStatInfo() {
     if (!m_is_propfind) {
         m_length = m_headers.GetContentLength();
@@ -211,13 +171,13 @@ CurlStatOp::GetStatInfo() {
     }
 
     auto elem = doc.RootElement();
-    if (!ElementNameEquals(elem, "multistatus")) {
+    if (!WebDavElementNameEquals(elem, "multistatus")) {
         m_logger->Error(kLogXrdClHttp, "Unexpected XML response: %s", m_response.substr(0, 1024).c_str());
         return {-1, false};
     }
     auto found_response = false;
     for (auto response = elem->FirstChildElement(); response != nullptr; response = response->NextSiblingElement()) {
-        if (ElementNameEquals(response, "response")) {
+        if (WebDavElementNameEquals(response, "response")) {
             found_response = true;
             elem = response;
             break;
@@ -228,12 +188,19 @@ CurlStatOp::GetStatInfo() {
         return {-1, false};
     }
     for (auto child = elem->FirstChildElement(); child != nullptr; child = child->NextSiblingElement()) {
-        if (!ElementNameEquals(child, "propstat")) {
+        if (!WebDavElementNameEquals(child, "propstat")) {
             continue;
         }
         for (auto prop = child->FirstChildElement(); prop != nullptr; prop = prop->NextSiblingElement()) {
-            if (ElementNameEquals(prop, "prop")) {
-                return ParseProp(prop);
+            if (WebDavElementNameEquals(prop, "prop")) {
+                WebDavProperties properties;
+                if (!ParseWebDavProperties(prop, properties)) {
+                    return {-1, false};
+                }
+                m_length = properties.m_size;
+                m_is_dir = properties.m_is_dir;
+                m_last_modified = std::move(properties.m_last_modified);
+                return {m_length, m_is_dir};
             }
         }
     }

@@ -21,27 +21,14 @@
 #include "XrdClHttpOps.hh"
 #include "XrdClHttpResponses.hh"
 #include "XrdClHttpUtil.hh"
+#include "XrdClHttpWebDav.hh"
 
 #include <XrdCl/XrdClLog.hh>
 #include <XrdCl/XrdClXRootDResponses.hh>
 
 #include <tinyxml.h>
 
-#include <cstring>
-
 using namespace XrdClHttp;
-
-namespace {
-
-bool ElementNameEquals(const TiXmlElement *element, const char *expected)
-{
-    if (!element || !element->Value()) return false;
-    const char *name = element->Value();
-    const char *separator = std::strrchr(name, ':');
-    return !strcasecmp(separator ? separator + 1 : name, expected);
-}
-
-}
 
 CurlListdirOp::CurlListdirOp(XrdCl::ResponseHandler *handler,
     const std::string &url, const std::string &parent,
@@ -91,59 +78,13 @@ CurlListdirOp::WriteCallback(char *buffer, size_t size, size_t nitems, void *thi
     return size * nitems;
 }
 
-bool CurlListdirOp::ParseProp(DavEntry &entry, TiXmlElement *prop)
-{
-    for (auto child = prop->FirstChildElement(); child != nullptr; child = child->NextSiblingElement()) {
-        if (ElementNameEquals(child, "resourcetype")) {
-            entry.m_isdir = false;
-            for (auto type = child->FirstChildElement(); type != nullptr;
-                 type = type->NextSiblingElement()) {
-                if (ElementNameEquals(type, "collection")) {
-                    entry.m_isdir = true;
-                    break;
-                }
-            }
-            if (entry.m_isdir && entry.m_size < 0) {
-                entry.m_size = 0;
-            }
-        } else if (ElementNameEquals(child, "getcontentlength")) {
-            auto size = child->GetText();
-            if (size != nullptr) {
-                try {
-                    entry.m_size = std::stoll(size);
-                } catch (std::invalid_argument &e) {
-                    return false;
-                }
-            }
-        } else if (ElementNameEquals(child, "getlastmodified")) {
-            auto lastmod = child->GetText();
-            if (lastmod) entry.m_lastmodified = lastmod;
-        } else if (ElementNameEquals(child, "href")) {
-            auto href = child->GetText();
-            if (href == nullptr) {
-                return false;
-            }
-            entry.m_name = href;
-        } else if (ElementNameEquals(child, "executable")) {
-            auto val = child->GetText();
-            if (val == nullptr) {
-                return false;
-            }
-            if (strcasecmp(val, "T") == 0) {
-                entry.m_isexec = true;
-            }
-        }
-    }
-    return true;    
-}
-
 std::pair<CurlListdirOp::DavEntry, bool>
 CurlListdirOp::ParseResponse(TiXmlElement *response)
 {
     DavEntry entry;
     bool success = false;
     for (auto child = response->FirstChildElement(); child != nullptr; child = child->NextSiblingElement()) {
-        if (ElementNameEquals(child, "href")) {
+        if (WebDavElementNameEquals(child, "href")) {
             auto href = child->GetText();
             if (href == nullptr) {
                 return {entry, false};
@@ -163,17 +104,22 @@ CurlListdirOp::ParseResponse(TiXmlElement *response)
             }
             continue;
         }
-        if (!ElementNameEquals(child, "propstat")) {
+        if (!WebDavElementNameEquals(child, "propstat")) {
             continue;
         }
         for (auto propstat = child->FirstChildElement(); propstat != nullptr; propstat = propstat->NextSiblingElement()) {
-            if (!ElementNameEquals(propstat, "prop")) {
+            if (!WebDavElementNameEquals(propstat, "prop")) {
                 continue;
             }
-            success = ParseProp(entry, propstat);
+            WebDavProperties properties;
+            success = ParseWebDavProperties(propstat, properties);
             if (!success) {
                 return {entry, success};
             }
+            entry.m_isdir = properties.m_is_dir;
+            entry.m_isexec = properties.m_is_executable;
+            entry.m_size = properties.m_size;
+            entry.m_lastmodified = std::move(properties.m_last_modified);
         }
     }
     return {entry, success};
@@ -197,14 +143,14 @@ CurlListdirOp::Success()
     }
 
     auto elem = doc.RootElement();
-    if (!ElementNameEquals(elem, "multistatus")) {
+    if (!WebDavElementNameEquals(elem, "multistatus")) {
         m_logger->Error(kLogXrdClHttp, "Unexpected XML response: %s", m_response.substr(0, 1024).c_str());
         Fail(XrdCl::errErrorResponse, kXR_FSError, "Server responded to directory listing unexpected XML root");
         return;
     }
     bool skip = true;
     for (auto response = elem->FirstChildElement(); response != nullptr; response = response->NextSiblingElement()) {
-        if (!ElementNameEquals(response, "response")) {
+        if (!WebDavElementNameEquals(response, "response")) {
             continue;
         }
 
