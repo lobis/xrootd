@@ -291,6 +291,10 @@ public:
 
 protected:
 
+    // Some Tape REST deployments emit malformed extension field names.  Only
+    // those operations opt out of the otherwise strict response parsing.
+    virtual bool IgnoreInvalidResponseFieldNames() const {return false;}
+
     // Prepare the current easy handle for another HTTP request in a
     // multi-step operation.  The operation deadline and response handler are
     // preserved while per-request curl, header, and callout state is reset.
@@ -645,6 +649,7 @@ protected:
         HeaderCallout *header_callout);
 
 private:
+    bool IgnoreInvalidResponseFieldNames() const override {return true;}
     bool ConfigureRequest();
     void Complete(const std::string &response);
     std::string RequestDescription() const;

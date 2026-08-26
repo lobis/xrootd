@@ -411,7 +411,8 @@ bool HeaderParser::Base64Decode(
 // Curl promises for its callbacks "The header callback is
 // called once for each header and only complete header lines
 // are passed on to the callback".
-bool HeaderParser::Parse(const std::string &header_line)
+bool HeaderParser::Parse(const std::string &header_line,
+                         bool ignoreInvalidFieldNames)
 {
     if (m_recv_all_headers) {
         m_recv_all_headers = false;
@@ -456,7 +457,7 @@ bool HeaderParser::Parse(const std::string &header_line)
 
     std::string header_name = header_line.substr(0, found);
     if (!Canonicalize(header_name)) {
-        return false;
+        return ignoreInvalidFieldNames;
     }
 
     found += 1;

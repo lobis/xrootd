@@ -108,7 +108,8 @@ class HeaderParser {
 public:
     HeaderParser() {}
 
-    bool Parse(const std::string &headers);
+    bool Parse(const std::string &headers,
+               bool ignoreInvalidFieldNames = false);
 
     int64_t GetContentLength() const {return m_content_length;}
 

@@ -66,6 +66,27 @@ TEST(HeaderParser, RejectsInvalidResponseFieldNames)
   EXPECT_FALSE(parser.Parse("application/type: json\r\n"));
 }
 
+TEST(HeaderParser, CanSkipInvalidResponseFieldNames)
+{
+  XrdClHttp::HeaderParser parser;
+  EXPECT_TRUE(parser.Parse("HTTP/1.1 200 OK\r\n"));
+  EXPECT_TRUE(parser.Parse("application/type: json\r\n", true));
+  EXPECT_TRUE(parser.Parse("Content-Type: application/json\r\n"));
+  EXPECT_TRUE(parser.Parse("Content-Length: 2\r\n"));
+  EXPECT_TRUE(parser.Parse("\r\n"));
+
+  EXPECT_TRUE(parser.HeadersDone());
+  EXPECT_EQ(parser.GetStatusCode(), 200);
+  EXPECT_EQ(parser.GetContentLength(), 2);
+
+  auto headers = parser.MoveHeaders();
+  EXPECT_EQ(headers.count("application/type"), 0u);
+  const auto contentType = headers.find("Content-Type");
+  ASSERT_NE(contentType, headers.end());
+  ASSERT_EQ(contentType->second.size(), 1u);
+  EXPECT_EQ(contentType->second.front(), "application/json");
+}
+
 TEST(HeaderParser, ParsesSupportedDigestAlgorithms)
 {
   XrdClHttp::ChecksumInfo checksums;
