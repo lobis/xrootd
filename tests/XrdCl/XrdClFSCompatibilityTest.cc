@@ -126,6 +126,15 @@ TEST( XrdClFSCompatibility, MapsGFALDiskAndTapeStatus )
   EXPECT_STREQ( XrdCl::GetGFALFileStatus( true, false ), "UNKNOWN" );
 }
 
+TEST( XrdClFSCompatibility, MapsGFALTapeRestLocality )
+{
+  EXPECT_STREQ( XrdCl::GetGFALTapeFileStatus( "DISK" ), "ONLINE" );
+  EXPECT_STREQ( XrdCl::GetGFALTapeFileStatus( "TAPE" ), "NEARLINE" );
+  EXPECT_STREQ( XrdCl::GetGFALTapeFileStatus( "DISK_AND_TAPE" ),
+                "ONLINE_AND_NEARLINE" );
+  EXPECT_EQ( XrdCl::GetGFALTapeFileStatus( "UNAVAILABLE" ), nullptr );
+}
+
 TEST( XrdClFSCompatibility, FormatsGFALXAttrFailuresWithoutServerDetails )
 {
   const XrdCl::XRootDStatus status(

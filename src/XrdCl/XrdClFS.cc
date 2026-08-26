@@ -3230,7 +3230,106 @@ bool IsGFALVirtualXAttr( const std::string &attribute )
   return attribute.compare( 0, checksumPrefix.size(), checksumPrefix ) == 0 ||
          attribute == "xroot.cksum" || attribute == "xroot.space" ||
          attribute == "xroot.xattr" || attribute == "spacetoken" ||
-         attribute == "user.status";
+         attribute == "user.status" ||
+         attribute == "taperestapi.version" ||
+         attribute == "taperestapi.uri" ||
+         attribute == "taperestapi.sitename";
+}
+
+namespace
+{
+  bool UsesWebDAVProtocol( Env *env )
+  {
+    std::string server;
+    env->GetString( "ServerURL", server );
+    return IsWebDAVProtocol( URL( server ).GetProtocol() );
+  }
+
+  XRootDStatus QueryTapeJson( FileSystem             *fs,
+                              const std::string      &request,
+                              nlohmann::json         &response )
+  {
+    std::string rawResponse;
+    XRootDStatus status = QueryText(
+      fs, QueryCode::Opaque, request, rawResponse );
+    if( !status.IsOK() ) return status;
+
+    response = nlohmann::json::parse( rawResponse, nullptr, false );
+    if( response.is_discarded() )
+      return XRootDStatus( stError, errInvalidResponse, 0,
+                           "Tape REST query returned malformed JSON." );
+    return XRootDStatus();
+  }
+
+  XRootDStatus ReadTapeDiscoveryAttribute( const nlohmann::json &discovery,
+                                           const std::string    &attribute,
+                                           std::string          &value )
+  {
+    static const std::string prefix = "taperestapi.";
+    const std::string field = attribute.substr( prefix.size() );
+    if( !discovery.is_object() || !discovery.contains( field ) ||
+        !discovery[field].is_string() )
+      return XRootDStatus( stError, errInvalidResponse, 0,
+                           "Tape REST discovery attribute is missing: " +
+                           field );
+    value = discovery[field].get<std::string>();
+    return XRootDStatus();
+  }
+
+  XRootDStatus GetTapeDiscoveryAttribute( FileSystem        *fs,
+                                          const std::string &attribute,
+                                          std::string       &value )
+  {
+    nlohmann::json discovery;
+    XRootDStatus status = QueryTapeJson(
+      fs, "tape.discover", discovery );
+    if( !status.IsOK() ) return status;
+    return ReadTapeDiscoveryAttribute( discovery, attribute, value );
+  }
+
+  XRootDStatus GetTapeFileStatus( FileSystem        *fs,
+                                  Env               *env,
+                                  const std::string &path,
+                                  std::string       &value )
+  {
+    std::string server;
+    env->GetString( "ServerURL", server );
+    URL fileUrl( server );
+    SetEndpointPath( fileUrl, path );
+
+    nlohmann::json archiveInfo;
+    XRootDStatus status = QueryTapeJson(
+      fs, "tape.archiveinfo\n" + fileUrl.GetURL(), archiveInfo );
+    if( !status.IsOK() ) return status;
+    if( !archiveInfo.is_array() )
+      return XRootDStatus( stError, errInvalidResponse, 0,
+                           "Tape REST archive info is not an array." );
+
+    for( const auto &entry : archiveInfo )
+    {
+      if( !entry.is_object() ||
+          (entry.value( "url", "" ) != fileUrl.GetURL() &&
+           entry.value( "path", "" ) != path ) )
+        continue;
+      if( entry.contains( "error" ) && entry["error"].is_string() )
+        return XRootDStatus( stError, errErrorResponse, kXR_NotFound,
+                             entry["error"].get<std::string>() );
+      if( !entry.contains( "locality" ) || !entry["locality"].is_string() )
+        return XRootDStatus( stError, errInvalidResponse, 0,
+                             "Tape REST locality is missing." );
+
+      const std::string locality = entry["locality"].get<std::string>();
+      const char *fileStatus = GetGFALTapeFileStatus( locality );
+      if( !fileStatus )
+        return XRootDStatus( stError, errInvalidResponse, 0,
+                             "Unsupported Tape REST locality: " + locality );
+      value = fileStatus;
+      return XRootDStatus();
+    }
+
+    return XRootDStatus( stError, errInvalidResponse, 0,
+                         "Tape REST archive info omitted the requested path." );
+  }
 }
 
 //------------------------------------------------------------------------------
@@ -3263,6 +3362,7 @@ XRootDStatus GetGFALVirtualXAttr( FileSystem        *fs,
                                  std::string       &value )
 {
   static const std::string checksumPrefix = "user.checksum.";
+  static const std::string tapePrefix = "taperestapi.";
   const bool isXRootD = IsXRootDProtocol( env );
 
   if( attribute.compare( 0, checksumPrefix.size(), checksumPrefix ) == 0 )
@@ -3281,6 +3381,13 @@ XRootDStatus GetGFALVirtualXAttr( FileSystem        *fs,
 
   if( !isXRootD )
   {
+    if( UsesWebDAVProtocol( env ) )
+    {
+      if( attribute.compare( 0, tapePrefix.size(), tapePrefix ) == 0 )
+        return GetTapeDiscoveryAttribute( fs, attribute, value );
+      if( attribute == "user.status" )
+        return GetTapeFileStatus( fs, env, path, value );
+    }
     return XRootDStatus(
       stError, errNotSupported, 0,
       "GFAL virtual attribute is not available for this protocol: " +
@@ -3413,17 +3520,39 @@ XRootDStatus DoXAttr( FileSystem                      *fs,
 
   if( implicitList )
   {
-    if( !IsXRootDProtocol( env ) )
+    const bool isXRootD = IsXRootDProtocol( env );
+    const bool isWebDAV = UsesWebDAVProtocol( env );
+    if( !isXRootD && !isWebDAV )
     {
       log->Error( AppMsg,
                   "Virtual attribute listing is not available for this protocol." );
       return XRootDStatus( stError, errNotSupported );
     }
 
-    static const char *attributes[] = {
+    static const char *xrootdAttributes[] = {
       "xroot.cksum", "xroot.space", "xroot.xattr", "spacetoken"
     };
-    for( const char *attribute : attributes )
+    static const char *tapeAttributes[] = {
+      "taperestapi.version", "taperestapi.uri", "taperestapi.sitename"
+    };
+
+    if( isWebDAV )
+    {
+      nlohmann::json discovery;
+      XRootDStatus status = QueryTapeJson(
+        fs, "tape.discover", discovery );
+      if( !status.IsOK() ) return status;
+      for( const char *attribute : tapeAttributes )
+      {
+        std::string value;
+        status = ReadTapeDiscoveryAttribute( discovery, attribute, value );
+        if( !status.IsOK() ) return status;
+        std::cout << attribute << " = " << value << '\n';
+      }
+      return XRootDStatus();
+    }
+
+    for( const char *attribute : xrootdAttributes )
     {
       std::string value;
       XRootDStatus status = GetGFALVirtualXAttr(

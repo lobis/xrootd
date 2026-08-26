@@ -430,11 +430,13 @@ ONLINE, NEARLINE, ONLINE_AND_NEARLINE, or UNKNOWN values. An unrecognized
 single attribute name falls back to the native XRootD get operation and prints
 the raw value.
 .br
-The bare virtual list and the XRootD-specific virtual names are available for
-XRootD protocols. The checksum virtual attribute can also be used through a
-different protocol plugin when that plugin implements checksum queries.
-HTTP(S) Tape REST virtual attributes exposed by XrdClHttp are separate and are
-not part of this shorthand.
+The XRootD-specific virtual names are available for XRootD protocols. For
+HTTP(S) and WebDAV URLs, the bare virtual list instead reports the discovered
+\fItaperestapi.version\fR, \fItaperestapi.uri\fR, and
+\fItaperestapi.sitename\fR values. On those protocols, \fIuser.status\fR queries
+Tape REST archive locality and maps it to the same GFAL status values. The
+checksum virtual attribute can also be used through a different protocol plugin
+when that plugin implements checksum queries.
 .br
 Use \fI--\fR before a virtual attribute name that would otherwise be parsed as
 an explicit code.

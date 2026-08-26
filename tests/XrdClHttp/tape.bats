@@ -132,6 +132,25 @@ bats::on_failure() {
   assert_output --partial '"locality"'
 }
 
+@test "xrdfs exposes GFAL Tape REST virtual attributes" {
+  run "$XRDFS_BIN" xattr "$TAPE_FILE_URL"
+  assert_success
+  assert_line "taperestapi.version = v1"
+  assert_line "taperestapi.uri = $ORIGIN_URL/api/v1"
+  assert_line "taperestapi.sitename = XRootD Tape Test"
+
+  run "$XRDFS_BIN" xattr "$TAPE_FILE_URL" taperestapi.version
+  assert_success
+  assert_output "v1"
+
+  run "$XRDFS_BIN" xattr "$TAPE_FILE_URL" user.status
+  assert_success
+  if [[ "$output" != "NEARLINE" &&
+        "$output" != "ONLINE_AND_NEARLINE" ]]; then
+    fail "unexpected GFAL tape status: $output"
+  fi
+}
+
 @test "xrdfs rejects unsupported Tape REST prepare flags" {
   run "$XRDFS_BIN" prepare -s -w "$TAPE_FILE_URL"
   assert_failure
