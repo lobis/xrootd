@@ -23,9 +23,12 @@
 #-------------------------------------------------------------------------------
 from __future__ import absolute_import, division, print_function
 
+import os
+
 from pyxrootd import client
 from XRootD.client.url import URL
 from XRootD.client.responses import XRootDStatus
+from XRootD.client.flags import DirListFlags, StatInfoFlags
 from .env import EnvGetInt, EnvGetString
 
 class ProgressHandlerWrapper(object):
@@ -94,7 +97,8 @@ class CopyProcess(object):
               xrate           = 0,
               retry           = EnvGetInt('CpRetry'),
               cont            = False,
-              rtrplc          = EnvGetString('CpRetryPolicy') ):
+              rtrplc          = EnvGetString('CpRetryPolicy'),
+              recursive       = False ):
     """Add a job to the copy process.
 
     :param         source: original source URL
@@ -145,7 +149,76 @@ class CopyProcess(object):
     :type      cont: boolean
     :param     rtrplc: the retry polic (force or continue)
     :type      rtrplc: string
+    :param  recursive: recursively enumerate a source directory and preserve
+                       its hierarchy below the target
+    :type   recursive: boolean
     """
+    if recursive:
+      source_url = URL(source)
+      relative_files = None
+      source_protocol = source_url.protocol.lower()
+      if source_protocol == 'file' and os.path.isdir(source_url.path):
+        relative_files = []
+        for directory, _, filenames in os.walk(source_url.path):
+          relative_directory = os.path.relpath(directory, source_url.path)
+          for filename in filenames:
+            if relative_directory == '.':
+              relative_files.append(filename)
+            else:
+              relative_files.append(
+                os.path.join(relative_directory, filename))
+      elif source_protocol != 'file':
+        from XRootD.client.filesystem import FileSystem
+
+        filesystem = FileSystem('%s://%s' % (source_url.protocol,
+                                             source_url.hostid))
+        status, info = filesystem.stat(source_url.path_with_params)
+        status.raise_on_error()
+        if info.flags & StatInfoFlags.IS_DIR:
+          relative_files = []
+          flags = DirListFlags.STAT | DirListFlags.RECURSIVE | \
+                  DirListFlags.MERGE
+          status, listing = filesystem.dirlist(source_url.path_with_params,
+                                               flags)
+          status.raise_on_error()
+          for entry in listing:
+            if entry.statinfo and not (
+                entry.statinfo.flags & StatInfoFlags.IS_DIR):
+              relative_files.append(entry.name)
+
+      if relative_files is not None:
+        source_name = source_url.path.rstrip('/').rsplit('/', 1)[-1]
+        if not source_name:
+          raise ValueError('recursive source must name a directory')
+        source_base = str(source_url).rstrip('/')
+        target_base = target.rstrip('/') + '/' + source_name
+        for relative_path in relative_files:
+          self.add_job(
+            source=source_base + '/' + relative_path,
+            target=target_base + '/' + relative_path,
+            sourcelimit=sourcelimit,
+            force=force,
+            posc=posc,
+            coerce=coerce,
+            mkdir=True,
+            thirdparty=thirdparty,
+            checksummode=checksummode,
+            checksumtype=checksumtype,
+            checksumpreset=checksumpreset,
+            dynamicsource=dynamicsource,
+            chunksize=chunksize,
+            parallelchunks=parallelchunks,
+            inittimeout=inittimeout,
+            tpctimeout=tpctimeout,
+            rmBadCksum=rmBadCksum,
+            cptimeout=cptimeout,
+            xrateThreshold=xrateThreshold,
+            xrate=xrate,
+            retry=retry,
+            cont=cont,
+            rtrplc=rtrplc)
+        return
+
     self.__process.add_job(source, target, sourcelimit, force, posc,
                            coerce, mkdir, thirdparty, checksummode, checksumtype,
                            checksumpreset, dynamicsource, chunksize, parallelchunks, inittimeout,

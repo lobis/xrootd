@@ -1,3 +1,7 @@
+import os
+import shutil
+import tempfile
+
 from XRootD import client
 from XRootD.client.flags import OpenFlags
 from env import *
@@ -69,6 +73,37 @@ def test_copy_noprep():
   c.add_job(source=bigfile, target=bigcopy, force=True)
   s, __ = c.run()
   assert s.ok
+
+def test_recursive_copy():
+  root = tempfile.mkdtemp(prefix='pyxrootd-recursive-')
+  try:
+    source = os.path.join(root, 'source')
+    nested = os.path.join(source, 'nested')
+    target = os.path.join(root, 'target')
+    os.makedirs(nested)
+    os.makedirs(target)
+    with open(os.path.join(source, 'one.txt'), 'wb') as output:
+      output.write(b'one')
+    with open(os.path.join(nested, 'two.txt'), 'wb') as output:
+      output.write(b'two')
+
+    process = client.CopyProcess()
+    process.add_job('file://' + source, 'file://' + target,
+                    recursive=True)
+    status = process.prepare()
+    assert status.ok
+    status, results = process.run()
+    assert status.ok
+    assert len(results) == 2
+    assert all(result['status'].ok for result in results)
+
+    copied = os.path.join(target, 'source')
+    with open(os.path.join(copied, 'one.txt'), 'rb') as copied_file:
+      assert copied_file.read() == b'one'
+    with open(os.path.join(copied, 'nested', 'two.txt'), 'rb') as copied_file:
+      assert copied_file.read() == b'two'
+  finally:
+    shutil.rmtree(root)
 
 class TestProgressHandler(object):
   def begin(self, id, total, source, target):
