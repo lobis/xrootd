@@ -36,6 +36,14 @@ namespace PyXRootD
   }
 
   //----------------------------------------------------------------------------
+  //! Does the URL use a native XRootD protocol
+  //----------------------------------------------------------------------------
+  PyObject* URL::IsXRootD( URL *self )
+  {
+    return PyBool_FromLong( self->url->IsXRootD() );
+  }
+
+  //----------------------------------------------------------------------------
   //! Get the host part of the URL (user:password\@host:port)
   //----------------------------------------------------------------------------
   PyObject* URL::GetHostId( URL *self, void *closure )

@@ -132,3 +132,11 @@ TEST(URLTest, InvalidURLs)
     EXPECT_FALSE(XrdCl::URL(url).IsValid()) << "URL " << url << " is not invalid" << std::endl;
 }
 
+TEST(URLTest, IdentifiesNativeXRootDProtocols)
+{
+  for (const char *protocol : {"root", "roots", "xroot", "xroots", "ROOT"})
+    EXPECT_TRUE(XrdCl::URL(std::string(protocol) + "://example.org//file").IsXRootD());
+
+  for (const char *protocol : {"http", "https", "file"})
+    EXPECT_FALSE(XrdCl::URL(std::string(protocol) + "://example.org/file").IsXRootD());
+}

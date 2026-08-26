@@ -19,6 +19,11 @@ def test_invalid():
   u = client.FileSystem('root://').url
   assert u.is_valid() == False
 
+def test_native_xrootd_protocol():
+  assert client.FileSystem('root://host').url.is_xrootd()
+  assert client.FileSystem('xroots://host').url.is_xrootd()
+  assert not client.FileSystem('https://host').url.is_xrootd()
+
 def test_getters():
   u = client.FileSystem("root://user1:passwd1@host1:123//path?param1=val1&param2=val2").url
   assert u.is_valid()

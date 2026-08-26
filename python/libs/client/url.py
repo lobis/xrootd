@@ -82,6 +82,10 @@ class URL(object):
     """Return the validity of the URL"""
     return self.__url.is_valid()
 
+  def is_xrootd(self):
+    """Return whether this URL uses a native XRootD protocol."""
+    return self.__url.is_xrootd()
+
   def clear(self):
     """Clear the URL"""
     return self.__url.clear()

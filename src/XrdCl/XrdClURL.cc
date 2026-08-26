@@ -452,6 +452,18 @@ namespace XrdCl
     return pProtocol == "file" && pHostName == "localhost";
   }
 
+  bool URL::IsXRootD() const
+  {
+    std::string protocol = pProtocol;
+    std::transform( protocol.begin(), protocol.end(), protocol.begin(),
+                    []( unsigned char character )
+    {
+      return static_cast<char>( std::tolower( character ) );
+    } );
+    return protocol == "root"  || protocol == "roots" ||
+           protocol == "xroot" || protocol == "xroots";
+  }
+
   //------------------------------------------------------------------------
   // Does the protocol indicate encryption
   //------------------------------------------------------------------------

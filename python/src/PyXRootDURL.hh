@@ -38,6 +38,7 @@ namespace PyXRootD
   {
     public:
       static PyObject* IsValid( URL *self );
+      static PyObject* IsXRootD( URL *self );
       static PyObject* GetHostId( URL *self, void *closure );
       static PyObject* GetProtocol( URL *self, void *closure );
       static int SetProtocol( URL *self, PyObject *protocol, void *closure );
@@ -126,6 +127,7 @@ namespace PyXRootD
   //----------------------------------------------------------------------------
   static PyMethodDef URLMethods[] = {
     { "is_valid", (PyCFunction) URL::IsValid, METH_NOARGS, NULL },
+    { "is_xrootd", (PyCFunction) URL::IsXRootD, METH_NOARGS, NULL },
     { "clear",    (PyCFunction) URL::Clear,   METH_NOARGS, NULL },
     { NULL } /* Sentinel */
   };

@@ -722,7 +722,7 @@ namespace PyXRootD
 
     props.Set( "source", source );
     props.Set( "target", "stdio://-" );
-    props.Set( "dynamicSource", true );
+    props.Set( "dynamicSource", XrdCl::URL( source ).IsXRootD() );
 
     XrdCl::XRootDStatus st = process.AddJob( props, &results );
     if( !st.IsOK() )

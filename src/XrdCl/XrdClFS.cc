@@ -3197,15 +3197,7 @@ bool IsXRootDProtocol( Env *env )
 {
   std::string server;
   env->GetString( "ServerURL", server );
-  URL url( server );
-  std::string protocol = url.GetProtocol();
-  std::transform( protocol.begin(), protocol.end(), protocol.begin(),
-                  []( unsigned char character )
-  {
-    return static_cast<char>( std::tolower( character ) );
-  } );
-  return protocol == "root" || protocol == "roots" ||
-         protocol == "xroot" || protocol == "xroots";
+  return URL( server ).IsXRootD();
 }
 
 //------------------------------------------------------------------------------

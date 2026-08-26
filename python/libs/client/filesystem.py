@@ -371,7 +371,13 @@ class FileSystem(object):
     :param path: path to the remote file
     :type  path: string
     """
-    source = self.__fs.url.hostid + '/' + path
+    url = self.__fs.url
+    source = str(url)
+    if not source.endswith('/'):
+      source += '/'
+    if not url.is_xrootd():
+      path = path.lstrip('/')
+    source += path
     return self.__fs.cat(source)
 
   def set_xattr(self, path, attrs, timeout=0, callback=None):
