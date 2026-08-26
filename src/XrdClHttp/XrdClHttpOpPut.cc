@@ -66,6 +66,9 @@ bool
 CurlPutOp::Setup(CURL *curl, CurlWorker &worker)
 {
     m_curl_handle = curl;
+    // Allow redirecting origins to select the data server before libcurl
+    // consumes a streaming upload body which cannot be rewound.
+    m_headers_list.emplace_back("Expect", "100-continue");
     if (!CurlOperation::Setup(curl, worker)) return false;
 
     curl_easy_setopt(m_curl.get(), CURLOPT_UPLOAD, 1);
