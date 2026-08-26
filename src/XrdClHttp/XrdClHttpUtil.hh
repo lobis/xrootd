@@ -84,6 +84,14 @@ bool ShouldUseBearerToken(const std::string &protocols,
                           bool hasX509Credential,
                           bool hasBearerToken);
 
+// Add the configured bearer token to an operation when selected by the
+// XrdSecPROTOCOL preference. Preserve an explicitly supplied Authorization
+// header.
+void AddBearerTokenHeader(
+    std::vector<std::pair<std::string, std::string>> &headers,
+    const std::string &protocols, bool hasX509Credential,
+    const std::string &token);
+
 // Trim the left side of a string_view for space
 std::string_view ltrim_view(const std::string_view &input_view);
 

@@ -86,6 +86,29 @@ TEST(XrdClHttpUtility, SelectsFirstAvailableConfiguredAuthentication)
   EXPECT_FALSE(XrdClHttp::ShouldUseBearerToken("unix", false, true));
 }
 
+TEST(XrdClHttpUtility, AddsSelectedBearerTokenOnce)
+{
+  std::vector<std::pair<std::string, std::string>> headers;
+  XrdClHttp::AddBearerTokenHeader(headers, "", false, "test-token");
+  ASSERT_EQ(headers.size(), 1);
+  EXPECT_EQ(headers[0].first, "Authorization");
+  EXPECT_EQ(headers[0].second, "Bearer test-token");
+
+  XrdClHttp::AddBearerTokenHeader(headers, "ztn", false, "test-token");
+  EXPECT_EQ(headers.size(), 1);
+}
+
+TEST(XrdClHttpUtility, PreservesExplicitAuthorizationHeader)
+{
+  std::vector<std::pair<std::string, std::string>> headers{
+    {"authorization", "Bearer explicit-token"}
+  };
+  XrdClHttp::AddBearerTokenHeader(headers, "", false, "environment-token");
+
+  ASSERT_EQ(headers.size(), 1);
+  EXPECT_EQ(headers[0].second, "Bearer explicit-token");
+}
+
 TEST(XrdClHttpUtility, ReportsClientX509ConfigurationFailure)
 {
   EXPECT_TRUE(XrdClHttp::SetClientX509(nullptr, "", "", nullptr));

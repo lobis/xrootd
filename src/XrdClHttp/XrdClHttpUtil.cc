@@ -240,6 +240,24 @@ bool XrdClHttp::ShouldUseBearerToken(const std::string &protocols,
     return false;
 }
 
+void XrdClHttp::AddBearerTokenHeader(
+    std::vector<std::pair<std::string, std::string>> &headers,
+    const std::string &protocols, bool hasX509Credential,
+    const std::string &token)
+{
+    if (!ShouldUseBearerToken(protocols, hasX509Credential,
+                              !token.empty())) {
+        return;
+    }
+    auto authorization = std::find_if(headers.begin(), headers.end(),
+        [](const auto &header) {
+            return !strcasecmp(header.first.c_str(), "Authorization");
+        });
+    if (authorization == headers.end()) {
+        headers.emplace_back("Authorization", "Bearer " + token);
+    }
+}
+
 std::pair<uint16_t, uint32_t> XrdClHttp::HTTPStatusConvert(unsigned status) {
     switch (status) {
         case 400: // Bad Request

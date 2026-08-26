@@ -32,6 +32,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #ifdef __APPLE__
 #include <stdlib.h>
 #else
@@ -556,10 +557,14 @@ CurlOperation::Setup(CURL *curl, CurlWorker &worker)
 
     m_parsed_url = std::make_unique<XrdCl::URL>(m_request_url);
     auto env = XrdCl::DefaultEnv::GetEnv();
+    auto [cert, key] = worker.ClientX509CertKeyFile();
     if (ClientX509Enabled(env)) {
-        auto [cert, key] = worker.ClientX509CertKeyFile();
         if (!SetClientX509(m_curl.get(), cert, key, m_logger)) return false;
     }
+    const char *configured_protocols = std::getenv("XrdSecPROTOCOL");
+    AddBearerTokenHeader(
+        m_headers_list, configured_protocols ? configured_protocols : "",
+        ClientX509Enabled(env) && !cert.empty(), GetBearerToken());
 
     if (m_conn_callout) {
         ResponseInfo info;

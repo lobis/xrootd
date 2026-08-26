@@ -27,10 +27,7 @@
 #include "XrdClHttpWorker.hh"
 
 #include <XrdCl/XrdClAnyObject.hh>
-#include <XrdCl/XrdClDefaultEnv.hh>
-
 #include <cerrno>
-#include <cstdlib>
 #include <exception>
 #include <stdexcept>
 
@@ -118,22 +115,6 @@ CurlTapeOp::ConfigureRequest()
 
     m_response.clear();
     m_headers_list.emplace_back("Accept", "application/json");
-
-    bool hasX509Credential = false;
-    auto env = XrdCl::DefaultEnv::GetEnv();
-    if(m_worker && ClientX509Enabled(env))
-    {
-        const auto [cert, key] = m_worker->ClientX509CertKeyFile();
-        hasX509Credential = !cert.empty();
-    }
-    const std::string token = GetBearerToken();
-    const char *configuredProtocols = std::getenv("XrdSecPROTOCOL");
-    if(ShouldUseBearerToken(
-         configuredProtocols ? configuredProtocols : "",
-         hasX509Credential, !token.empty()))
-    {
-        m_headers_list.emplace_back("Authorization", "Bearer " + token);
-    }
 
     if(curl_easy_setopt(m_curl.get(), CURLOPT_WRITEFUNCTION,
                         CurlTapeOp::WriteCallback) != CURLE_OK
