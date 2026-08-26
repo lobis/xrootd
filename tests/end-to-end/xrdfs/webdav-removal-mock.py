@@ -54,9 +54,16 @@ class WebDAVHandler(http.server.BaseHTTPRequestHandler):
         self.close_connection = True
 
     def do_OPTIONS(self):
-        self.record()
+        path = self.record()
+        if path == "/":
+            self.respond(404)
+            return
         self.send_response(200)
-        allow = "HEAD" if self.server.head_only else "PROPFIND"
+        allow = (
+            "HEAD"
+            if self.server.head_only or path == "/head-file"
+            else "PROPFIND"
+        )
         self.send_header("Allow", allow)
         self.send_header("Content-Length", "0")
         self.send_header("Connection", "close")

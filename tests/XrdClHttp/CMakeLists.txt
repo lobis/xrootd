@@ -26,6 +26,7 @@ target_link_libraries(XrdClHttpTesting PRIVATE XrdClHttpObj)
 
 add_executable(xrdcl-http-unit-tests
   HeaderParserTest.cc
+  OptionsCacheTest.cc
   ParseTimeoutTest.cc
   TapeTest.cc
   WebDavParserTest.cc

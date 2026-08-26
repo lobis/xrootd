@@ -819,6 +819,32 @@ assert records[0]["checksum"]
     local endpoint=http://127.0.0.1:$(<"$port_file")
     local head_endpoint=http://127.0.0.1:$(<"$head_port_file")
 
+    # The origin root does not advertise WebDAV; capabilities are scoped to
+    # individual resources below it.
+    run curl -sS -o /dev/null -w '%{http_code}' -X OPTIONS "$endpoint/"
+    assert_success
+    assert_output 404
+
+    # Keep both stats in one process so the first OPTIONS result is cached.
+    # The HEAD-only resource must not hide PROPFIND on the second path.
+    run bash -c \
+        'printf "stat /head-file\nstat /file\nexit\n" | \
+            env XRD_PLUGINCONFDIR="$2" "$3" "$1"' \
+        _ "$endpoint" "$plugins" "$XRDFS"
+    assert_success
+    run request_count OPTIONS /head-file "$requests"
+    assert_success
+    assert_output 1
+    run request_count HEAD /head-file "$requests"
+    assert_success
+    assert_output 1
+    run request_count OPTIONS /file "$requests"
+    assert_success
+    assert_output 1
+    run request_count PROPFIND /file "$requests"
+    assert_success
+    assert_output 1
+
     run env XRD_PLUGINCONFDIR="$plugins" \
         "$XRDFS" ls --json -u -d "$endpoint/json-file"
     assert_success
