@@ -72,6 +72,16 @@ bool IsXRootDProtocol( Env *env );
 
 namespace
 {
+  void SetEndpointPath( URL &url, const std::string &path )
+  {
+    // URL stores WebDAV paths without the URI separator, while native XRootD
+    // absolute paths retain their leading slash (root://host//path).
+    if( IsWebDAVProtocol( url.GetProtocol() ) && !path.empty() && path[0] == '/' )
+      url.SetPath( path.substr( 1 ) );
+    else
+      url.SetPath( path );
+  }
+
   struct StatFlagDescriptor
   {
     StatInfo::Flags flag;
@@ -2960,7 +2970,7 @@ XRootDStatus DoCat( FileSystem                      *fs,
       return pathSt;
 
     remoteUrls.emplace_back( server );
-    remoteUrls.back().SetPath( remoteFile );
+    SetEndpointPath( remoteUrls.back(), remoteFile );
   }
 
   //----------------------------------------------------------------------------
@@ -2969,6 +2979,7 @@ XRootDStatus DoCat( FileSystem                      *fs,
   CopyProgressHandler *handler = 0; ProgressDisplay d;
   CopyProcess process;
   std::vector<PropertyList> props( remoteUrls.size() ), results( remoteUrls.size() );
+  const bool dynamicSource = IsXRootDProtocol( env );
 
   for( size_t i = 0; i < remoteUrls.size(); ++i )
   {
@@ -2981,7 +2992,8 @@ XRootDStatus DoCat( FileSystem                      *fs,
     else
       props[i].Set( "target", "stdio://-" );
 
-    props[i].Set( "dynamicSource", true );
+    if( dynamicSource )
+      props[i].Set( "dynamicSource", true );
 
     XRootDStatus st = process.AddJob( props[i], &results[i] );
     if( !st.IsOK() )
@@ -3073,7 +3085,7 @@ XRootDStatus DoTail( FileSystem                      *fs,
     return pathSt;
 
   URL remoteUrl( server );
-  remoteUrl.SetPath( remoteFile );
+  SetEndpointPath( remoteUrl, remoteFile );
 
   //----------------------------------------------------------------------------
   // Fetch the data

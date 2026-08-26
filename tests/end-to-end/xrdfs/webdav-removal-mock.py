@@ -36,7 +36,11 @@ class WebDAVHandler(http.server.BaseHTTPRequestHandler):
         pass
 
     def record(self):
-        request = urllib.parse.urlsplit(self.path)
+        # BaseHTTPRequestHandler normalizes a leading // before exposing
+        # self.path. Inspect the original request target so tests catch invalid
+        # WebDAV URLs such as https://host//path.
+        request_target = self.requestline.split(" ", 2)[1]
+        request = urllib.parse.urlsplit(request_target)
         path = request.path
         with self.server.log_path.open("a", encoding="utf-8") as stream:
             stream.write(f"{self.command} {path} {request.query}\n")
@@ -80,6 +84,27 @@ class WebDAVHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Last-Modified", HEAD_LAST_MODIFIED)
         self.send_header("Connection", "close")
         self.end_headers()
+        self.close_connection = True
+
+    def do_GET(self):
+        path = self.record()
+        if path != "/file":
+            self.respond(404)
+            return
+
+        byte_range = self.headers.get("Range")
+        if byte_range and byte_range != "bytes=0-3":
+            self.respond(400)
+            return
+
+        body = b"data"
+        self.send_response(206 if byte_range else 200)
+        self.send_header("Content-Length", str(len(body)))
+        if byte_range:
+            self.send_header("Content-Range", "bytes 0-3/4")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.wfile.write(body)
         self.close_connection = True
 
     def do_PROPFIND(self):

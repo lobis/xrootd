@@ -846,6 +846,11 @@ assert records[0]["checksum"]
     assert_output 1
 
     run env XRD_PLUGINCONFDIR="$plugins" \
+        "$XRDFS" "$endpoint" cat /file
+    assert_success
+    assert_output data
+
+    run env XRD_PLUGINCONFDIR="$plugins" \
         "$XRDFS" ls --json -u -d "$endpoint/json-file"
     assert_success
     local json_file_output=$output
