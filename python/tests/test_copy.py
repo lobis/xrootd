@@ -3,6 +3,7 @@ import shutil
 import tempfile
 
 from XRootD import client
+import XRootD.client.copyprocess as copyprocess
 from XRootD.client.flags import OpenFlags
 from env import *
 
@@ -104,6 +105,21 @@ def test_recursive_copy():
       assert copied_file.read() == b'two'
   finally:
     shutil.rmtree(root)
+
+def test_copy_options_follow_native_order(monkeypatch):
+  class CapturingCopyProcess(object):
+    def add_job(self, *args):
+      self.args = args
+
+  native_process = CapturingCopyProcess()
+  monkeypatch.setattr(copyprocess.client, 'CopyProcess',
+                      lambda: native_process)
+
+  process = copyprocess.CopyProcess()
+  process.add_job('file:///source', 'file:///target',
+                  cptimeout=11, xrateThreshold=12, xrate=13, retry=14)
+
+  assert native_process.args[17:21] == (11, 12, 13, 14)
 
 class TestProgressHandler(object):
   def begin(self, id, total, source, target):
