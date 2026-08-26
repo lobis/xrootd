@@ -108,13 +108,12 @@ bool CurlListdirOp::ParseProp(DavEntry &entry, TiXmlElement *prop)
             }
         } else if (ElementNameEquals(child, "getcontentlength")) {
             auto size = child->GetText();
-            if (size == nullptr) {
-                return false;
-            }
-            try {
-                entry.m_size = std::stoll(size);
-            } catch (std::invalid_argument &e) {
-                return false;
+            if (size != nullptr) {
+                try {
+                    entry.m_size = std::stoll(size);
+                } catch (std::invalid_argument &e) {
+                    return false;
+                }
             }
         } else if (ElementNameEquals(child, "getlastmodified")) {
             auto lastmod = child->GetText();
