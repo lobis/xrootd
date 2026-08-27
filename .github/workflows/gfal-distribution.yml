@@ -1,0 +1,105 @@
+name: XRootD and gfal distribution
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches:
+      - xrd-cli-gfal-dist
+  workflow_dispatch:
+    inputs:
+      gfal_ref:
+        description: Branch, tag, or commit from lobis/gfal
+        default: xrdfs-epel
+        required: true
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rpm:
+    name: EL${{ matrix.el }} bundle
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - el: 9
+            image: almalinux:9
+          - el: 10
+            image: almalinux:10
+
+    steps:
+      - name: Install Git
+        run: dnf install -y git
+
+      - name: Check out XRootD
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Check out gfal
+        uses: actions/checkout@v6
+        with:
+          repository: lobis/gfal
+          ref: ${{ inputs.gfal_ref || 'xrdfs-epel' }}
+          path: gfal
+          fetch-depth: 0
+
+      - name: Enable EPEL and CRB
+        run: |
+          dnf install -y epel-release dnf-plugins-core
+          dnf config-manager --set-enabled crb
+
+      - name: Build XRootD RPMs
+        run: |
+          dnf install -y createrepo_c rpmdevtools
+          dnf builddep -y xrootd.spec
+          rpmdev-setuptree
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git archive --prefix xrootd/ \
+            -o "$(rpm -E '%{_sourcedir}')/xrootd.tar.gz" HEAD
+          rpmbuild -bb --with git xrootd.spec
+
+      - name: Build dependency-free gfal distributions
+        env:
+          SETUPTOOLS_SCM_PRETEND_VERSION: 0.1.64.dev${{ github.run_number }}
+        working-directory: gfal
+        run: |
+          dnf install -y \
+            make pyproject-rpm-macros python3-build python3-devel \
+            python3-hatch-vcs python3-hatchling rpm-build
+          make rpm
+          python3 scripts/verify_distribution.py
+
+      - name: Install and smoke-test the combined packages
+        run: |
+          dnf install -y "$(rpm -E '%{_rpmdir}')"/*/*.rpm
+          dnf install -y gfal/rpmbuild/RPMS/noarch/python3-gfal-*.rpm
+          tests/post-install.sh
+          gfal --version
+          gfal completion bash >/dev/null
+          xrdfs --help | grep -F 'stat [--json]'
+          xrdfs --help | grep -F 'command-first batch'
+
+      - name: Assemble installable repository
+        run: |
+          mkdir -p "distribution/el${{ matrix.el }}"
+          cp "$(rpm -E '%{_rpmdir}')"/*/*.rpm \
+            "distribution/el${{ matrix.el }}/"
+          cp gfal/rpmbuild/RPMS/noarch/*.rpm \
+            "distribution/el${{ matrix.el }}/"
+          cp gfal/dist/*.whl gfal/dist/*.tar.gz \
+            "distribution/el${{ matrix.el }}/"
+          createrepo_c "distribution/el${{ matrix.el }}"
+
+      - name: Upload repository bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: xrootd-gfal-el${{ matrix.el }}
+          path: distribution/el${{ matrix.el }}
+          retention-days: 14
