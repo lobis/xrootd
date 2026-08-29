@@ -97,7 +97,12 @@ int Load(      char       *eBuff,      int         eBlen,
 {
    XrdSecGetServ_t  ep;
    XrdOucPinLoader *piP;
-   const char *mySecLib = "libXrdSec.so";
+   const char *mySecLib =
+#ifdef XROOTD_PYPI_PLUGIN_PATH
+      XROOTD_PYPI_PLUGIN_PATH "/libXrdSec.so";
+#else
+      "libXrdSec.so";
+#endif
    int rc;
 
 // Check for default path
@@ -137,7 +142,12 @@ int Load(      char       *eBuff,   int             eBlen,
 {
    XrdSecProtector **protPP;
    XrdOucPinLoader *piP;
-   const char *myProtLib = "libXrdSecProt.so";
+   const char *myProtLib =
+#ifdef XROOTD_PYPI_PLUGIN_PATH
+      XROOTD_PYPI_PLUGIN_PATH "/libXrdSecProt.so";
+#else
+      "libXrdSecProt.so";
+#endif
 
 // Check for default path
 //
