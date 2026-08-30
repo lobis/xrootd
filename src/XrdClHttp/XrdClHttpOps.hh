@@ -34,6 +34,7 @@
 #include <atomic>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -290,6 +291,11 @@ public:
     }
 
 protected:
+
+    virtual std::string_view ToleratedInvalidResponseFieldName() const
+    {
+        return {};
+    }
 
     // Prepare the current easy handle for another HTTP request in a
     // multi-step operation.  The operation deadline and response handler are
@@ -638,6 +644,13 @@ protected:
         HeaderCallout *header_callout);
 
 private:
+    std::string_view ToleratedInvalidResponseFieldName() const override
+    {
+        // EOS versions predating EOS-6623 emit application/type instead of
+        // Content-Type for JSON REST responses.
+        return "application/type";
+    }
+
     bool ConfigureRequest();
     void Complete(const std::string &response);
     std::string RequestDescription() const;
