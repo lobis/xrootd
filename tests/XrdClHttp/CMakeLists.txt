@@ -1,17 +1,57 @@
-# XrdClHttp tests depend on scitokens fixture for authentication
-if(NOT BUILD_SCITOKENS)
-  return()
-endif()
+include(GoogleTest)
+
+# Token request and response parsing has no authentication fixture dependency.
+add_executable(xrdcl-http-token-unit-tests
+  TokenTest.cc
+  ${PROJECT_SOURCE_DIR}/src/XrdClHttp/XrdClHttpToken.cc
+)
+
+target_link_libraries(xrdcl-http-token-unit-tests
+  GTest::gtest_main
+)
+
+gtest_discover_tests(xrdcl-http-token-unit-tests
+  TEST_PREFIX XrdClHttp::
+  PROPERTIES DISCOVERY_TIMEOUT 10
+)
 
 # The final shared library has its symbols stripped; we need the symbols available
 # to allow unit tests to access them.  Rather than build the objects twice, we
 # create an internal object library and just link twice -- once stripping the symbols,
 # once without.
+find_package(CURL REQUIRED)
+
 add_library(XrdClHttpTesting SHARED)
 target_link_libraries(XrdClHttpTesting PRIVATE XrdClHttpObj)
 
-include(GoogleTest)
+add_executable(xrdcl-http-unit-tests
+  ClientConfigTest.cc
+  HeaderParserTest.cc
+  ParseTimeoutTest.cc
+  TapeTest.cc
+  WebDavParserTest.cc
+)
 
+target_link_libraries(xrdcl-http-unit-tests
+  XrdClHttpTesting XrdCl XrdXml CURL::libcurl GTest::gtest_main)
+target_include_directories(xrdcl-http-unit-tests
+  PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../src")
+
+gtest_discover_tests(xrdcl-http-unit-tests TEST_PREFIX XrdClHttp::
+  PROPERTIES DISCOVERY_TIMEOUT 10)
+
+add_executable(xrdcl-http-delete-test
+  DeleteMultiStatusTest.cc
+)
+
+target_link_libraries(xrdcl-http-delete-test XrdClHttpTesting XrdTestUtils GTest::gtest_main)
+
+gtest_add_tests(TARGET xrdcl-http-delete-test TEST_LIST CurlDeleteTests)
+
+# XrdClHttp integration tests depend on scitokens fixture for authentication
+if(NOT ENABLE_SERVER_TESTS OR NOT BUILD_SCITOKENS)
+  return()
+endif()
 find_program(OPENSSL_BIN openssl REQUIRED)
 
 # All tests that only depend on the pure XrdCl interfaces and
@@ -20,19 +60,22 @@ add_executable(xrdcl-test
   ChecksumTest.cc
   DeleteTest.cc
   MkcolTest.cc
+  MoveTest.cc
   ReadTest.cc
   WriteTest.cc
 )
 
 # Tests depending on XrdClHttp linkage
 add_executable(xrdcl-http-test
+  ChecksumParserTest.cc
   CopyTest.cc
-  ParseTimeoutTest.cc
+  HandlerQueueTest.cc
+  OptionsCacheTest.cc
   VectorReadTest.cc
 )
 
 target_link_libraries(xrdcl-test XrdClHttpTransferTest GTest::gtest_main)
-target_link_libraries(xrdcl-http-test XrdClHttpTesting XrdClHttpTransferTest GTest::gtest_main)
+target_link_libraries(xrdcl-http-test XrdClHttpTesting XrdClHttpTransferTest XrdXml GTest::gtest_main)
 
 gtest_add_tests(TARGET xrdcl-test TEST_LIST CurlClOnlyTests)
 gtest_add_tests(TARGET xrdcl-http-test TEST_LIST CurlTests)
@@ -73,9 +116,11 @@ set_tests_properties(XrdClHttp::teardown
 add_test(NAME XrdClHttp::test
   COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/test.sh" curl)
 
-list(APPEND CURL_TEST_LOGS ${CMAKE_CURRENT_BINARY_DIR}/tests/curl/origin.log)
-list(APPEND CURL_TEST_LOGS ${CMAKE_CURRENT_BINARY_DIR}/tests/curl/cache.log)
-list(APPEND CURL_TEST_LOGS ${CMAKE_CURRENT_BINARY_DIR}/tests/curl/client.log)
+add_bats_test(XrdClHttp::tape tape.bats)
+
+list(APPEND CURL_TEST_LOGS ${CMAKE_BINARY_DIR}/tests/curl/origin.log)
+list(APPEND CURL_TEST_LOGS ${CMAKE_BINARY_DIR}/tests/curl/cache.log)
+list(APPEND CURL_TEST_LOGS ${CMAKE_BINARY_DIR}/tests/curl/client.log)
 
 set_tests_properties(XrdClHttp::test
   PROPERTIES
@@ -83,6 +128,14 @@ set_tests_properties(XrdClHttp::test
       XrdClHttp
     ENVIRONMENT
       "BINARY_DIR=${CMAKE_BINARY_DIR}"
+    ATTACHED_FILES_ON_FAIL
+      "${CURL_TEST_LOGS}"
+)
+
+set_tests_properties(XrdClHttp::tape
+  PROPERTIES
+    FIXTURES_REQUIRED
+      XrdClHttp
     ATTACHED_FILES_ON_FAIL
       "${CURL_TEST_LOGS}"
 )

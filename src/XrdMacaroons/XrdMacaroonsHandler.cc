@@ -1,8 +1,10 @@
 #include "XrdMacaroonsHandler.hh"
+#include "XrdMacaroonsUtils.hh"
 
 #include "XrdAcc/XrdAccAuthorize.hh"
 #include "XrdAcc/XrdAccPrivs.hh"
 #include "XrdOuc/XrdOucTUtils.hh"
+#include "XrdOuc/XrdOucUtils.hh"
 #include "XrdSec/XrdSecEntity.hh"
 #include "XrdSys/XrdSysError.hh"
 
@@ -17,39 +19,6 @@
 #include <uuid/uuid.h>
 
 using namespace Macaroons;
-
-char *unquote(const char *str) {
-  int l = strlen(str);
-  char *r = (char *) malloc(l + 1);
-  r[0] = '\0';
-  int i, j = 0;
-
-  for (i = 0; i < l; i++) {
-
-    if (str[i] == '%') {
-      char savec[3];
-      if (l <= i + 3) {
-        free(r);
-        return nullptr;
-      }
-      savec[0] = str[i + 1];
-      savec[1] = str[i + 2];
-      savec[2] = '\0';
-
-      r[j] = strtol(savec, 0, 16);
-
-      i += 2;
-    } else if (str[i] == '+') r[j] = ' ';
-    else r[j] = str[i];
-
-    j++;
-  }
-
-  r[j] = '\0';
-
-  return r;
-
-}
 
 static bool is_reserved_caveat(const std::string &cv)
 {
@@ -90,7 +59,7 @@ if (m_log->getMsgMask() & LogMask::Debug)
    {
     std::stringstream ss;
     ss << "ID=" << result << ", ";
-    ss << "resource=" << NormalizeSlashes(resource) << ", ";
+    ss << "resource=" << XrdOucUtils::NormalizePath(resource) << ", ";
     if (entity.prot[0] != '\0') {ss << "protocol=" << entity.prot << ", ";}
     if (entity.name) {ss << "name=" << entity.name << ", ";}
     if (entity.host) {ss << "host=" << entity.host << ", ";}
@@ -218,15 +187,9 @@ int Handler::ProcessTokenRequest(XrdHttpExtReq &req)
             if ((validity = std::strtoll(value.c_str(), nullptr, 10)) <= 0)
                 return req.SendSimpleResp(400, nullptr, nullptr, "Expiration request has invalid value.", 0);
         }
-        else if (key == "scope")
+        else if (key == "scope" || key == "scopes")
         {
-            char *value_raw = unquote(value.c_str());
-            if (value_raw == nullptr)
-            {
-                return req.SendSimpleResp(400, nullptr, nullptr, "Unable to unquote scope.", 0);
-            }
-            scope = value_raw;
-            free(value_raw);
+            scope = XrdOucUtils::UrlDecode(value);
         }
     }
     if (!found_grant_type)
@@ -486,7 +449,7 @@ Handler::GenerateMacaroonResponse(XrdHttpExtReq &req, const std::string &resourc
         return req.SendSimpleResp(500, nullptr, nullptr, "Internal error adding 'activity' caveat to macaroon", 0);
     }
 
-    // Note we don't call `NormalizeSlashes` here; for backward compatibility reasons, we ensure the
+    // Note we don't call `NormalizePath` here; for backward compatibility reasons, we ensure the
     // token issued is identical to what was working with prior versions of XRootD.  This allows for a
     // mix of old/new versions in a single cluster to interoperate.  In a few years, it might be reasonable
     // to invoke it here as well.

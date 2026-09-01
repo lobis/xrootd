@@ -21,7 +21,9 @@
 #ifndef XRDCLHTTPCHECKSUM_HH_
 #define XRDCLHTTPCHECKSUM_HH_
 
+#include <algorithm>
 #include <array>
+#include <cctype>
 #include <string>
 #include <tuple>
 
@@ -31,16 +33,22 @@ constexpr size_t g_max_checksum_length = 32;
 
 // Checksum types known to this cache
 enum class ChecksumType {
+    kADLER32,
+    kCRC32,
     kCRC32C,
     kMD5,
     kSHA1,
     kSHA256,
-    kAll,     // Short-hand for setting all checksums at once.
+    kAll,     // Select any supported checksum.
     kUnknown, // Indicates an unset value; `kUnknown - 1` is used in for-loops to iterate through all checksums.
 };
 
 inline const std::string GetTypeString(ChecksumType ctype) {
     switch (ctype) {
+        case ChecksumType::kADLER32:
+            return "adler32";
+        case ChecksumType::kCRC32:
+            return "crc32";
         case ChecksumType::kCRC32C:
             return "crc32c";
         case ChecksumType::kMD5:
@@ -58,6 +66,8 @@ inline const std::string GetTypeString(ChecksumType ctype) {
 
 inline size_t GetChecksumLength(ChecksumType ctype) {
     switch (ctype) {
+        case ChecksumType::kADLER32:
+        case ChecksumType::kCRC32:
         case ChecksumType::kCRC32C:
             return 4;
         case ChecksumType::kMD5:
@@ -74,13 +84,23 @@ inline size_t GetChecksumLength(ChecksumType ctype) {
 }
 
 inline ChecksumType GetTypeFromString(const std::string &str) {
-    if (str == "crc32c") {
+    std::string normalized(str);
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+        [](unsigned char character) {
+            return static_cast<char>(std::tolower(character));
+        });
+
+    if (normalized == "adler" || normalized == "adler32") {
+        return ChecksumType::kADLER32;
+    } else if (normalized == "crc32") {
+        return ChecksumType::kCRC32;
+    } else if (normalized == "crc32c") {
         return ChecksumType::kCRC32C;
-    } else if (str == "md5") {
+    } else if (normalized == "md5") {
         return ChecksumType::kMD5;
-    } else if (str == "sha1") {
+    } else if (normalized == "sha1") {
         return ChecksumType::kSHA1;
-    } else if (str == "sha256") {
+    } else if (normalized == "sha256") {
         return ChecksumType::kSHA256;
     }
     return ChecksumType::kUnknown;

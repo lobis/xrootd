@@ -17,6 +17,11 @@
 #-------------------------------------------------------------------------------
 from __future__ import absolute_import, division, print_function
 
+try:
+  from urllib.parse import urlparse
+except ImportError:
+  from urlparse import urlparse
+
 from XRootD.client.url import URL
 
 
@@ -42,6 +47,22 @@ class XRootDTimeoutError(XRootDError):
 
 class XRootDChecksumError(XRootDError):
   """The request failed checksum validation."""
+
+
+class XRootDAlreadyExistsError(XRootDError):
+  """The destination already exists or conflicts with another resource."""
+
+
+class XRootDQuotaError(XRootDError):
+  """The operation exceeded the storage quota."""
+
+
+class XRootDTemporaryError(XRootDError):
+  """The service is overloaded, locked, or temporarily unavailable."""
+
+
+class XRootDUnsupportedError(XRootDError):
+  """The requested operation is not supported by the endpoint."""
 
 
 class XRootDOperationError(XRootDError):
@@ -192,10 +213,16 @@ class XRootDStatus(Struct):
   # XRootD protocol error numbers carried by errErrorResponse statuses.
   _SERVER_NOT_AUTHORIZED = 3010
   _SERVER_NOT_FOUND = 3011
+  _SERVER_UNSUPPORTED = 3013
+  _SERVER_ALREADY_EXISTS = 3018
   _SERVER_CHECKSUM_ERROR = 3019
+  _SERVER_OVER_QUOTA = 3021
+  _SERVER_OVERLOADED = 3024
   _SERVER_AUTH_FAILED = 3030
+  _SERVER_CONFLICT = 3032
   _SERVER_REQUEST_TIMED_OUT = 3034
   _SERVER_TIMER_EXPIRED = 3035
+  _SERVER_FILE_LOCKED = 3003
 
   def __init__(self, status):
     super(XRootDStatus, self).__init__(status)
@@ -229,6 +256,18 @@ class XRootDStatus(Struct):
     if code == self.errCheckSumError or (
         server_error and errno == self._SERVER_CHECKSUM_ERROR):
       return XRootDChecksumError(self)
+    if server_error and errno in (
+        self._SERVER_ALREADY_EXISTS, self._SERVER_CONFLICT):
+      return XRootDAlreadyExistsError(self)
+    if server_error and errno == self._SERVER_OVER_QUOTA:
+      return XRootDQuotaError(self)
+    if code == self.errRetry or (server_error and errno in (
+        self._SERVER_FILE_LOCKED, self._SERVER_OVERLOADED)):
+      return XRootDTemporaryError(self)
+    if code in (self.errNotSupported, self.errNotImplemented,
+                self.errQueryNotSupported) or (
+        server_error and errno == self._SERVER_UNSUPPORTED):
+      return XRootDUnsupportedError(self)
     return XRootDOperationError(self)
 
   def raise_on_error(self):
@@ -250,6 +289,95 @@ def raise_on_error(status):
   return status.raise_on_error()
 
 
+class TapeEndpoint(Struct):
+  """WLCG Tape REST API endpoint selected through discovery.
+
+  :var      uri: Base URI of the selected Tape REST API endpoint
+  :var  version: Endpoint API version
+  :var sitename: Storage site name advertised by discovery
+  """
+  def __init__(self, endpoint):
+    super(TapeEndpoint, self).__init__(endpoint)
+
+class TapeArchiveInfo(Struct):
+  """Archive locality information for a file.
+
+  :var      url: Original URL requested by the caller
+  :var     path: Storage path sent to the Tape REST API
+  :var locality: Locality reported by the Tape REST API
+  :var    error: Per-path error reported by the service, if any
+  """
+  def __init__(self, info):
+    payload = {'locality': None, 'error': None}
+    payload.update(info)
+    super(TapeArchiveInfo, self).__init__(payload)
+
+class TapeStageResponse(Struct):
+  """Response returned after submitting a Tape REST stage request.
+
+  :var requestId: Server-side stage request identifier
+  """
+  def __init__(self, response):
+    super(TapeStageResponse, self).__init__(response)
+
+  @property
+  def request_id(self):
+    return self.requestId
+
+class TapeStageFileStatus(Struct):
+  """Status of one file in a Tape REST stage request.
+
+  :var       path: Storage path submitted in the stage request
+  :var     onDisk: Whether the file is available on disk, if reported
+  :var      state: Stage processing state, if reported
+  :var      error: File-specific error, if reported
+  :var  startedAt: Stage start timestamp, if reported
+  :var finishedAt: Terminal-state timestamp, if reported
+  """
+  def __init__(self, status):
+    super(TapeStageFileStatus, self).__init__(status)
+
+  @property
+  def on_disk(self):
+    if hasattr(self, 'onDisk'):
+      return self.onDisk
+    return getattr(self, 'state', '') == 'COMPLETED'
+
+class TapeStageStatus(Struct):
+  """Status of a Tape REST stage request.
+
+  :var          id: Server-side stage request identifier
+  :var   createdAt: Request creation timestamp, if reported
+  :var   startedAt: Request start timestamp, if reported
+  :var completedAt: Request completion timestamp, if reported
+  :var       files: Per-file stage statuses
+  """
+  def __init__(self, status):
+    status = dict(status)
+    status['files'] = [TapeStageFileStatus(f)
+                       for f in status.get('files', [])]
+    super(TapeStageStatus, self).__init__(status)
+
+  @staticmethod
+  def _normalize_path(path):
+    parsed = urlparse(path)
+    if parsed.scheme and parsed.netloc:
+      path = parsed.path or '/'
+    if path.startswith('//'):
+      path = path[1:]
+    return path
+
+  def file_status(self, path):
+    path = self._normalize_path(path)
+    for status in self.files:
+      if status.path == path:
+        return status
+    return None
+
+  def is_on_disk(self, path):
+    status = self.file_status(path)
+    return bool(status and status.on_disk)
+
 class ProtocolInfo(Struct):
   """Protocol information for a server.
 
@@ -259,6 +387,28 @@ class ProtocolInfo(Struct):
   """
   def __init__(self, info):
     super(ProtocolInfo, self).__init__(info)
+
+
+class ChecksumInfo(Struct):
+  """Structured checksum response.
+
+  :param response: raw response returned by ``QueryCode.CHECKSUM``
+  :type  response: string
+  :var algorithm: checksum algorithm name, for example ``adler32``
+  :var value:     checksum value
+  """
+
+  def __init__(self, response):
+    if isinstance(response, bytes):
+      response = response.decode('ascii')
+    parts = response.strip('\n\0').split(None, 1)
+    if len(parts) != 2:
+      raise ValueError('Invalid checksum response: %r' % response)
+    algorithm, value = parts
+    super(ChecksumInfo, self).__init__({
+      'algorithm': algorithm,
+      'value': value,
+    })
 
 class StatInfo(Struct):
   """Status information for files and directories.

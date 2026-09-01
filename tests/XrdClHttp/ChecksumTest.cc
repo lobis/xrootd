@@ -134,17 +134,44 @@ TEST_F(CurlChecksumFixture, Basic)
     XrdCl::FileSystem fs{XrdCl::URL(GetCacheURL())};
 
     XrdCl::Buffer buffer;
-    buffer.FromString(source_url + "?cks.type=md5&directread&authz=" + GetReadToken());
+    buffer.FromString(source_url + "?directread&authz=" + GetReadToken());
     SyncResponseHandler srh;
     auto st = fs.Query(XrdCl::QueryCode::Checksum, buffer, &srh, 0);
     ASSERT_TRUE(st.IsOK());
     srh.Wait();
     auto [status, obj] = srh.Status();
-    ASSERT_EQ(status->IsOK(), true) << "MD5 checksum query failed with " << status->ToString();
+    ASSERT_EQ(status->IsOK(), true)
+      << "Automatic checksum query failed with " << status->ToString();
     XrdCl::Buffer *resp{nullptr};
+    obj->Get(resp);
+    ASSERT_EQ(resp->ToString(), "adler32 487a0c31");
+
+    buffer.FromString(source_url + "?cks.type=md5&directread&authz=" + GetReadToken());
+    st = fs.Query(XrdCl::QueryCode::Checksum, buffer, &srh, 0);
+    ASSERT_TRUE(st.IsOK());
+    srh.Wait();
+    std::tie(status, obj) = srh.Status();
+    ASSERT_EQ(status->IsOK(), true) << "MD5 checksum query failed with " << status->ToString();
+    resp = nullptr;
     obj->Get(resp);
 
     ASSERT_EQ(resp->ToString(), expected_response);
+
+    source_url = "/test/checksum_adler32";
+    WriteString(GetOriginURL() + source_url, "Wiki");
+
+    buffer.FromString(source_url + "?cks.type=adler32&directread&authz=" +
+                      GetReadToken());
+    auto adler_status = fs.Query(XrdCl::QueryCode::Checksum, buffer, &srh, 0);
+    ASSERT_TRUE(adler_status.IsOK());
+    srh.Wait();
+    auto [adler_response_status, adler_object] = srh.Status();
+    ASSERT_TRUE(adler_response_status->IsOK())
+        << "ADLER32 checksum query failed with "
+        << adler_response_status->ToString();
+    resp = nullptr;
+    adler_object->Get(resp);
+    ASSERT_EQ(resp->ToString(), "adler32 03da0195");
 
     source_url = "/test/checksum_crc32c";
     WriteString(GetOriginURL() + source_url, "dog");
