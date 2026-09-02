@@ -1023,7 +1023,7 @@ assert head["mtime"] == 1445412480
     : > "$mock/webdav-head.pid"
 }
 
-@test "ls accepts gfal human-readable and directory options" {
+@test "ls accepts human-readable and directory options" {
     run "$XRDFS" ls -lH "$TEST_DIRECTORY"
     assert_success
     assert_output --partial first.txt
@@ -1035,7 +1035,7 @@ assert head["mtime"] == 1445412480
     refute_output --partial first.txt
 }
 
-@test "ls accepts gfal all and uncolored options as no-ops" {
+@test "ls accepts all and uncolored options as no-ops" {
     run "$XRDFS" ls "$TEST_DIRECTORY"
     assert_success
     local native_output=$output
@@ -1058,7 +1058,7 @@ assert head["mtime"] == 1445412480
     assert_output --partial .hidden.txt
 }
 
-@test "ls rejects unsupported gfal presentation options" {
+@test "ls rejects unsupported presentation options" {
     for option in --time-style=full-iso --full-time --color=auto \
         --unknown-option; do
         run "$XRDFS" ls "$option" "$TEST_DIRECTORY"
@@ -1071,7 +1071,7 @@ assert head["mtime"] == 1445412480
     assert_output --partial 'Invalid arguments'
 }
 
-@test "ls appends repeatable gfal xattrs only to long output" {
+@test "ls appends repeatable xattrs only to long output" {
     run "$XRDFS" ls --xattr missing.attribute "$TEST_FILE"
     assert_success
     assert_output /data/first.txt

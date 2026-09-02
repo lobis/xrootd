@@ -655,10 +655,10 @@ XRootDStatus DoLS( FileSystem                      *fs,
         directory = true;
         return true;
       case 'a':
-        // xrdfs already includes entries whose names begin with a dot.
+        // Entries whose names begin with a dot are already included.
         return true;
       case '1':
-        // Compatibility no-op: xrdfs already emits one entry per line without -l.
+        // Entries are already emitted one per line without long output.
         return true;
       default:
         return false;
@@ -689,12 +689,12 @@ XRootDStatus DoLS( FileSystem                      *fs,
       directory = true;
     else if( parseOptions && args[i] == "--all" )
     {
-      // Compatibility no-op: unlike gfal-ls, xrdfs does not hide dotfiles.
+      // Entries whose names begin with a dot are already included.
       continue;
     }
     else if( parseOptions && args[i] == "--color=never" )
     {
-      // Compatibility no-op: xrdfs output is already uncolored.
+      // Output is already uncolored.
       continue;
     }
     else if( parseOptions && args[i] == "--color" )
@@ -3742,8 +3742,8 @@ XRootDStatus PrintHelp( FileSystem *, Env *,
   printf( "     rwxr-x--x) or octal (for example, 0751). The mode-first\n"      );
   printf( "     form accepts octal modes.\n\n"                                 );
 
-  printf( "   ls [-l] [-u] [-R] [-D] [-Z] [-C] [-h|-H] [-d] [-a]\n"       );
-  printf( "      [--color=never] [--xattr name] [--json] [dirname]\n"      );
+  printf( "   ls [-l] [-u] [-R] [-D] [-Z] [-C] [-h|-H] [-d] [-a] [-1]\n"  );
+  printf( "      [--color=never] [--xattr name] [--json] [--] [dirname]\n" );
   printf( "     Get directory listing.\n"                                     );
   printf( "     -l|--long stat every entry and print long listing\n"          );
   printf( "     -u print paths as URLs\n"                                     );
@@ -3753,9 +3753,9 @@ XRootDStatus PrintHelp( FileSystem *, Env *,
   printf( "     -C checksum every entry\n"                                    );
   printf( "     -h|-H|--human-readable print human-readable sizes\n"           );
   printf( "     -d|--directory list the entry instead of its contents\n"       );
-  printf( "     -a|--all accepted for gfal-ls compatibility; xrdfs already\n" );
-  printf( "        includes entries whose names begin with a dot\n"            );
-  printf( "     --color=never accepted for uncolored gfal-ls compatibility\n" );
+  printf( "     -a|--all include entries whose names begin with a dot\n"       );
+  printf( "     -1 print one entry per line\n"                                );
+  printf( "     --color=never disable colored output\n"                       );
   printf( "     --xattr name append an attribute value to long or JSON\n"    );
   printf( "        output; may be repeated and has no visible effect without\n" );
   printf( "        -l or --json\n"                                            );

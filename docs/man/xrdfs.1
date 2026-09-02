@@ -90,7 +90,7 @@ mode no greater than \fI0777\fR. The gfal-compatible mode-first form accepts an
 octal mode. The historical path-first form remains supported.
 
 .RE
-\fBls\fR \fI[-l]\fR \fI[-u]\fR \fI[-R]\fR \fI[-D]\fR \fI[-Z]\fR \fI[-C]\fR \fI[-h|-H]\fR \fI[-d]\fR \fI[-a]\fR \fI[-1]\fR \fI[--color=never]\fR \fI[--xattr name]\fR \fI[--json]\fR \fI[dirname]\fR
+\fBls\fR \fI[-l]\fR \fI[-u]\fR \fI[-R]\fR \fI[-D]\fR \fI[-Z]\fR \fI[-C]\fR \fI[-h|-H]\fR \fI[-d]\fR \fI[-a]\fR \fI[-1]\fR \fI[--color=never]\fR \fI[--xattr name]\fR \fI[--json]\fR \fI[--]\fR \fI[dirname]\fR
 .RS 3
 Get directory listing.
 .br
@@ -110,11 +110,11 @@ Get directory listing.
 .br
 \fI-d\fR, \fI--directory\fR list the directory entry instead of its contents
 .br
-\fI-a\fR, \fI--all\fR accepted for gfal-ls compatibility; xrdfs already includes entries whose names begin with a dot
+\fI-a\fR, \fI--all\fR include entries whose names begin with a dot
 .br
-\fI-1\fR accepted for gfal-ls compatibility; xrdfs already emits one entry per line when long output is not selected
+\fI-1\fR print one entry per line
 .br
-\fI--color=never\fR accepted for gfal-ls compatibility; xrdfs output is already uncolored
+\fI--color never\fR, \fI--color=never\fR disable colored output
 .br
 \fI--xattr name\fR append the named GFAL virtual or native XRootD attribute to long or JSON output; may be repeated and preserves request order; accepted without visible effect when neither long nor JSON output is selected
 .br
@@ -366,7 +366,7 @@ Prepare one or more files for access or stage them from tape.
 .RS 3
 Print contents of one or more files to stdout
 .br
-\fI-b\fR, \fI--bytes\fR accepted for gfal-cat compatibility; output is always byte-preserving
+\fI-b\fR, \fI--bytes\fR output bytes
 .br
 \fI-b\fR, \fI--bytes\fR output bytes
 .br
