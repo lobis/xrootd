@@ -3,6 +3,7 @@
 
 #include "XrdOuc/XrdOucEnv.hh"
 #include "XrdOuc/XrdOucPrivateUtils.hh"
+#include "XrdOuc/XrdOucUtils.hh"
 #include "XrdSec/XrdSecEntity.hh"
 #include "XrdSec/XrdSecEntityAttr.hh"
 
@@ -245,7 +246,10 @@ Authz::Access(const XrdSecEntity *Entity, const char *path,
         m_log.Log(LogMask::Debug, "Access", "Macaroon verification failed");
         macaroon_verifier_destroy(verifier);
         macaroon_destroy(macaroon);
-        return m_chain ? m_chain->Access(Entity, path, oper, env) : XrdAccPriv_None;
+        // This token is from our server (location matched) but caveats or HMAC
+        // failed.  Falling through to the chain would let a path-restricted
+        // macaroon bypass its own restrictions.  Deny unconditionally.
+        return XrdAccPriv_None;
     }
     macaroon_verifier_destroy(verifier);
 
@@ -342,7 +346,7 @@ bool Authz::Validate(const char   *token,
 AuthzCheck::AuthzCheck(const char *req_path, const Access_Operation req_oper, ssize_t max_duration, XrdSysError &log)
       : m_max_duration(max_duration),
         m_log(log),
-        m_path(NormalizeSlashes(req_path)),
+        m_path(XrdOucUtils::NormalizePath(req_path)),
         m_oper(req_oper),
         m_now(time(nullptr))
 {
@@ -490,7 +494,7 @@ AuthzCheck::verify_path(const unsigned char * pred, size_t pred_sz)
 {
     std::string pred_str_raw(reinterpret_cast<const char *>(pred), pred_sz);
     if (strncmp("path:", pred_str_raw.c_str(), 5)) {return 1;}
-    std::string pred_str = NormalizeSlashes(pred_str_raw.substr(5));
+    std::string pred_str = XrdOucUtils::NormalizePath(pred_str_raw.substr(5));
     m_log.Log(LogMask::Debug, "AuthzCheck", "running verify path", pred_str.c_str());
 
     if ((m_path.find("/./") != std::string::npos) ||

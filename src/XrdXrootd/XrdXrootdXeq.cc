@@ -31,6 +31,7 @@
 #include <cstdio>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <sys/time.h>
 #include <vector>
@@ -75,6 +76,8 @@
 #include "XrdXrootd/XrdXrootdXeq.hh"
 #include "XrdXrootd/XrdXrootdXPath.hh"
 
+#include "XrdCrypto/XrdCryptoLite_BFecb.hh"
+
 #include "XrdVersion.hh"
 
 #ifndef ENODATA
@@ -101,8 +104,30 @@ struct XrdXrootdSessID
                  int       FD;
         unsigned int       Inst;
 
+        void Mask() {if (bfEcb1 && bfEcb2)
+                        {unsigned char buff[sizeof(int)*4];
+                         bfEcb1->Encrypt((unsigned char*)&Sid, buff);
+                         bfEcb2->Encrypt((unsigned char*)&FD,  buff+8);
+                         memcpy((void*)&Sid, (const void*)buff, sizeof(int)*4);
+                        }
+                    }
+
+        void UnMask() {if (bfEcb1 && bfEcb2)
+                          {unsigned char buff[sizeof(int)*4];
+                           bfEcb1->Decrypt((unsigned char*)&Sid, buff);
+                           bfEcb2->Decrypt((unsigned char*)&FD, buff+8);
+                           memcpy((void*)&Sid, (const void*)buff, sizeof(int)*4);
+                          }
+                      }
+
         XrdXrootdSessID() {}
        ~XrdXrootdSessID() {}
+
+        private:
+        inline static
+        XrdCryptoLite_BFecb* bfEcb1 = XrdCryptoLite_BFecb::Instance();
+        inline static
+        XrdCryptoLite_BFecb* bfEcb2 = XrdCryptoLite_BFecb::Instance();
        };
 
 /******************************************************************************/
@@ -265,6 +290,7 @@ int XrdXrootdProtocol::do_Bind()
 
 // Find the link we are to bind to
 //
+   sp->UnMask();
    if (sp->FD <= 0 || !(lp = XrdLinkCtl::fd2link(sp->FD, sp->Inst)))
       return Response.Send(kXR_NotFound, "session not found");
 
@@ -898,7 +924,7 @@ int XrdXrootdProtocol::do_DirStat(XrdSfsDirectory *dp, char *pbuff,
 
 int XrdXrootdProtocol::do_Endsess()
 {
-   XrdXrootdSessID *sp, sessID;
+   XrdXrootdSessID sessID;
    int rc;
 
 // Update misc stats count
@@ -907,10 +933,8 @@ int XrdXrootdProtocol::do_Endsess()
 
 // Extract out the FD and Instance from the session ID
 //
-   sp = (XrdXrootdSessID *)Request.endsess.sessid;
-   memcpy((void *)&sessID.Pid,  &sp->Pid,  sizeof(sessID.Pid));
-   memcpy((void *)&sessID.FD,   &sp->FD,   sizeof(sessID.FD));
-   memcpy((void *)&sessID.Inst, &sp->Inst, sizeof(sessID.Inst));
+   memcpy((void*)&sessID, Request.endsess.sessid, sizeof(sessID));
+   sessID.UnMask();
 
 // Trace this request
 //
@@ -1084,6 +1108,7 @@ int XrdXrootdProtocol::do_Login()
        sessID.Pid  = myPID;
        mySID = getSID();
        sessID.Sid  = mySID;
+       sessID.Mask();
        sendSID = 1;
        if (!clientPV)
           {        if (i >= kXR_ver004) clientPV = (int)0x0310;
@@ -3899,7 +3924,7 @@ int XrdXrootdProtocol::fsError(int rc, char opC, XrdOucErrInfo &myError,
        if( ecode < -1 && !( clientPV & XrdOucEI::uRedirFlgs ) )
            ecode = -1;
        if (XrdXrootdMonitor::Redirect() && Path && opC)
-           XrdXrootdMonitor::Redirect(Monitor.Did, eMsg, Port, opC, Path);
+           XrdXrootdMonitor::Redirect(Monitor.Did, eMsg, ecode, opC, Path);
        if (TRACING(TRACE_REDIR))
           {if (ecode < 0)
               {TRACEI(REDIR, Response.ID() <<"redirecting to " << eMsg);}

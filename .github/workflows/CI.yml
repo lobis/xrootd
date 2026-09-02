@@ -46,7 +46,6 @@ jobs:
           fuse3-dev \
           g++ \
           git \
-          gtest-dev \
           json-c-dev \
           krb5 \
           krb5-dev \
@@ -63,6 +62,7 @@ jobs:
           py3-setuptools \
           py3-wheel \
           python3-dev \
+          pytest \
           readline-dev \
           sudo \
           util-linux-dev \
@@ -102,6 +102,7 @@ jobs:
         dnf install -y dnf-plugins-core epel-release git rpmdevtools sudo
         dnf install -y epel-rpm-macros
         dnf config-manager --set-enabled powertools
+        dnf install -y gtest-devel
 
     - name: Clone repository
       uses: actions/checkout@v6
@@ -282,12 +283,20 @@ jobs:
       run: |
         sudo python3 -m pip install \
           --target /usr/lib/python3/dist-packages \
-          --use-pep517 --verbose build/python
+          --verbose build/python/dist/*.whl
 
     - name: Run post-install tests
       run: |
         tests/post-install.sh
         tests/check-headers.sh
+
+    - name: Build Python bindings standalone against installed XRootD
+      run: |
+        sudo apt install -y python3-venv
+        python3 -m venv /tmp/standalone
+        /tmp/standalone/bin/pip install --verbose ./python
+        /tmp/standalone/bin/python -c \
+          'from XRootD import client; print(client.FileSystem("root://localhost:1094"))'
 
   macos:
     name: macOS
@@ -305,6 +314,9 @@ jobs:
 
     - name: Install dependencies with Homebrew
       run: brew install googletest libzip nlohmann-json python-setuptools
+
+    - name: Install Python dependencies with pip
+      run: pip install --user pytest
 
     - name: Clone repository
       uses: actions/checkout@v6
