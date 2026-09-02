@@ -1242,7 +1242,7 @@ assert head["mtime"] == 1445412480
     assert_output --partial 'Invalid arguments'
 }
 
-@test "sum maps gfal positional arguments to the native checksum query" {
+@test "sum maps positional arguments to the native checksum query" {
     run "$XRDFS" "$TEST_ENDPOINT" query checksum \
         '/data/first.txt?cks.type=adler32'
     assert_success

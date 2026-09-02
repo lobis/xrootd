@@ -2305,7 +2305,7 @@ XRootDStatus QueryChecksum( FileSystem        *fs,
 }
 
 //------------------------------------------------------------------------------
-// Query a file checksum using gfal-sum's positional layout
+// Query a file checksum using a selected algorithm
 //------------------------------------------------------------------------------
 XRootDStatus DoSum( FileSystem                      *fs,
                     Env                             *env,
@@ -3887,7 +3887,7 @@ XRootDStatus PrintHelp( FileSystem *, Env *,
   printf( "     Get space statistics for given path.\n\n"                   );
 
   printf( "   sum <path> <checksum type>\n"                                 );
-  printf( "     Query a file checksum using the requested algorithm.\n\n"   );
+  printf( "     Query a file checksum using the selected algorithm.\n\n"    );
 
   printf( "   token [-w|--write] [--validity minutes] [--issuer URL]\n"      );
   printf( "         [--] <path> [activity ...]\n"                            );
