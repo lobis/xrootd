@@ -414,7 +414,7 @@ assert records[0]["checksum"]
     assert_success
 }
 
-@test "chmod accepts gfal mode-first and legacy path-first forms" {
+@test "chmod accepts mode-first and legacy path-first forms" {
     local root=$BATS_TEST_TMPDIR/xrdfs-full-url
     local url=$TEST_ENDPOINT//chmod-compat
 
