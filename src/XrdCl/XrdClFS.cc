@@ -2927,8 +2927,7 @@ XRootDStatus DoCat( FileSystem                      *fs,
     else if( parseOptions &&
              ( args[i] == "-b" || args[i] == "--bytes" ) )
     {
-      // gfal-cat exposes this Python 3 compatibility flag. xrdfs always
-      // streams byte-preserving data, so no mode change is required.
+      // Output is already byte-preserving, so no mode change is required.
       continue;
     }
     else if( parseOptions && args[i] == "-o" )
@@ -3875,8 +3874,7 @@ XRootDStatus PrintHelp( FileSystem *, Env *,
 
   printf( "   cat [-b|--bytes] [-o local file] [--] files\n"                );
   printf( "     Print contents of one or more files to stdout.\n"           );
-  printf( "     -b, --bytes accepted for gfal-cat compatibility; output\n"  );
-  printf( "                 is always byte-preserving\n"                    );
+  printf( "     -b, --bytes output bytes\n"                                );
   printf( "     -o print to the specified local file\n"                     );
   printf( "     -- stop option parsing, allowing a dash-prefixed path\n\n"  );
 
