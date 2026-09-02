@@ -1104,7 +1104,7 @@ XRootDStatus DoMkDir( FileSystem                      *fs,
   }
 
   //----------------------------------------------------------------------------
-  // Run the queries sequentially, matching gfal-mkdir's ordering.
+  // Run the queries sequentially in command-line order.
   //----------------------------------------------------------------------------
   for( const std::string &newPath : newPaths )
   {

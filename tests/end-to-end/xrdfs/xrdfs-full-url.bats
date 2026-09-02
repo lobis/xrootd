@@ -312,7 +312,7 @@ assert records[0]["checksum"]
     assert_success
 }
 
-@test "mkdir accepts gfal octal modes and multiple complete URLs" {
+@test "mkdir accepts octal modes and multiple complete URLs" {
     local root=$BATS_TEST_TMPDIR/xrdfs-full-url
 
     run "$XRDFS" mkdir -p -m 0751 \
@@ -1270,6 +1270,25 @@ assert head["mtime"] == 1445412480
 
     run "$XRDFS" sum "$TEST_FILE" sha256
     assert_failure
+}
+
+@test "mkdir accepts separated and long mode options" {
+    run -0 xrdfs mkdir -p -m 0755 \
+        root://localhost:11965//mkdir/separated/a \
+        root://localhost:11965//mkdir/separated/b
+    run -0 xrdfs stat root://localhost:11965//mkdir/separated/a
+    run -0 xrdfs stat root://localhost:11965//mkdir/separated/b
+
+    run -0 xrdfs mkdir --parents --mode=0700 \
+        root://localhost:11965//mkdir/long/child
+    run -0 xrdfs stat root://localhost:11965//mkdir/long/child
+}
+
+@test "mkdir preserves attached and symbolic mode forms" {
+    run -0 xrdfs mkdir -p -m0755 \
+        root://localhost:11965//mkdir/attached/child
+    run -0 xrdfs mkdir -p -mrwxr-x--- \
+        root://localhost:11965//mkdir/symbolic/child
 }
 
 @test "URL parameters are preserved in the operand path" {
