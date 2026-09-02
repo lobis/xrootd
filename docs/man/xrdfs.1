@@ -420,13 +420,13 @@ Query the file checksum using the selected algorithm.
 .br
 \fBxattr\fR \fI<path> <code> <params>\fR
 .RS 3
-With no attribute, query the fixed GFAL virtual XRootD attributes
+With no attribute, query the fixed virtual XRootD attributes
 \fIxroot.cksum\fR, \fIxroot.space\fR, \fIxroot.xattr\fR, and
 \fIspacetoken\fR. With one virtual attribute, query its value. This shorthand
 is a thin adapter over existing checksum, space, and stat operations; it does
 not list native XRootD file attributes. In addition to the fixed names,
 \fIuser.checksum.<algorithm>\fR selects a checksum algorithm and
-\fIuser.status\fR maps the stat Offline and BackUpExists flags to GFAL's
+\fIuser.status\fR maps the stat Offline and BackUpExists flags to
 ONLINE, NEARLINE, ONLINE_AND_NEARLINE, or UNKNOWN values. An unrecognized
 single attribute name falls back to the native XRootD get operation and prints
 the raw value.

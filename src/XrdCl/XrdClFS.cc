@@ -3229,7 +3229,7 @@ XRootDStatus QueryText( FileSystem             *fs,
 }
 
 //------------------------------------------------------------------------------
-// Return whether an attribute name belongs to gfal2's virtual namespace
+// Return whether an attribute name belongs to the virtual namespace
 //------------------------------------------------------------------------------
 bool IsGFALVirtualXAttr( const std::string &attribute )
 {
@@ -3360,7 +3360,7 @@ XRootDStatus GetNativeXAttrValue( FileSystem        *fs,
 }
 
 //------------------------------------------------------------------------------
-// Resolve gfal2's virtual XRootD attributes through native XrdCl operations
+// Resolve virtual XRootD attributes through native XrdCl operations
 //------------------------------------------------------------------------------
 XRootDStatus GetGFALVirtualXAttr( FileSystem        *fs,
                                  Env               *env,
@@ -3397,7 +3397,7 @@ XRootDStatus GetGFALVirtualXAttr( FileSystem        *fs,
     }
     return XRootDStatus(
       stError, errNotSupported, 0,
-      "GFAL virtual attribute is not available for this protocol: " +
+      "Virtual attribute is not available for this protocol: " +
       attribute );
   }
 
@@ -3453,7 +3453,7 @@ XRootDStatus GetGFALVirtualXAttr( FileSystem        *fs,
   }
 
   return XRootDStatus( stError, errNotFound, 0,
-                        "Unknown GFAL virtual attribute: " + attribute );
+                        "Unknown virtual attribute: " + attribute );
 }
 
 //------------------------------------------------------------------------------

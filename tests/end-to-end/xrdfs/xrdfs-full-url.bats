@@ -1180,7 +1180,7 @@ assert head["mtime"] == 1445412480
     assert_failure
 }
 
-@test "xattr shorthand maps gfal virtual attributes to native queries" {
+@test "xattr shorthand maps virtual attributes to native queries" {
     run "$XRDFS" "$TEST_ENDPOINT" query checksum /data/first.txt
     assert_success
     local checksum=$output
