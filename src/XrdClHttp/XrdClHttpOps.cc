@@ -689,6 +689,11 @@ CurlOperation::Setup(CURL *curl, CurlWorker &worker)
 
     m_curl.reset(curl);
     m_curl_error_buffer[0] = '\0';
+    // Easy handles are pooled across operations. Restore transfer decoding on
+    // checkout so stale raw-transfer state cannot expose HTTP chunk framing.
+    if (curl_easy_setopt(m_curl.get(), CURLOPT_HTTP_TRANSFER_DECODING, 1L) != CURLE_OK) {
+        return false;
+    }
     curl_easy_setopt(m_curl.get(), CURLOPT_URL, m_request_url.c_str());
     curl_easy_setopt(m_curl.get(), CURLOPT_ERRORBUFFER, m_curl_error_buffer);
     curl_easy_setopt(m_curl.get(), CURLOPT_HEADERFUNCTION, CurlStatOp::HeaderCallback);
