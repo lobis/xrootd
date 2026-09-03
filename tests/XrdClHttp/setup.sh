@@ -127,6 +127,7 @@ echo "Using $RUNDIR as the test run's home directory."
 cd "$RUNDIR" || exit 1
 
 TAPE_API_ROOT="$RUNDIR/tape-api"
+export XRDPREP_TEST_ROOT="$TAPE_API_ROOT"
 XROOTD_EXPORTDIR="$TAPE_API_ROOT/disk"
 rm -rf "$TAPE_API_ROOT"
 mkdir -p "$TAPE_API_ROOT/archive/test/tape" || exit 1
@@ -248,6 +249,7 @@ ofs.osslib ++ $BINARY_DIR/lib/libXrdOssSlowOpen.so
 
 # WLCG Tape REST API handler used by the XrdClHttp Tape client tests.
 http.exthandler xrdhttptapeapi libXrdHttpTapeApi.so $TAPE_API_ROOT
+ofs.preplib libXrdOfsPrepGPI.so -admit stage -maxfiles 1024 -run $SOURCE_DIR/tests/XrdClHttp/tape-prepare
 
 # Required for the COPY tests
 http.exthandler xrdtpc libXrdHttpTPC.so

@@ -30,7 +30,10 @@
 #include "XrdOuc/XrdOucTokenizer.hh"
 #include "XrdSys/XrdSysError.hh"
 #include "XrdVersion.hh"
+#include "XProtocol/XProtocol.hh"
 
+#include <arpa/inet.h>
+#include <cctype>
 #include <climits>
 #include <cstdlib>
 #include <exception>
@@ -47,6 +50,20 @@ constexpr char kStageCancelSuffix[] = "/cancel";
 constexpr char kReleasePrefix[] = "/api/v1/release/";
 constexpr char kArchiveInfoPath[] = "/api/v1/archiveinfo";
 constexpr long long kDefaultMaxRequestSize = 4 * 1024 * 1024;
+
+bool IsSafeRequestId(const std::string &requestId)
+{
+  if(requestId.empty() || requestId.size() > 127) return false;
+  for(const unsigned char character : requestId)
+  {
+    if(!std::isalnum(character) && character != '-' && character != '_'
+       && character != '.' && character != ':')
+    {
+      return false;
+    }
+  }
+  return true;
+}
 
 class TapeApiHandler final : public XrdHttpExtHandler
 {
@@ -81,6 +98,8 @@ class TapeApiHandler final : public XrdHttpExtHandler
                                  std::string &requestId);
     int Discovery(XrdHttpExtReq &req);
     int Stage(XrdHttpExtReq &req, const std::string &body);
+    int StageResult(XrdHttpExtReq &req,
+                    const XrdHttpExtReq::BridgeResult &result);
     int StageStatus(XrdHttpExtReq &req, const std::string &requestId);
     int StageCancel(XrdHttpExtReq &req, const std::string &requestId,
                     const std::string &body);
@@ -223,6 +242,14 @@ int TapeApiHandler::ProcessReq(XrdHttpExtReq &req)
 {
   const std::string resource = req.resource;
 
+  const auto bridgeResult = req.GetBridgeResult();
+  if(bridgeResult.type != XrdHttpExtReq::BridgeResult::None)
+  {
+    if(resource == kStagePath) return StageResult(req, bridgeResult);
+    return SendError(req, 500,
+      "unexpected XRootD bridge result for Tape REST API request");
+  }
+
   std::string body;
   if(req.verb == "POST")
   {
@@ -316,9 +343,53 @@ int TapeApiHandler::Stage(XrdHttpExtReq &req, const std::string &body)
     }
   }
 
-  std::string requestId;
-  const auto status = m_store.CreateStage(json["files"], requestId);
-  if(!status) return SendError(req, status.code, status.message);
+  std::string paths;
+  for(const auto &file : json["files"])
+  {
+    if(!paths.empty()) paths += '\n';
+    paths += file["path"].get<std::string>();
+  }
+  if(paths.size() > static_cast<std::size_t>(INT_MAX))
+  {
+    return SendError(req, 413, "stage request is too large");
+  }
+
+  ClientRequest request{};
+  request.prepare.requestid = htons(kXR_prepare);
+  request.prepare.options = kXR_stage;
+  request.prepare.prty = 0;
+  request.prepare.optionX = htons(0);
+  request.prepare.dlen = htonl(static_cast<kXR_int32>(paths.size()));
+  if(!req.RunBridge(&request, paths.data(), static_cast<int>(paths.size())))
+  {
+    return SendError(req, 500,
+      "could not submit the stage request to XRootD");
+  }
+  return 0;
+}
+
+int TapeApiHandler::StageResult(
+  XrdHttpExtReq &req, const XrdHttpExtReq::BridgeResult &result)
+{
+  if(result.type == XrdHttpExtReq::BridgeResult::Error)
+  {
+    const int status = result.httpStatus > 0 ? result.httpStatus : 500;
+    return SendError(req, status, result.message.empty()
+      ? "XRootD rejected the stage request" : result.message);
+  }
+  if(result.type == XrdHttpExtReq::BridgeResult::Redirect)
+  {
+    return SendError(req, 502, "XRootD redirected the stage request to "
+      + result.host + ":" + std::to_string(result.port));
+  }
+  if(result.type != XrdHttpExtReq::BridgeResult::Data
+     || !IsSafeRequestId(result.data))
+  {
+    return SendError(req, 500,
+      "XRootD returned an invalid identifier for the stage request");
+  }
+
+  const std::string &requestId = result.data;
   const std::string response = Json({{"requestId", requestId}}).dump();
   return SendJson(req, 201, response,
                   "Location: /api/v1/stage/" + requestId);
