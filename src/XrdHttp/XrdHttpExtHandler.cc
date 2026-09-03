@@ -25,7 +25,10 @@
 #include "XrdHttpExtHandler.hh"
 #include "XrdHttpReq.hh"
 #include "XrdHttpProtocol.hh"
+#include "XrdHttpUtils.hh"
 #include "XrdOuc/XrdOucEnv.hh"
+
+#include <cstring>
 
 int XrdHttpExtReq::SendSimpleResp(int code, const char* desc, const char* header_to_add, const char* body, long long bodylen)
 {
@@ -80,6 +83,73 @@ void XrdHttpExtReq::GetClientID(std::string &clid)
 const XrdSecEntity &XrdHttpExtReq::GetSecEntity() const
 {
   return prot->SecEntity;
+}
+
+bool XrdHttpExtReq::RunBridge(const void *request, const char *data,
+                              int dataLength)
+{
+  if (!prot || !request || dataLength < 0 || (dataLength && !data))
+    return false;
+
+  XrdHttpReq &httpReq = prot->CurrentReq;
+  if (httpReq.m_extBridgeState != XrdHttpReq::ExtBridgeState::None)
+    return false;
+
+  std::memcpy(&httpReq.m_extBridgeRequest, request,
+              sizeof(httpReq.m_extBridgeRequest));
+  if (dataLength)
+    httpReq.m_extBridgePayload.assign(data, data + dataLength);
+  else
+    httpReq.m_extBridgePayload.clear();
+  httpReq.m_extBridgeState = XrdHttpReq::ExtBridgeState::Queued;
+
+  if (!prot->Bridge) {
+    const char *name = prot->SecEntity.name ? prot->SecEntity.name : "unknown";
+    prot->Bridge = XrdXrootd::Bridge::Login(
+      &httpReq, prot->Link, &prot->SecEntity, name,
+      prot->ishttps ? "https" : "http");
+    if (!prot->Bridge) {
+      httpReq.m_extBridgeState = XrdHttpReq::ExtBridgeState::None;
+      httpReq.m_extBridgePayload.clear();
+      return false;
+    }
+    if (prot->m_maxdelay > 0) prot->Bridge->SetWait(prot->m_maxdelay, false);
+    prot->DoingLogin = true;
+    return true;
+  }
+
+  return httpReq.DispatchExtBridge();
+}
+
+XrdHttpExtReq::BridgeResult XrdHttpExtReq::GetBridgeResult() const
+{
+  BridgeResult result;
+  if (!prot) return result;
+
+  const XrdHttpReq &httpReq = prot->CurrentReq;
+  switch (httpReq.m_extBridgeState) {
+    case XrdHttpReq::ExtBridgeState::Data:
+      result.type = BridgeResult::Data;
+      break;
+    case XrdHttpReq::ExtBridgeState::Done:
+      result.type = BridgeResult::Done;
+      break;
+    case XrdHttpReq::ExtBridgeState::Error:
+      result.type = BridgeResult::Error;
+      break;
+    case XrdHttpReq::ExtBridgeState::Redirect:
+      result.type = BridgeResult::Redirect;
+      break;
+    default:
+      return result;
+  }
+  result.data = httpReq.m_extBridgeData;
+  result.code = httpReq.m_extBridgeCode;
+  result.httpStatus = httpReq.m_extBridgeHttpStatus;
+  result.message = httpReq.m_extBridgeMessage;
+  result.host = httpReq.m_extBridgeHost;
+  result.port = httpReq.m_extBridgePort;
+  return result;
 }
 
 
