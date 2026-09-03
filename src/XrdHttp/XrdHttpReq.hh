@@ -61,6 +61,7 @@ struct DirListInfo {
 
 
 class XrdHttpProtocol;
+class XrdHttpExtHandler;
 class XrdOucEnv;
 
 class XrdHttpReq : public XrdXrootd::Bridge::Result {
@@ -93,6 +94,16 @@ public:
   };
 
 private:
+  enum class ExtBridgeState {
+    None,
+    Queued,
+    Running,
+    Data,
+    Done,
+    Error,
+    Redirect
+  };
+
   // HTTP response parameters to be sent back to the user
   int httpStatusCode{-1};
 
@@ -137,6 +148,20 @@ private:
 
   //xmlDocPtr xmlbody; /* the resulting document tree */
   XrdHttpProtocol *prot;
+
+  XrdHttpExtHandler *m_extHandler{nullptr};
+  ExtBridgeState m_extBridgeState{ExtBridgeState::None};
+  ClientRequest m_extBridgeRequest{};
+  std::string m_extBridgePayload;
+  std::string m_extBridgeData;
+  int m_extBridgeCode{0};
+  int m_extBridgeHttpStatus{0};
+  std::string m_extBridgeMessage;
+  std::string m_extBridgeHost;
+  int m_extBridgePort{0};
+
+  bool DispatchExtBridge();
+  bool ProcessExtBridgeResult();
 
   void clientMarshallReadAheadList(int nitems);
   void clientUnMarshallReadAheadList(int nitems);
@@ -205,6 +230,8 @@ private:
   int prepareChecksumQuery(XrdHttpChecksumHandler::XrdHttpChecksumRawPtr & outCksum, XrdOucString & outResourceDigestOpaque);
 
 public:
+  friend class XrdHttpExtReq;
+
   XrdHttpReq(XrdHttpProtocol *protinstance, const XrdHttpReadRangeHandler::Configuration &rcfg) :
       readRangeHandler(rcfg), closeAfterError(false), keepalive(true) {
 
@@ -507,4 +534,3 @@ public:
 void trim(std::string &str);
 
 #endif	/* XRDHTTPREQ_HH */
-

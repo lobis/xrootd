@@ -109,6 +109,34 @@ TEST_F(TapeApiStoreTest, RecordsPerFileStageFailures)
   EXPECT_EQ(status["files"][0]["error"], "file is not stored on tape");
 }
 
+TEST_F(TapeApiStoreTest, ReadsNativePrepareRequestIds)
+{
+  const std::string requestId =
+    "2eda00000000000000000000000000000001:516513ef.6a991ec6:1";
+  const Json request = {
+    {"id", requestId},
+    {"createdAt", 1},
+    {"startedAt", 1},
+    {"completedAt", 2},
+    {"files", Json::array({{
+      {"path", "/store/file"},
+      {"state", "COMPLETED"},
+      {"startedAt", 1},
+      {"finishedAt", 2}
+    }})}
+  };
+  std::ofstream output(m_root / "requests" / (requestId + ".json"));
+  output << request.dump();
+  output.close();
+  ASSERT_TRUE(output.good());
+
+  Json status;
+  ASSERT_TRUE(m_store->GetStage(requestId, status));
+  EXPECT_EQ(status["id"], requestId);
+  EXPECT_EQ(status["files"][0]["state"], "COMPLETED");
+  EXPECT_EQ(m_store->GetStage("../unsafe", status).code, 404);
+}
+
 TEST_F(TapeApiStoreTest, ValidatesBulkRequestMembershipBeforeMutation)
 {
   Archive("/store/file", "tape contents");

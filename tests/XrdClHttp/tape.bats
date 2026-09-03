@@ -59,11 +59,17 @@ bats::on_failure() {
   run "$XRDFS_BIN" prepare -s "$TAPE_FILE_URL"
   assert_success
   request_id="$output"
-  if [[ ! "$request_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
-    fail "stage did not return a UUID: $request_id"
+  if [[ ! "$request_id" =~ ^[^/[:cntrl:]]{1,127}$ ]]; then
+    fail "stage did not return a safe native prepare request ID: $request_id"
   fi
 
-  run "$XRDFS_BIN" "$ORIGIN_URL" query prepare "$request_id"
+  for _ in {1..50}; do
+    run "$XRDFS_BIN" "$ORIGIN_URL" query prepare "$request_id"
+    if [[ "$status" -eq 0 && "$output" == *'"state":"COMPLETED"'* ]]; then
+      break
+    fi
+    sleep 0.1
+  done
   assert_success
   assert_output --partial "\"id\":\"$request_id\""
   assert_output --partial '"state":"COMPLETED"'

@@ -511,6 +511,16 @@ bool XrdHttpReq::Data(XrdXrootd::Bridge::Context &info, //!< the result context
         bool final_ //!< true -> final result
         ) {
 
+  if (m_extBridgeState == ExtBridgeState::Running) {
+    for (int i = 0; i < iovN_; ++i) {
+      const char *data = static_cast<const char *>(iovP_[i].iov_base);
+      m_extBridgeData.append(data, data + iovP_[i].iov_len);
+    }
+    if (!final_) return true;
+    m_extBridgeState = ExtBridgeState::Data;
+    return ProcessExtBridgeResult();
+  }
+
   TRACE(REQ, " XrdHttpReq::Data! final=" << final);
 
   this->xrdresp = kXR_ok;
@@ -553,6 +563,11 @@ bool XrdHttpReq::Done(XrdXrootd::Bridge::Context & info) {
 
   TRACE(REQ, " XrdHttpReq::Done");
 
+  if (m_extBridgeState == ExtBridgeState::Running) {
+    m_extBridgeState = ExtBridgeState::Done;
+    return ProcessExtBridgeResult();
+  }
+
   xrdresp = kXR_ok;
 
   this->iovN = 0;
@@ -572,6 +587,14 @@ bool XrdHttpReq::Error(XrdXrootd::Bridge::Context &info, //!< the result context
         ) {
 
   TRACE(REQ, " XrdHttpReq::Error");
+
+  if (m_extBridgeState == ExtBridgeState::Running) {
+    m_extBridgeState = ExtBridgeState::Error;
+    m_extBridgeCode = ecode;
+    m_extBridgeHttpStatus = mapXrdErrToHttp(static_cast<XErrorCode>(ecode));
+    m_extBridgeMessage = etext_ ? etext_ : "XRootD bridge request failed";
+    return ProcessExtBridgeResult();
+  }
 
   xrdresp = kXR_error;
   xrderrcode = (XErrorCode) ecode;
@@ -602,6 +625,13 @@ bool XrdHttpReq::Redir(XrdXrootd::Bridge::Context &info, //!< the result context
         ) {
 
 
+
+  if (m_extBridgeState == ExtBridgeState::Running) {
+    m_extBridgeState = ExtBridgeState::Redirect;
+    m_extBridgeHost = hname ? hname : "";
+    m_extBridgePort = port;
+    return ProcessExtBridgeResult();
+  }
 
   char buf[512];
   char hash[512];
@@ -987,12 +1017,27 @@ int XrdHttpReq::ProcessHTTPReq() {
     m_appended_hdr2cgistr = true;
     }
 
+  if (m_extBridgeState == ExtBridgeState::Queued) {
+    if (!DispatchExtBridge()) {
+      prot->SendSimpleResp(500, nullptr, nullptr,
+                           "Could not run request on the bridge", 0, false);
+      reset();
+      return -1;
+    }
+    return 0;
+  }
+
   // Verify if we have an external handler for this request
   if (reqstate == 0) {
     XrdHttpExtHandler *exthandler = prot->FindMatchingExtHandler(*this);
     if (exthandler) {
+      m_extHandler = exthandler;
       XrdHttpExtReq xreq(this, prot);
       int r = exthandler->ProcessReq(xreq);
+      if (m_extBridgeState == ExtBridgeState::Queued
+          || m_extBridgeState == ExtBridgeState::Running) {
+        return 0;
+      }
       reset();
       if (!r) return 1; // All went fine, response sent
       if (r < 0) return -1; // There was a hard error... close the connection
@@ -1747,6 +1792,38 @@ int XrdHttpReq::ProcessHTTPReq() {
   }
 
   return 1;
+}
+
+bool XrdHttpReq::DispatchExtBridge()
+{
+  if (!prot || !prot->Bridge || m_extBridgeState != ExtBridgeState::Queued)
+    return false;
+
+  m_extBridgeState = ExtBridgeState::Running;
+  m_extBridgeData.clear();
+  char *payload = m_extBridgePayload.empty() ? nullptr
+                                             : m_extBridgePayload.data();
+  if (!prot->Bridge->Run(reinterpret_cast<char *>(&m_extBridgeRequest),
+                         payload,
+                         static_cast<int>(m_extBridgePayload.size()))) {
+    m_extBridgeState = ExtBridgeState::None;
+    return false;
+  }
+  return true;
+}
+
+bool XrdHttpReq::ProcessExtBridgeResult()
+{
+  if (!m_extHandler) return false;
+
+  XrdHttpExtReq request(this, prot);
+  const int result = m_extHandler->ProcessReq(request);
+  if (m_extBridgeState == ExtBridgeState::Queued
+      || m_extBridgeState == ExtBridgeState::Running) {
+    return result >= 0;
+  }
+  reset();
+  return result >= 0;
 }
 
 
@@ -2805,6 +2882,17 @@ void XrdHttpReq::reset() {
 
   m_user_agent = "";
   m_origin = "";
+
+  m_extHandler = nullptr;
+  m_extBridgeState = ExtBridgeState::None;
+  std::memset(&m_extBridgeRequest, 0, sizeof(m_extBridgeRequest));
+  m_extBridgePayload.clear();
+  m_extBridgeData.clear();
+  m_extBridgeCode = 0;
+  m_extBridgeHttpStatus = 0;
+  m_extBridgeMessage.clear();
+  m_extBridgeHost.clear();
+  m_extBridgePort = 0;
 
   httpStatusCode = -1;
   initialStatusCode= -1;

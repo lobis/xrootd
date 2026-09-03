@@ -101,14 +101,11 @@ std::string XrdHttpTapeApiStore::GenerateRequestId()
 
 bool XrdHttpTapeApiStore::IsRequestId(const std::string &requestId)
 {
-  if(requestId.size() != 36) return false;
-  for(std::size_t index = 0; index < requestId.size(); ++index)
+  if(requestId.empty() || requestId.size() > 127) return false;
+  for(const unsigned char character : requestId)
   {
-    if(index == 8 || index == 13 || index == 18 || index == 23)
-    {
-      if(requestId[index] != '-') return false;
-    }
-    else if(!std::isxdigit(static_cast<unsigned char>(requestId[index])))
+    if(!std::isalnum(character) && character != '-' && character != '_'
+       && character != '.' && character != ':')
     {
       return false;
     }

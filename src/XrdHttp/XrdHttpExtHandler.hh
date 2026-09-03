@@ -74,6 +74,37 @@ public:
   // A view of the XrdSecEntity associated with the request.
   const XrdSecEntity &GetSecEntity() const;
 
+  // Result returned by an XRootD request submitted through RunBridge().
+  struct BridgeResult {
+    enum Type {
+      None,
+      Data,
+      Done,
+      Error,
+      Redirect
+    } type{None};
+
+    std::string data;
+    int code{0};
+    int httpStatus{0};
+    std::string message;
+    std::string host;
+    int port{0};
+  };
+
+  /**
+   * Submit a native XRootD request through the bridge associated with this
+   * HTTP connection. The 24-byte request header must be in network byte order.
+   * The request and payload are copied before this method returns.
+   *
+   * ProcessReq() will be invoked again when the final result is available. At
+   * that point GetBridgeResult() returns the translated bridge response.
+   */
+  bool RunBridge(const void *request, const char *data, int dataLength);
+
+  /// Return the result of the most recently completed bridge request.
+  BridgeResult GetBridgeResult() const;
+
   /// Get a pointer to data read from the client, valid for up to blen bytes from the buffer. Returns the validity
   int BuffgetData(int blen, char **data, bool wait);
 
