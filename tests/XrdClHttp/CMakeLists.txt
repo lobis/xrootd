@@ -12,6 +12,7 @@ include(GoogleTest)
 add_executable(xrdcl-http-unit-tests
   HeaderParserTest.cc
   ParseTimeoutTest.cc
+  RedirectTest.cc
   TapeTest.cc
 )
 
