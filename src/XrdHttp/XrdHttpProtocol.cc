@@ -56,6 +56,8 @@
 #include <sstream>
 #include <cctype>
 #include <sys/stat.h>
+#include <sys/socket.h>
+#include <poll.h>
 #include <fcntl.h>
 #include <algorithm>
 
@@ -664,7 +666,7 @@ int XrdHttpProtocol::Process(XrdLink *lp) // We ignore the argument here
 
         
         CurrentReq.appendOpaque(dest, &SecEntity, hash, timenow);
-        SendSimpleResp(302, NULL, (char *) dest.c_str(), 0, 0, true);
+        SendSimpleResp(302, NULL, (char *) dest.c_str(), 0, 0, false);
         CurrentReq.reset();
         return -1;
       }
@@ -1533,6 +1535,11 @@ int XrdHttpProtocol::SendData(const char *body, int bodylen) {
 int XrdHttpProtocol::StartSimpleResp(int code, const char *desc,
                                      const char *header_to_add,
                                      long long bodylen, bool keepalive) {
+  if (code >= 200 && CurrentReq.hasUnconsumedRequestBody()) {
+    CurrentReq.keepalive = false;
+    keepalive = false;
+  }
+
   std::stringstream ss;
   const std::string crlf = "\r\n";
 
@@ -1928,6 +1935,36 @@ void XrdHttpProtocol::Cleanup() {
 
     SSL_free(ssl);
 
+  } else if (Link) {
+    int fd = Link->FDnum();
+    if (fd >= 0) {
+      // RFC 9112 §9.6: Staged / lingering close for plain HTTP.
+      // Half-close the server's write side (sends FIN) so the client knows no more
+      // response data is coming, then drain remaining in-flight client data until
+      // peer EOF or bounded timeout/bytes. This prevents kernel TCP RST on close(fd).
+      ::shutdown(fd, SHUT_WR);
+      struct pollfd pfd;
+      pfd.fd = fd;
+      pfd.events = POLLIN;
+      pfd.revents = 0;
+      size_t total_drained = 0;
+      const size_t max_drain = 2 * 1024 * 1024;
+      auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(1000);
+      while (total_drained < max_drain) {
+        int time_left = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now()).count();
+        if (time_left <= 0) break;
+        int prc = poll(&pfd, 1, std::min(time_left, 100));
+        if (prc <= 0) break; // timeout (0) or error (<0)
+        if (pfd.revents & (POLLERR | POLLNVAL)) break;
+        if (pfd.revents & (POLLIN | POLLHUP)) {
+          char drainBuf[4096];
+          ssize_t n = ::recv(fd, drainBuf, sizeof(drainBuf), MSG_DONTWAIT);
+          if (n <= 0) break; // EOF (0) or error (<0)
+          total_drained += n;
+        }
+      }
+    }
   }
 
 

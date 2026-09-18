@@ -123,6 +123,11 @@ private:
   long long m_current_chunk_offset;
   long long m_current_chunk_size;
 
+  // Whether the inbound request body is framed and remains unconsumed.
+  bool m_request_body_pending{false};
+  // Whether the inbound request body declared Transfer-Encoding: chunked.
+  bool m_request_chunked{false};
+
   // Whether trailer headers were enabled
   bool m_trailer_headers{false};
 
@@ -232,6 +237,11 @@ public:
         initialStatusCode = code;
       }
   }
+
+  /// Whether the request has an unconsumed framed body (Content-Length > 0 or Transfer-Encoding: chunked)
+  bool hasUnconsumedRequestBody() const noexcept { return m_request_body_pending; }
+  void setRequestBodyPending(bool pending) noexcept { m_request_body_pending = pending; }
+  bool isRequestChunked() const noexcept { return m_request_chunked; }
 
   /// Parse the header
   int parseLine(char *line, int len);
