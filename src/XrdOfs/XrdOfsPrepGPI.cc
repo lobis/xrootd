@@ -1,6 +1,8 @@
 
 #include <string>
 #include <vector>
+#include <memory>
+#include <chrono>
 
 #include <stdio.h>
 #include <unistd.h>
@@ -216,7 +218,7 @@ int PrepGRun::Capture(PrepRequest &req, XrdOucStream &cmd, char *bP, int bL)
 
 // Return number of bytes in buffer
 //
-   return len;
+   return isTrunc ? -1 : len;
 }
 }
   
@@ -317,7 +319,7 @@ int PrepGRun::Run(PrepRequest &req, char *bP, int bL)
 
 // Return the error, success or number of bytes
 //
-   if (bP) return bytes;
+   if (bP) return rc ? -1 : bytes;
    return (rc ? -1 : 0);
 }
 }
@@ -413,7 +415,7 @@ PrepRequest *PrepGPI::Assemble(int &rc, const char *tid, const char *reqName,
 
 // Make sure we don't have too many files here
 //
-   if (n > maxFiles) {rc = E2BIG; return 0;}
+   if (n > maxFiles) {rc = E2BIG; delete rP; return 0;}
    rc = 0;
 
 // Size the vector to accomodate the file arguments
@@ -495,18 +497,20 @@ PrepRequest *PrepGPI::Assemble(int &rc, const char *tid, const char *reqName,
           {XrdOucTList *cP = pargs.oinfo;
            char pBuff[8192];
            do {path = (usePFN ? ApplyN2N(tid,pP->text,buff,sizeof(buff)):pP->text);
-               if (!path) continue;
-               if (cP->text && *cP->text)
-                  {snprintf(pBuff, sizeof(pBuff), "%s?%s", path, cP->text);
+               if (!path) {rc = EINVAL; delete rP; return 0;}
+               if (cP && cP->text && *cP->text)
+                  {if (snprintf(pBuff, sizeof(pBuff), "%s?%s", path, cP->text) >= (int)sizeof(pBuff))
+                      {rc = E2BIG; delete rP; return 0;}
                    path = pBuff;
                   }
                rP->argMem.emplace_back(path);
                pP = pP->next;
+               if (cP) cP = cP->next;
               } while(pP);
           } else {
            while(pP)
            do {path = (usePFN ? ApplyN2N(tid,pP->text,buff,sizeof(buff)):pP->text);
-               if (!path) continue;
+               if (!path) {rc = EINVAL; delete rP; return 0;}
                rP->argMem.emplace_back(path);
                pP = pP->next;
               } while(pP);
@@ -622,7 +626,6 @@ int PrepGPI::query(      XrdSfsPrep      &pargs,
                          XrdOucErrInfo   &eInfo,
                    const XrdSecEntity    *client)
 {
-   EPNAME("Query");
    struct OucBuffer {XrdOucBuffer *pBuff;
                                    OucBuffer() : pBuff(0) {}
                                   ~OucBuffer() {if (pBuff) pBuff->Recycle();}
@@ -657,27 +660,30 @@ int PrepGPI::query(      XrdSfsPrep      &pargs,
 
 // Get a request request object
 //
-   PrepRequest *rP = Assemble(rc, tid, "query", pargs, "");
+   std::unique_ptr<PrepRequest> ownedRequest(Assemble(rc, tid, "query", pargs, ""));
+   PrepRequest *rP = ownedRequest.get();
 
 // If we didn't get one or if there are no paths selected, complain
 //
    if (!rP) return RetErr(eInfo, (rc ? rc : EINVAL), "query", "request");
 
-// Wait for our turn if need be. This is sloppy and spurious wakeups may
-// cause us to exceed the allowed limit.
+// Wait for a slot, rechecking after spurious wakeups. Bound total waiting,
+// rather than granting another full timeout after each wakeup.
 //
+   const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(qryMaxWT);
    qryCond.Lock();
-   if (qryAllow) qryAllow--;
-      else {qryWait++;
-            DEBUG(tid, "Waiting to launch query "<<rP->reqID);
-            rc = qryCond.Wait(qryMaxWT);
-            qryWait--;
-            if (!rc) qryAllow--;
-               else  {qryCond.UnLock();
-                      return RetErr(eInfo, ETIMEDOUT, "query", "request");
-                     }
-           }
-    qryCond.UnLock();
+   while (qryAllow <= 0)
+      {const auto remaining = deadline - std::chrono::steady_clock::now();
+       if (remaining <= std::chrono::steady_clock::duration::zero())
+          {qryCond.UnLock();
+           return RetErr(eInfo, ETIMEDOUT, "query", "request");
+          }
+       qryWait++;
+       qryCond.Wait(static_cast<int>(std::chrono::duration_cast<std::chrono::seconds>(remaining).count()) + 1);
+       qryWait--;
+      }
+   qryAllow--;
+   qryCond.UnLock();
 
 // Run the query
 //
@@ -760,7 +766,7 @@ int PrepGPI::RetErr(XrdOucErrInfo &eInfo, int rc, const char *txt1,
 // Format messages
 //
    snprintf(bP, bL, "Unable to %s %s; %s", txt1, txt2, XrdSysE2T(rc));
-   eInfo.setErrCode(bL);
+   eInfo.setErrCode(rc);
    return SFS_ERROR;
 }
 }
@@ -790,7 +796,7 @@ int PrepGPI::Xeq(PrepRequest *rP)
       {PrepGRun::Q = PrepGRun::Q->next;
        grP->Sched(rP);
       } else {
-       if (PrepRequest::First) rP->next = PrepRequest::Last;
+       if (PrepRequest::First) PrepRequest::Last->next = rP;
           else PrepRequest::First = rP;
        PrepRequest::Last = rP;
      }
