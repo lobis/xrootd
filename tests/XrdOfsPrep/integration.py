@@ -9,6 +9,7 @@ import http.client
 import json
 import os
 from pathlib import Path
+import signal
 import socket
 import subprocess
 import sys
@@ -75,28 +76,64 @@ http.exthandler xrdhttptapeapi +notls libXrdHttpTapeApi.so
             raise
 
     @classmethod
-    def start(cls):
-        cls.process = subprocess.Popen([str(BUILD / 'bin' / 'xrootd'), '-c', str(cls.config), '-n', 'prepare-test'],
-                                        env=cls.env, cwd=cls.root, stdout=cls.log, stderr=subprocess.STDOUT)
-        for _ in range(150):
-            if cls.process.poll() is not None:
-                raise RuntimeError('XRootD exited during startup')
+    def _wait_for_port_release(cls):
+        for _ in range(50):
             try:
-                with socket.create_connection(('127.0.0.1', cls.port), timeout=0.1):
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    s.bind(('127.0.0.1', cls.port))
                     return
             except OSError:
                 time.sleep(0.1)
+        raise RuntimeError(f'port {cls.port} did not become available')
+
+    @classmethod
+    def start(cls):
+        for attempt in range(5):
+            cls._wait_for_port_release()
+            cls.process = subprocess.Popen(
+                [str(BUILD / 'bin' / 'xrootd'), '-c', str(cls.config),
+                 '-n', 'prepare-test'],
+                env=cls.env, cwd=cls.root, stdout=cls.log,
+                stderr=subprocess.STDOUT, start_new_session=True
+            )
+            for _ in range(150):
+                if cls.process.poll() is not None:
+                    break
+                try:
+                    conn = http.client.HTTPConnection(
+                        '127.0.0.1', cls.port, timeout=0.5
+                    )
+                    conn.request('GET', '/.well-known/wlcg-tape-rest-api')
+                    res = conn.getresponse()
+                    res.read()
+                    conn.close()
+                    if res.status == 200:
+                        return
+                    time.sleep(0.1)
+                except (OSError, http.client.HTTPException):
+                    time.sleep(0.1)
+            cls.stop(crash=True)
+            time.sleep(0.5)
         raise RuntimeError('XRootD startup timed out')
 
     @classmethod
     def stop(cls, crash=False):
         if cls.process and cls.process.poll() is None:
-            cls.process.kill() if crash else cls.process.terminate()
+            sig = signal.SIGKILL if crash else signal.SIGTERM
+            try:
+                os.killpg(os.getpgid(cls.process.pid), sig)
+            except (ProcessLookupError, OSError):
+                cls.process.kill() if crash else cls.process.terminate()
             try:
                 cls.process.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                cls.process.kill()
+                try:
+                    os.killpg(os.getpgid(cls.process.pid), signal.SIGKILL)
+                except (ProcessLookupError, OSError):
+                    cls.process.kill()
                 cls.process.wait()
+        cls._wait_for_port_release()
 
     @classmethod
     def dump_log(cls):
@@ -117,15 +154,27 @@ http.exthandler xrdhttptapeapi +notls libXrdHttpTapeApi.so
         if body is not None:
             body = json.dumps(body)
             headers['Content-Type'] = 'application/json'
-        conn = connection or http.client.HTTPConnection('127.0.0.1', self.port, timeout=15)
-        try:
-            conn.request(method, path, body, headers)
-            response = conn.getresponse()
-            payload = response.read().decode()
-            return response.status, dict(response.getheaders()), json.loads(payload) if payload else None
-        finally:
-            if connection is None:
-                conn.close()
+        for attempt in range(10):
+            conn = connection or http.client.HTTPConnection(
+                '127.0.0.1', self.port, timeout=15
+            )
+            try:
+                conn.request(method, path, body, headers)
+                response = conn.getresponse()
+                payload = response.read().decode()
+                return (
+                    response.status,
+                    dict(response.getheaders()),
+                    json.loads(payload) if payload else None,
+                )
+            except (ConnectionResetError, ConnectionRefusedError,
+                    http.client.RemoteDisconnected, BrokenPipeError):
+                if connection is not None or attempt == 9:
+                    raise
+                time.sleep(0.2)
+            finally:
+                if connection is None:
+                    conn.close()
 
     def wait_for(self, predicate, timeout=20):
         end = time.monotonic() + timeout

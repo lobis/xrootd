@@ -17,6 +17,9 @@ setup() {
   [[ -f "$ENV_FILE" ]] || fail "$ENV_FILE does not exist"
   source "$ENV_FILE"
 
+  # Start each test with a clean mock control file.
+  rm -f "$TAPE_API_ROOT/control.json"
+
   export XRD_PLUGINCONFDIR="$BINARY_DIR/tests/$TEST_NAME/client.plugins.d"
   export X509_CERT_FILE="$X509_CA_FILE"
   export BEARER_TOKEN_FILE="$READ_TOKEN"
@@ -50,6 +53,10 @@ poll_prepare() {
       printf '%s\n' "$response"
       return 0
     fi
+    if [[ "$response" == *'"state":"FAILED"'* || "$response" == *'"state":"CANCELLED"'* ]]; then
+      printf '%s\n' "$response"
+      return 1
+    fi
     sleep 1
   done
   printf '%s\n' "$response"
@@ -67,6 +74,55 @@ poll_locality() {
     sleep 1
   done
   printf '%s\n' "$response"
+  return 1
+}
+
+mock_control() {
+  printf '%s' "$1" > "$TAPE_API_ROOT/control.json.tmp"
+  mv -f "$TAPE_API_ROOT/control.json.tmp" "$TAPE_API_ROOT/control.json"
+}
+
+restart_origin() {
+  local i
+
+  if [[ -n "$ORIGIN_PID" ]] && kill -0 "$ORIGIN_PID" 2>/dev/null; then
+    kill -9 "$ORIGIN_PID" 2>/dev/null
+    for i in $(seq 1 50); do
+      kill -0 "$ORIGIN_PID" 2>/dev/null || break
+      sleep 0.1
+    done
+  fi
+
+  : > "$ORIGIN_LOG"
+  (
+    if [[ -d /dev/fd ]]; then
+      for fd in /dev/fd/*; do
+        n="${fd##*/}"
+        if [[ "$n" =~ ^[0-9]+$ ]] && [[ "$n" -ge 3 ]]; then
+          eval "exec $n>&-" 2>/dev/null || true
+        fi
+      done
+    fi
+    for fd in {3..64}; do
+      eval "exec $fd>&-" 2>/dev/null || true
+    done
+    exec "$ORIGIN_WRAPPER" -n origin -c "$ORIGIN_CONFIG" </dev/null >>"$ORIGIN_LOG" 2>&1
+  ) &
+  ORIGIN_PID=$!
+
+  # Record the new PID so the CTest fixture teardown stops this process.
+  sed -i.bak "s/^ORIGIN_PID=.*/ORIGIN_PID=$ORIGIN_PID/" "$ENV_FILE"
+  rm -f "$ENV_FILE.bak"
+
+  for i in $(seq 1 50); do
+    if grep -qa "initialization completed" "$ORIGIN_LOG"; then
+      return 0
+    fi
+    if ! kill -0 "$ORIGIN_PID" 2>/dev/null; then
+      return 1
+    fi
+    sleep 1
+  done
   return 1
 }
 
@@ -169,4 +225,40 @@ bats::on_failure() {
 
   run grep -q '"status":400' "$body"
   assert_success
+}
+
+@test "xrdfs stage recovers from a lost backend acknowledgement" {
+  mock_control '{"failAfterAccept": true}'
+
+  run "$XRDFS_BIN" prepare -s "$TAPE_FILE_URL"
+  assert_success
+  request_id="$output"
+
+  run poll_prepare "$request_id"
+  assert_success
+  assert_output --partial '"state":"COMPLETED"'
+
+  mock_control '{}'
+}
+
+@test "xrdfs stage recovers after the origin restarts" {
+  mock_control '{"queryFailure": true}'
+
+  run "$XRDFS_BIN" prepare -s "$TAPE_FILE_URL"
+  assert_success
+  request_id="$output"
+
+  run "$XRDFS_BIN" "$ORIGIN_URL" query prepare "$request_id"
+  assert_success
+  assert_output --partial '"state":"SUBMITTED"'
+
+  restart_origin || fail "could not restart the origin"
+
+  mock_control '{}'
+
+  run poll_prepare "$request_id"
+  assert_success
+  assert_output --partial '"state":"COMPLETED"'
+
+  mock_control '{}'
 }
