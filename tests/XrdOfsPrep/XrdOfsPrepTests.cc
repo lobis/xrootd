@@ -1,4 +1,5 @@
 // Copyright (c) 2026 by the XRootD Collaboration. LGPL-3.0-or-later.
+#include "XrdAcc/XrdAccAuthorize.hh"
 #include "XrdOfs/XrdOfsPrepPersist.hh"
 #include "XrdOfs/XrdOfsPrepStore.hh"
 #include "XrdOuc/XrdOucBuffer.hh"
@@ -6,6 +7,7 @@
 #include "XrdOuc/XrdOucErrInfo.hh"
 #include "XrdOuc/XrdOucTList.hh"
 #include "XrdSec/XrdSecEntity.hh"
+#include "XrdSec/XrdSecEntityAttr.hh"
 #include "XrdSfs/XrdSfsInterface.hh"
 #include <gtest/gtest.h>
 #include <chrono>
@@ -33,6 +35,7 @@ struct Args {
   Args(const std::string &request, int opts, std::initializer_list<std::string> files = {}, const std::string &cgi = "") : id(request) {
     int i = 0;
     for (const auto &path : files) { paths.Add(new XrdOucTList(path.c_str(), i++)); opaque.Add(new XrdOucTList(cgi.c_str())); }
+    if (files.size() == 0 && !cgi.empty()) opaque.Add(new XrdOucTList(cgi.c_str()));
     prep.reqid = &id[0]; prep.opts = opts; prep.paths = paths.first; prep.oinfo = opaque.first;
   }
 };
@@ -205,3 +208,100 @@ TEST(PrepPersist, BackendOutageDoesNotLoseAcceptedIntent) {
   XrdOfsPrepPersist restarted(directory.path, "test", backend, nullptr, nullptr);
   ASSERT_TRUE(Eventually([&] { return Query(restarted, id, alice)["files"][0]["state"] == "COMPLETED"; }));
 }
+TEST(PrepStore, SubdirSyncOnExistingDirectory) {
+  Temporary directory;
+  XrdOfsPrepStore store(directory.path + "/state");
+  std::string id = XrdOfsPrepStore::NewId();
+  const std::string s1 = id.substr(0, 2);
+  const std::string s2 = id.substr(2, 2);
+  fs::create_directories(store.Root() / "requests" / s1 / s2);
+  Json record = {{"schema", 1}, {"id", id}, {"value", "initial"}};
+  EXPECT_NO_THROW(store.Save(record, true));
+  EXPECT_EQ(store.Load(id)["value"], "initial");
+}
+class RejectingBackend : public Backend {
+public:
+  int begin(XrdSfsPrep &, XrdOucErrInfo &error, const XrdSecEntity *) override {
+    error.setErrInfo(ENOTSUP, "operation not supported");
+    return SFS_ERROR;
+  }
+};
+TEST(PrepPersist, PermanentBackendRejectionFailsRequest) {
+  Temporary directory; RejectingBackend backend;
+  XrdSecEntity alice("unix"); alice.name = const_cast<char *>("alice");
+  XrdOfsPrepPersist coordinator(directory.path, "test", backend, nullptr, nullptr);
+  auto id = Submit(coordinator, alice);
+  ASSERT_TRUE(Eventually([&] {
+    auto status = Query(coordinator, id, alice);
+    return status["files"][0]["state"] == "FAILED";
+  }));
+  auto status = Query(coordinator, id, alice);
+  EXPECT_EQ(status["files"][0]["state"], "FAILED");
+  EXPECT_EQ(status["files"][1]["state"], "FAILED");
+  EXPECT_EQ(status["files"][0]["error"], "operation not supported");
+  EXPECT_TRUE(status.contains("completedAt"));
+}
+class MockAuthorizer : public XrdAccAuthorize {
+public:
+  XrdAccPrivs Access(const XrdSecEntity *entity, const char *, Access_Operation,
+                     XrdOucEnv *env) override {
+    const char *token = env ? env->Get("authz") : nullptr;
+    if (token) {
+      std::string sub = token;
+      for (const char *prefix : {"Bearer%20", "Bearer "})
+        if (sub.compare(0, std::strlen(prefix), prefix) == 0) sub.erase(0, std::strlen(prefix));
+      if (sub == "alice" || sub == "bob") {
+        entity->eaAPI->Add("token.subject", sub, true);
+        entity->eaAPI->Add("token.issuer", "test-issuer", true);
+        return XrdAccPriv_All;
+      }
+    }
+    return XrdAccPriv_None;
+  }
+  int Audit(int, const XrdSecEntity *, const char *, Access_Operation, XrdOucEnv *) override { return 1; }
+  int Test(XrdAccPrivs privileges, Access_Operation) override { return privileges != XrdAccPriv_None; }
+};
+TEST(PrepPersist, NativeCgiAuthenticationPreserved) {
+  Temporary directory; Backend backend; backend.hold = true;
+  MockAuthorizer authorizer;
+  XrdOucEnv env;
+  env.PutPtr("XrdAccAuthorize*", &authorizer);
+  XrdSecEntity client("unix"); client.name = const_cast<char *>("alice");
+  XrdOfsPrepPersist coordinator(directory.path, "test", backend, &env, nullptr);
+
+  std::string id = Submit(coordinator, client, "authz=alice");
+  EXPECT_TRUE(IsId(id));
+
+  // Native query without paths: args.paths is null, args.oinfo carries "authz=alice"
+  Args queryAlice(id, Prep_QUERY, {}, "authz=alice");
+  XrdOucErrInfo error("test");
+  ASSERT_TRUE(Eventually([&] {
+    if (coordinator.query(queryAlice.prep, error, &client) != SFS_DATA) return false;
+    auto qres = Json::parse(Text(error));
+    return qres["files"].size() == 2u && qres["files"][0]["state"] == "STARTED";
+  }));
+
+  // Query with wrong token is denied
+  Args queryBob(id, Prep_QUERY, {}, "authz=bob");
+  EXPECT_EQ(coordinator.query(queryBob.prep, error, &client), SFS_ERROR);
+  EXPECT_EQ(error.getErrInfo(), EACCES);
+
+  // Query without any token is denied
+  Args queryAnon(id, Prep_QUERY);
+  EXPECT_EQ(coordinator.query(queryAnon.prep, error, &client), SFS_ERROR);
+  EXPECT_EQ(error.getErrInfo(), EACCES);
+
+  // Subset cancel on /b only with correct CGI
+  Args cancelB(id, Prep_CANCEL, {"/b"}, "authz=alice");
+  EXPECT_EQ(coordinator.cancel(cancelB.prep, error, &client), SFS_OK);
+  ASSERT_TRUE(Eventually([&] {
+    return coordinator.query(queryAlice.prep, error, &client) == SFS_DATA &&
+           Json::parse(Text(error))["files"][1]["state"] == "CANCELLED";
+  }));
+
+  // Subset cancel on /a with wrong CGI is denied
+  Args cancelAWrong(id, Prep_CANCEL, {"/a"}, "authz=bob");
+  EXPECT_EQ(coordinator.cancel(cancelAWrong.prep, error, &client), SFS_ERROR);
+  EXPECT_EQ(error.getErrInfo(), EACCES);
+}
+

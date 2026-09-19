@@ -35,6 +35,8 @@ class Integration(unittest.TestCase):
         (cls.tape / 'archive' / 'a').write_text('tape a')
         (cls.tape / 'archive' / 'b').write_text('tape b')
         (cls.tape / 'archive' / 'release-only').write_text('release data')
+        for i in range(48):
+            (cls.tape / 'archive' / f'file_{i:02d}').write_text(f'tape {i}')
         with socket.socket() as sock:
             sock.bind(('127.0.0.1', 0))
             cls.port = sock.getsockname()[1]
@@ -154,7 +156,8 @@ http.exthandler xrdhttptapeapi +notls libXrdHttpTapeApi.so
         if body is not None:
             body = json.dumps(body)
             headers['Content-Type'] = 'application/json'
-        for attempt in range(10):
+        max_attempts = 10 if method == 'GET' else 1
+        for attempt in range(max_attempts):
             conn = connection or http.client.HTTPConnection(
                 '127.0.0.1', self.port, timeout=15
             )
@@ -169,7 +172,7 @@ http.exthandler xrdhttptapeapi +notls libXrdHttpTapeApi.so
                 )
             except (ConnectionResetError, ConnectionRefusedError,
                     http.client.RemoteDisconnected, BrokenPipeError):
-                if connection is not None or attempt == 9:
+                if connection is not None or attempt == max_attempts - 1:
                     raise
                 time.sleep(0.2)
             finally:
@@ -298,6 +301,18 @@ http.exthandler xrdhttptapeapi +notls libXrdHttpTapeApi.so
         for files in ([{'path': '/a\n/b'}], [{'path': '/a/../b'}], [{'path': '/a'}] * 49):
             status, _, _ = self.request('POST', '/api/v1/stage', {'files': files})
             self.assertIn(status, (400, 413))
+
+    def test_08_max_batch_48_files_large_response(self):
+        files = [
+            {'path': f'/file_{i:02d}', 'diskLifetime': 'PT1H',
+             'targetedMetadata': {'test': {'index': i, 'desc': 'x' * 60}}}
+            for i in range(48)
+        ]
+        request_id = self.stage(files)
+        self.wait_state(request_id, 'COMPLETED')
+        body = self.status(request_id)
+        self.assertEqual(len(body['files']), 48)
+        self.assertTrue(all(f['state'] == 'COMPLETED' for f in body['files']))
 
 
 if __name__ == '__main__':
