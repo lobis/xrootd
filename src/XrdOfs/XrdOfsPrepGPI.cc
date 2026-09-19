@@ -174,50 +174,52 @@ int PrepGRun::Capture(PrepRequest &req, XrdOucStream &cmd, char *bP, int bL)
 {
    EPNAME("Capture");
    static const int bReserve = 40;
-   char *lp, *bPNow = bP, *bPEnd = bP+bL-bReserve;
-   int len;
-   bool isTrunc = false;
-
-// Make sure the buffer length is minimum we need
-//
-   if (bL < 256)
+   int fd = cmd.FDNum();
+   if (bL < 256 || fd < 0)
       {char ib[512];
        eLog->Emsg("PrepGRun","Prep exec for",req.Info(ib,sizeof(ib)),
-                             "failed; invalid buffer size.");
+                             "failed; invalid buffer size or stream.");
        return -1;
       }
 
-// Place all lines that will fit into the suplied buffer
-//
-   while((lp = cmd.GetLine()))
-        {len = strlen(lp) + 1;
-         if (bPNow + len >= bPEnd) {isTrunc = true; break;}
-         if (len > 1)
-            {strcpy(bPNow, lp);
-             bPNow[len-1] = '\n';
-             bPNow += len;
-             DEBUG(req.tID, " +=> " <<lp);
-            }
-        }
+   char *bPEnd = bP + bL - bReserve;
+   char *bPNow = bP;
+   bool isTrunc = false;
+   char drainBuf[1024];
 
-// Take care of overflow lines
-//
-   while(lp)
-        {DEBUG(req.tID, " -=> " <<lp);
-         lp = cmd.GetLine();
-        }
+   while (true)
+      {if (!isTrunc && bPNow < bPEnd)
+          {ssize_t n = read(fd, bPNow, bPEnd - bPNow);
+           if (n < 0)
+              {if (errno == EINTR) continue;
+               char ib[512];
+               eLog->Emsg("PrepGRun","Prep exec for",req.Info(ib,sizeof(ib)),
+                                     "failed; read error.");
+               return -1;
+              }
+           if (n == 0) break;
+           bPNow += n;
+          }
+       else
+          {ssize_t n = read(fd, drainBuf, sizeof(drainBuf));
+           if (n < 0)
+              {if (errno == EINTR) continue;
+               return -1;
+              }
+           if (n == 0) break;
+           isTrunc = true;
+          }
+      }
 
-// Change last line to end with a null byte and compute total length
-//
+   int len;
    if (bPNow == bP) len = snprintf(bP, bL, "No information available.") + 1;
       else {if (isTrunc) bPNow += snprintf(bPNow, bReserve,
                                     "***response has been truncated***");
-               else *(bPNow-1) = 0;
+               else *bPNow = 0;
             len = bPNow - bP + 1;
            }
 
-// Return number of bytes in buffer
-//
+   DEBUG(req.tID, "captured " << (bPNow - bP) << " bytes of output" << (isTrunc ? " (truncated)" : ""));
    return isTrunc ? -1 : len;
 }
 }
