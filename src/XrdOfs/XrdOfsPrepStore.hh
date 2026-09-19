@@ -3,6 +3,8 @@
 // Copyright (c) 2026 by the XRootD Collaboration. LGPL-3.0-or-later.
 #include "XrdOfsPrepProtocol.hh"
 #include <filesystem>
+#include <mutex>
+#include <set>
 #include <string>
 
 // A single-writer metadata store. The caller serializes read/modify/write of an
@@ -21,9 +23,12 @@ public:
   static std::string NewId();
   static uint64_t Now();
 private:
+  int Subdir(int parent, const char *name, const std::string &relPath, bool create) const;
   int Directory(const std::string &id, bool create) const;
   std::filesystem::path m_root;
   int m_rootFd = -1;
   int m_lockFd = -1;
+  mutable std::mutex m_shardMutex;
+  mutable std::set<std::string> m_syncedShards;
 };
 #endif

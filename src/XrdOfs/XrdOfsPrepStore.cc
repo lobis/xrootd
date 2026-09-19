@@ -22,15 +22,25 @@ void Sync(int fd) {
   do { rc = fsync(fd); } while (rc < 0 && errno == EINTR);
   if (rc < 0) Fail(errno, "synchronize prepare storage");
 }
-int Subdir(int parent, const char *name, bool create) {
+}
+int XrdOfsPrepStore::Subdir(int parent, const char *name, const std::string &relPath, bool create) const {
   if (create) {
-    if (mkdirat(parent, name, 0700) == 0) Sync(parent);
-    else if (errno != EEXIST) Fail(errno, "create prepare shard");
+    bool needSync = false;
+    {
+      std::lock_guard<std::mutex> guard(m_shardMutex);
+      needSync = (m_syncedShards.find(relPath) == m_syncedShards.end());
+    }
+    if (needSync) {
+      if (mkdirat(parent, name, 0700) != 0 && errno != EEXIST)
+        Fail(errno, "create prepare shard");
+      Sync(parent);
+      std::lock_guard<std::mutex> guard(m_shardMutex);
+      m_syncedShards.insert(relPath);
+    }
   }
   int fd = openat(parent, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
   if (fd < 0) Fail(errno, "open prepare shard");
   return fd;
-}
 }
 XrdOfsPrepStore::XrdOfsPrepStore(const std::string &root) : m_root(root) {
   if (!m_root.is_absolute()) Fail(EINVAL, "prepare state root must be absolute");
@@ -51,7 +61,7 @@ XrdOfsPrepStore::XrdOfsPrepStore(const std::string &root) : m_root(root) {
   if (fchmod(dir.value, 0700)) Fail(errno, "secure prepare state root");
   Fd lock(openat(dir.value, ".lock", O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600));
   if (flock(lock.value, LOCK_EX | LOCK_NB)) Fail(errno, "prepare store already has a writer");
-  Fd requests(Subdir(dir.value, "requests", true));
+  Fd requests(Subdir(dir.value, "requests", "requests", true));
   // Synchronize the root and its parent, including the new root directory entry.
   Sync(dir.value);
   Fd parent(open(m_root.parent_path().c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
@@ -83,9 +93,11 @@ int XrdOfsPrepStore::Directory(const std::string &id, bool create) const {
   if (!IsId(id)) Fail(ENOENT, "unknown prepare request");
   // UUIDv4's first bytes are uniformly random. The persisted layout fixes this
   // derivation; no implementation-dependent std::hash is used.
-  Fd requests(Subdir(m_rootFd, "requests", create));
-  Fd first(Subdir(requests.value, id.substr(0, 2).c_str(), create));
-  return Subdir(first.value, id.substr(2, 2).c_str(), create);
+  const std::string s1 = id.substr(0, 2);
+  const std::string s2 = id.substr(2, 2);
+  Fd requests(Subdir(m_rootFd, "requests", "requests", create));
+  Fd first(Subdir(requests.value, s1.c_str(), "requests/" + s1, create));
+  return Subdir(first.value, s2.c_str(), "requests/" + s1 + "/" + s2, create);
 }
 Json XrdOfsPrepStore::Load(const std::string &id) const {
   Fd dir(Directory(id, false));
