@@ -1,0 +1,47 @@
+name: Tape prepare
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [tape-rest-durable-prepare]
+  pull_request:
+    paths:
+      - 'src/XrdHttp/**'
+      - 'src/XrdHttpTapeApi/**'
+      - 'src/XrdOfs/**'
+      - 'src/XrdSciTokens/**'
+      - 'tests/**'
+      - '.github/workflows/tape-prepare.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: tape-prepare-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ libssl-dev uuid-dev zlib1g-dev libcurl4-openssl-dev libxml2-dev libkrb5-dev python3
+      - name: Configure
+        run: cmake -S . -B build -DENABLE_TESTS=ON -DENABLE_SERVER_TESTS=ON -DENABLE_PYTHON=OFF -DCMAKE_BUILD_TYPE=Debug
+      - name: Build prepare modules and tests
+        run: |
+          cmake --build build -j2 --target xrootd xrdfs XrdHttp-6 XrdHttpTapeApi-6 XrdOfsPrepPersist-6 XrdOfsPrepGPI-6 XrdSec-6 XrdSecunix-6 XrdOfsPrepTestAuth xrd-ofs-prep-tests
+      - name: Test durable store, coordinator, GPI mock and native/HTTP integration
+        run: ctest --test-dir build -R '^XrdOfsPrep::' --output-on-failure -j2
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: tape-prepare-test-logs
+          path: build/Testing/Temporary/
+          retention-days: 7
