@@ -58,7 +58,8 @@ CTest registers targets under the `XrdOfsPrep::` prefix:
   lost acknowledgement and credential-boundary checks.
 - **`XrdOfsPrep::Integration`** — a loopback fixture driving real HTTP and
   `xrdfs` requests through the bridge, OFS, the wrapper, and the GPI mock,
-  including restart recovery and failure injection.
+  including native wire session authentication vs per-path CGI authorization,
+  subset cancellation, release, restart recovery, and failure injection.
 
 The synthetic authorization library is test-only and never installed. The
 SciTokens-authenticated `XrdClHttp::tape` fixture (`tests/XrdClHttp/`) reuses

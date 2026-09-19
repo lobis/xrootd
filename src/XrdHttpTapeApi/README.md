@@ -47,7 +47,12 @@ Wrapper arguments are:
 <absolute-state-root> <backend-identity> replay-safe [maxrequests=N] [retention=N]
 ```
 
-`maxrequests` defaults to 10000 active/reconciling requests. `retention` is a
+`maxrequests` defaults to 10000 active/reconciling requests. It caps new
+stage admission: when the active queue reaches `maxrequests`, new stage submissions
+are rejected (yielding 503 / `EAGAIN`). Existing request reactivations (such as
+subset cancellations or releases on already admitted requests) and startup recovery
+bypass this admission threshold so that operator/client actions on accepted intent
+and service recovery are never locked out. `retention` is a
 positive number of seconds, default 604800 (seven days), measured from stage
 completion. Records with unacknowledged operations are never expired. Retention
 is independent of requested disk residency. `backend-identity` must remain
@@ -57,9 +62,12 @@ mismatch prevents replay of that record.
 `replay-safe` is an explicit operator assertion that the backend implements
 idempotent operation IDs and authoritative, durable acknowledgements. It is not
 an automatically detected capability. Backend calls must have bounded execution
-time: GPI does not forcibly terminate an arbitrary hanging site script. A script
-should submit/query work, not remain running for the duration of a tape recall.
-Compiled integrations must likewise enforce their own downstream deadlines.
+time: the coordinator delegates to the backend plugin or GPI script synchronously
+on its worker thread and does not impose a hard kill timeout. A script
+should submit/query work and return promptly, not remain running for the duration
+of a tape recall. Sites must enforce bounded execution (for instance via GPI
+timeout configuration or internal deadlines in compiled integrations) to avoid
+worker starvation.
 
 ## Persistent store and recovery
 
@@ -173,6 +181,17 @@ cross-mechanism certificate principal mapping are not implemented. This version
 retains native prepare's read-access authorization requirement; dedicated
 stage-only/poll-only scope policy needs separate integration before such tokens
 are advertised as supported.
+
+In the native XRootD wire protocol (`XrdXrootdProtocol`), ID-only queries
+(`xrdfs query prepare <id>`) carry no file paths and therefore transport no
+per-path opaque info (CGI) over the wire; authorization relies on the connection's
+authenticated session identity (`XrdSecEntity`). Conversely, native operations that
+supply paths (stage, query with paths, subset cancel via `prepare -a <id> <paths>`,
+and release via `prepare -e <paths>?xrd.prepare.request=<id>`) transport per-file
+CGI with each path, allowing individual token authorization per path. On the HTTP
+REST side, the bridge passes the Bearer token as CGI for all paths in stage,
+cancel and release requests, and supplies transient request CGI for ID-only status
+polling.
 
 HTTP request CGI is transient bridge state, including on ID-only operations, and
 is cleared at completion. It is never serialized into the registry. Existing
