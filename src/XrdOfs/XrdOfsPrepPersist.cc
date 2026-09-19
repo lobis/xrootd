@@ -28,6 +28,13 @@ std::string RequestCGI(const XrdSecEntity *client) {
   if (client && client->eaAPI) client->eaAPI->Get("request.cgi", cgi);
   return cgi;
 }
+bool IsRetryable(int err) {
+  return err == EAGAIN || err == EBUSY || err == ETIMEDOUT ||
+         err == ECONNREFUSED || err == ECONNRESET || err == EHOSTUNREACH ||
+         err == ENETUNREACH || err == ENETDOWN || err == ENETRESET ||
+         err == EINTR || err == EIO || err == EPIPE || err == ENOMEM ||
+         err == 0;
+}
 Json Principal(const XrdSecEntity *client) {
   if (!client) Fail(EACCES, "persistent prepare requires an authenticated identity");
   std::string subject, issuer, name;
@@ -167,28 +174,41 @@ struct XrdOfsPrepPersist::Impl {
     auto *auth = environment ? static_cast<XrdAccAuthorize *>(
                       environment->GetPtr("XrdAccAuthorize*")) : nullptr;
     if (environment && !auth) Fail(EACCES, "persistent prepare requires OFS authorization");
-    const auto requestCGI = RequestCGI(client);
-    auto *opaque = input ? input->oinfo : nullptr;
+    std::string requestCGI = RequestCGI(client);
+    if (requestCGI.empty() && input && !input->paths && input->oinfo && input->oinfo->text)
+      requestCGI = input->oinfo->text;
+    std::map<std::string, std::string> pathCGI;
+    if (input && input->paths) {
+      auto *p = input->paths;
+      auto *o = input->oinfo;
+      while (p) {
+        if (p->text) pathCGI[Path(p->text)] = (o && o->text) ? o->text : "";
+        p = p->next;
+        if (o) o = o->next;
+      }
+    }
     Json principal;
     for (const auto &file : files) {
       const auto path = file.at("path").get<std::string>();
       // Attributes from a previous file must never authorize this file.
       for (const char *key : {"request.name", "token.subject", "token.issuer"})
         client->eaAPI->Add(key, "", true);
-      const char *cgi = opaque && opaque->text ? opaque->text : requestCGI.c_str();
-      XrdOucEnv env(cgi, 0, client);
+      std::string cgi;
+      auto it = pathCGI.find(path);
+      if (it != pathCGI.end() && !it->second.empty()) cgi = it->second;
+      else cgi = requestCGI;
+      XrdOucEnv env(cgi.c_str(), 0, client);
       if (auth && !auth->Access(client, path.c_str(), AOP_Read, &env))
         Fail(EACCES, "prepare request access denied");
       auto current = Principal(client);
       if (!principal.is_null() && principal != current)
         Fail(EACCES, "all files must use the same prepare principal");
       principal = std::move(current);
-      if (opaque) opaque = opaque->next;
     }
     return principal;
   }
-  void Owner(const Json &record, const XrdSecEntity *client) {
-    if (Authorize(client, record.at("files")) != record.at("owner"))
+  void Owner(const Json &record, const XrdSecEntity *client, const Json &files, XrdSfsPrep *input = nullptr) {
+    if (Authorize(client, files, input) != record.at("owner"))
       Fail(EACCES, "prepare request belongs to another principal");
   }
   int Submit(XrdSfsPrep &args, XrdOucErrInfo &error, const XrdSecEntity *client) {
@@ -238,7 +258,7 @@ struct XrdOfsPrepPersist::Impl {
       if (it == members.end()) Fail(EINVAL, "file does not belong to prepare request");
       file = it->second;
     }
-    Owner(record, client);
+    Owner(record, client, selected, &args);
     Json changed = Json::array();
     const std::string desired = kind == "cancel" ? "cancelRequested" : "releaseRequested";
     for (auto &file : record["files"]) {
@@ -356,9 +376,36 @@ struct XrdOfsPrepPersist::Impl {
       args.args.opts = kind == "stage" ? Prep_STAGE : kind == "cancel" ? Prep_CANCEL : Prep_EVICT;
       const int rc = kind == "cancel" ? backend.cancel(args.args, error, &service)
                                       : backend.begin(args.args, error, &service);
-      // SFS_OK only means local dispatch for GPI. A query acknowledgement is
-      // required before this operation can be removed from the durable queue.
-      if (rc != SFS_OK && rc != SFS_DATA) Fail(EAGAIN, "prepare backend dispatch unavailable");
+      if (rc != SFS_OK && rc != SFS_DATA) {
+        const int err = error.getErrInfo();
+        if (IsRetryable(err)) Fail(EAGAIN, "prepare backend dispatch unavailable");
+        const char *msg = error.getErrText();
+        std::string reason = (msg && *msg) ? msg : "operation rejected by backend";
+        std::lock_guard<std::mutex> guard(Lock(id));
+        auto record = Load(id, false);
+        if (kind == "stage") {
+          for (auto &file : record["files"]) {
+            for (const auto &pf : pending.at("files")) {
+              if (file.at("path") == pf.at("path") && !Terminal(file.at("state").get<std::string>())) {
+                file["state"] = "FAILED";
+                file["error"] = reason;
+                file["finishedAt"] = XrdOfsPrepStore::Now();
+              }
+            }
+          }
+        }
+        for (auto &operation : record["operations"]) {
+          if (operation.at("id") == pending.at("id")) {
+            operation["state"] = "done";
+            operation["error"] = reason;
+          }
+        }
+        bool terminal = true;
+        for (const auto &file : record["files"]) terminal &= Terminal(file.at("state").get<std::string>());
+        if (terminal && !record.contains("completedAt")) record["completedAt"] = XrdOfsPrepStore::Now();
+        store.Save(record);
+        if (Finished(record)) return true;
+      }
     }
     return false;
   }
@@ -468,7 +515,7 @@ int XrdOfsPrepPersist::query(XrdSfsPrep &args, XrdOucErrInfo &error, const XrdSe
     }
     std::lock_guard<std::mutex> guard(m_impl->Lock(id));
     auto record = m_impl->Load(id);
-    m_impl->Owner(record, client);
+    m_impl->Owner(record, client, record.at("files"), &args);
     return Data(error, Status(record).dump());
   });
 }
