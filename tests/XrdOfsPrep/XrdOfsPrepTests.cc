@@ -208,16 +208,38 @@ TEST(PrepPersist, BackendOutageDoesNotLoseAcceptedIntent) {
   XrdOfsPrepPersist restarted(directory.path, "test", backend, nullptr, nullptr);
   ASSERT_TRUE(Eventually([&] { return Query(restarted, id, alice)["files"][0]["state"] == "COMPLETED"; }));
 }
-TEST(PrepStore, SubdirSyncOnExistingDirectory) {
+TEST(PrepStore, RetryFsyncOnSubdirSyncFailure) {
   Temporary directory;
-  XrdOfsPrepStore store(directory.path + "/state");
+  int syncCalls = 0;
+  bool failSync = false;
+  XrdOfsPrepStore::SetSyncHook([&](int) {
+    syncCalls++;
+    if (failSync) throw std::system_error(make_error_code(std::errc::io_error), "injected sync failure");
+  });
   std::string id = XrdOfsPrepStore::NewId();
-  const std::string s1 = id.substr(0, 2);
-  const std::string s2 = id.substr(2, 2);
-  fs::create_directories(store.Root() / "requests" / s1 / s2);
-  Json record = {{"schema", 1}, {"id", id}, {"value", "initial"}};
-  EXPECT_NO_THROW(store.Save(record, true));
-  EXPECT_EQ(store.Load(id)["value"], "initial");
+  {
+    XrdOfsPrepStore store(directory.path + "/state");
+    failSync = true;
+    syncCalls = 0;
+    Json record = {{"schema", 1}, {"id", id}, {"value", "initial"}};
+    EXPECT_THROW(store.Save(record, true), std::system_error);
+    EXPECT_GT(syncCalls, 0);
+
+    // Disable failure: the directory shards exist, but store must retry parent fsync
+    failSync = false;
+    syncCalls = 0;
+    EXPECT_NO_THROW(store.Save(record, true));
+    EXPECT_GT(syncCalls, 0);
+    EXPECT_EQ(store.Load(id)["value"], "initial");
+
+    // Saving another record in the same shard should not re-sync the parent directory
+    std::string sameShardId = id.substr(0, 4) + XrdOfsPrepStore::NewId().substr(4);
+    Json second = {{"schema", 1}, {"id", sameShardId}, {"value", "second"}};
+    syncCalls = 0;
+    EXPECT_NO_THROW(store.Save(second, true));
+    EXPECT_EQ(store.Load(sameShardId)["value"], "second");
+  }
+  XrdOfsPrepStore::SetSyncHook(nullptr);
 }
 class RejectingBackend : public Backend {
 public:
@@ -241,6 +263,81 @@ TEST(PrepPersist, PermanentBackendRejectionFailsRequest) {
   EXPECT_EQ(status["files"][0]["error"], "operation not supported");
   EXPECT_TRUE(status.contains("completedAt"));
 }
+class MutateRejectingBackend : public Backend {
+public:
+  bool rejectCancel = false;
+  bool rejectEvict = false;
+  int cancel(XrdSfsPrep &args, XrdOucErrInfo &error, const XrdSecEntity *e) override {
+    if (rejectCancel) {
+      error.setErrInfo(ENOTSUP, "cancel not supported");
+      return SFS_ERROR;
+    }
+    return Backend::cancel(args, error, e);
+  }
+  int begin(XrdSfsPrep &args, XrdOucErrInfo &error, const XrdSecEntity *e) override {
+    if ((args.opts & Prep_EVICT) && rejectEvict) {
+      error.setErrInfo(ENOTSUP, "evict not supported");
+      return SFS_ERROR;
+    }
+    return Backend::begin(args, error, e);
+  }
+};
+TEST(PrepPersist, PermanentCancelAndReleaseRejectionAllowsRetry) {
+  Temporary directory; MutateRejectingBackend backend; backend.hold = true;
+  XrdSecEntity alice("unix"); alice.name = const_cast<char *>("alice");
+  XrdOfsPrepPersist coordinator(directory.path, "test", backend, nullptr, nullptr);
+  auto id = Submit(coordinator, alice);
+  ASSERT_TRUE(Eventually([&] { return Query(coordinator, id, alice)["files"][0]["state"] == "STARTED"; }));
+
+  // Reject cancel with ENOTSUP
+  backend.rejectCancel = true;
+  Args cancelA(id, Prep_CANCEL, {"/a"});
+  XrdOucErrInfo error("test");
+  EXPECT_EQ(coordinator.cancel(cancelA.prep, error, &alice), SFS_OK);
+  ASSERT_TRUE(Eventually([&] {
+    auto status = Query(coordinator, id, alice);
+    return status["files"][0].contains("cancelError");
+  }));
+  auto status = Query(coordinator, id, alice);
+  EXPECT_EQ(status["files"][0]["state"], "STARTED");
+  EXPECT_EQ(status["files"][0]["cancelError"], "cancel not supported");
+
+  // Fix backend and retry cancel: cancelRequested was cleared, so retry is accepted
+  backend.rejectCancel = false;
+  EXPECT_EQ(coordinator.cancel(cancelA.prep, error, &alice), SFS_OK);
+  ASSERT_TRUE(Eventually([&] {
+    return Query(coordinator, id, alice)["files"][0]["state"] == "CANCELLED";
+  }));
+  status = Query(coordinator, id, alice);
+  EXPECT_EQ(status["files"][0]["state"], "CANCELLED");
+  EXPECT_FALSE(status["files"][0].contains("cancelError"));
+
+  // Now test evict on /b: first let /b complete
+  backend.hold = false;
+  ASSERT_TRUE(Eventually([&] {
+    return Query(coordinator, id, alice)["files"][1]["state"] == "COMPLETED";
+  }));
+
+  // Reject evict with ENOTSUP
+  backend.rejectEvict = true;
+  Args evictB("*", Prep_EVICT, {"/b"}, "xrd.prepare.request=" + id);
+  EXPECT_EQ(coordinator.begin(evictB.prep, error, &alice), SFS_OK);
+  ASSERT_TRUE(Eventually([&] {
+    auto q = Query(coordinator, id, alice);
+    return q["files"][1].contains("releaseError");
+  }));
+  status = Query(coordinator, id, alice);
+  EXPECT_EQ(status["files"][1]["state"], "COMPLETED");
+  EXPECT_EQ(status["files"][1]["releaseError"], "evict not supported");
+
+  // Fix backend and retry evict
+  backend.rejectEvict = false;
+  EXPECT_EQ(coordinator.begin(evictB.prep, error, &alice), SFS_OK);
+  ASSERT_TRUE(Eventually([&] {
+    auto q = Query(coordinator, id, alice);
+    return !q["files"][1].contains("releaseError");
+  }));
+}
 class MockAuthorizer : public XrdAccAuthorize {
 public:
   XrdAccPrivs Access(const XrdSecEntity *entity, const char *, Access_Operation,
@@ -261,6 +358,12 @@ public:
   int Audit(int, const XrdSecEntity *, const char *, Access_Operation, XrdOucEnv *) override { return 1; }
   int Test(XrdAccPrivs privileges, Access_Operation) override { return privileges != XrdAccPriv_None; }
 };
+// Note: In native XRootD wire protocol (XrdXrootdProtocol), ID-only query
+// (xrdfs query prepare <id>) carries no paths and thus no per-path opaque info
+// over the wire; it relies on session authentication (XrdSecEntity). Per-file
+// CGI is transported and authenticated with file paths (during stage, query with
+// paths, subset cancel, and evict). The unit test below exercises the coordinator's
+// handling of both request-level fallback CGI and per-path CGI mappings.
 TEST(PrepPersist, NativeCgiAuthenticationPreserved) {
   Temporary directory; Backend backend; backend.hold = true;
   MockAuthorizer authorizer;

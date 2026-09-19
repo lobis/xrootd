@@ -314,6 +314,114 @@ http.exthandler xrdhttptapeapi +notls libXrdHttpTapeApi.so
         self.assertEqual(len(body['files']), 48)
         self.assertTrue(all(f['state'] == 'COMPLETED' for f in body['files']))
 
+    def test_09_native_wire_auth_and_mutations(self):
+        atomic_json(self.tape / 'control.json', {'hold': True})
+        try:
+            url = f'root://127.0.0.1:{self.port}'
+            xrdfs = str(BUILD / 'bin' / 'xrdfs')
+            # 1. Native stage with per-file CGI authz
+            res = subprocess.run(
+                [xrdfs, 'prepare', '-s',
+                 f'{url}//a?authz=alice', f'{url}//b?authz=alice'],
+                env=self.env, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, universal_newlines=True, timeout=20
+            )
+            self.assertEqual(res.returncode, 0, res.stderr)
+            request_id = res.stdout.strip()
+            self.assertRegex(request_id, r'^[0-9a-f-]{36}$')
+            self.wait_for(lambda: all(
+                f['state'] == 'STARTED'
+                for f in self.status(request_id)['files']
+            ))
+
+            # 2. ID-only query: wire protocol carries no paths, relying on
+            # session authentication.
+            q_id = subprocess.run(
+                [xrdfs, url, 'query', 'prepare', request_id],
+                env=self.env, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, universal_newlines=True, timeout=20
+            )
+            self.assertEqual(q_id.returncode, 0, q_id.stderr)
+            q_data = json.loads(q_id.stdout)
+            self.assertEqual(q_data['id'], request_id)
+            self.assertEqual(len(q_data['files']), 2)
+
+            # 3. Query with paths and per-file CGI
+            # Valid token succeeds
+            q_ok = subprocess.run(
+                [xrdfs, url, 'query', 'prepare', request_id, '/a?authz=alice'],
+                env=self.env, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, universal_newlines=True, timeout=20
+            )
+            self.assertEqual(q_ok.returncode, 0, q_ok.stderr)
+            # Wrong token rejected (permission denied)
+            q_bad = subprocess.run(
+                [xrdfs, url, 'query', 'prepare', request_id, '/a?authz=bob'],
+                env=self.env, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, universal_newlines=True, timeout=20
+            )
+            self.assertNotEqual(q_bad.returncode, 0)
+            self.assertIn('Permission denied', q_bad.stderr)
+
+            # 4. Subset cancel with per-file CGI
+            # Wrong token rejected
+            c_bad = subprocess.run(
+                [xrdfs, url, 'prepare', '-a', request_id, '/a?authz=bob'],
+                env=self.env, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, universal_newlines=True, timeout=20
+            )
+            self.assertNotEqual(c_bad.returncode, 0)
+            self.assertIn('Permission denied', c_bad.stderr)
+
+            # Valid cancel on subset /a only
+            c_ok = subprocess.run(
+                [xrdfs, url, 'prepare', '-a', request_id, '/a?authz=alice'],
+                env=self.env, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, universal_newlines=True, timeout=20
+            )
+            self.assertEqual(c_ok.returncode, 0, c_ok.stderr)
+            self.wait_for(
+                lambda: self.status(request_id)['files'][0]['state'] ==
+                'CANCELLED'
+            )
+            st = self.status(request_id)
+            self.assertEqual(st['files'][0]['state'], 'CANCELLED')
+            self.assertEqual(st['files'][1]['state'], 'STARTED')
+
+            # 5. Evict (release) with per-file CGI
+            # Release backend hold so /b completes
+            atomic_json(self.tape / 'control.json', {})
+            self.wait_for(
+                lambda: self.status(request_id)['files'][1]['state'] ==
+                'COMPLETED'
+            )
+
+            # Evict with wrong token rejected
+            e_bad = subprocess.run(
+                [xrdfs, url, 'prepare', '-e',
+                 f'/b?xrd.prepare.request={request_id}&authz=bob'],
+                env=self.env, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, universal_newlines=True, timeout=20
+            )
+            self.assertNotEqual(e_bad.returncode, 0)
+            self.assertIn('Permission denied', e_bad.stderr)
+
+            # Evict with valid token accepted
+            e_ok = subprocess.run(
+                [xrdfs, url, 'prepare', '-e',
+                 f'/b?xrd.prepare.request={request_id}&authz=alice'],
+                env=self.env, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, universal_newlines=True, timeout=20
+            )
+            self.assertEqual(e_ok.returncode, 0, e_ok.stderr)
+            bpath = (self.tape / 'backend' / 'requests' /
+                     request_id[:2] / request_id[2:4] / (request_id + '.json'))
+            self.wait_for(
+                lambda: len(json.loads(bpath.read_text())['operations']) == 3
+            )
+        finally:
+            atomic_json(self.tape / 'control.json', {})
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
