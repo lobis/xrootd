@@ -3,6 +3,7 @@
 // Copyright (c) 2026 by the XRootD Collaboration. LGPL-3.0-or-later.
 #include "XrdOfsPrepProtocol.hh"
 #include <filesystem>
+#include <functional>
 #include <mutex>
 #include <set>
 #include <string>
@@ -22,6 +23,7 @@ public:
   const std::filesystem::path &Root() const { return m_root; }
   static std::string NewId();
   static uint64_t Now();
+  static void SetSyncHook(std::function<void(int)> hook);
 private:
   int Subdir(int parent, const char *name, const std::string &relPath, bool create) const;
   int Directory(const std::string &id, bool create) const;

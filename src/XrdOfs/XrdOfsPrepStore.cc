@@ -10,6 +10,7 @@
 
 using namespace XrdOfsPrepProtocol;
 namespace {
+std::function<void(int)> g_syncHook;
 struct Fd {
   int value;
   explicit Fd(int fd) : value(fd) { if (fd < 0) Fail(errno, "open prepare storage"); }
@@ -18,10 +19,14 @@ struct Fd {
   Fd &operator=(const Fd &) = delete;
 };
 void Sync(int fd) {
+  if (g_syncHook) g_syncHook(fd);
   int rc;
   do { rc = fsync(fd); } while (rc < 0 && errno == EINTR);
   if (rc < 0) Fail(errno, "synchronize prepare storage");
 }
+}
+void XrdOfsPrepStore::SetSyncHook(std::function<void(int)> hook) {
+  g_syncHook = std::move(hook);
 }
 int XrdOfsPrepStore::Subdir(int parent, const char *name, const std::string &relPath, bool create) const {
   if (create) {

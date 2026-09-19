@@ -28,12 +28,10 @@ std::string RequestCGI(const XrdSecEntity *client) {
   if (client && client->eaAPI) client->eaAPI->Get("request.cgi", cgi);
   return cgi;
 }
-bool IsRetryable(int err) {
-  return err == EAGAIN || err == EBUSY || err == ETIMEDOUT ||
-         err == ECONNREFUSED || err == ECONNRESET || err == EHOSTUNREACH ||
-         err == ENETUNREACH || err == ENETDOWN || err == ENETRESET ||
-         err == EINTR || err == EIO || err == EPIPE || err == ENOMEM ||
-         err == 0;
+bool IsDefinitiveRejection(int err) {
+  return err == ENOTSUP || err == EOPNOTSUPP || err == EINVAL ||
+         err == EPERM || err == EACCES || err == ENOENT || err == ENOSYS ||
+         err == E2BIG || err == EROFS || err == ENAMETOOLONG;
 }
 Json Principal(const XrdSecEntity *client) {
   if (!client) Fail(EACCES, "persistent prepare requires an authenticated identity");
@@ -74,7 +72,7 @@ Json Status(const Json &record) {
   if (record.contains("completedAt")) result["completedAt"] = record["completedAt"];
   for (const auto &file : record.at("files")) {
     Json out = {{"path", file.at("path")}, {"state", file.at("state")}};
-    for (const char *key : {"startedAt", "finishedAt", "error"})
+    for (const char *key : {"startedAt", "finishedAt", "error", "cancelError", "releaseError"})
       if (file.contains(key)) out[key] = file[key];
     result["files"].push_back(std::move(out));
   }
@@ -84,7 +82,7 @@ bool Finished(const Json &record) {
   for (const auto &file : record.at("files"))
     if (!Terminal(file.at("state").get<std::string>())) return false;
   for (const auto &operation : record.at("operations"))
-    if (operation.at("state") != "done") return false;
+    if (operation.at("state") != "done" && operation.at("state") != "failed") return false;
   return true;
 }
 int Data(XrdOucErrInfo &error, const std::string &text) {
@@ -261,13 +259,16 @@ struct XrdOfsPrepPersist::Impl {
     Owner(record, client, selected, &args);
     Json changed = Json::array();
     const std::string desired = kind == "cancel" ? "cancelRequested" : "releaseRequested";
+    const std::string errorKey = kind == "cancel" ? "cancelError" : "releaseError";
     for (auto &file : record["files"]) {
       const auto path = file.at("path").get<std::string>();
       auto chosen = std::find_if(selected.begin(), selected.end(), [&](const Json &v) {
         return v.at("path") == path;
       });
       if (chosen != selected.end() && !file.value(desired, false)) {
-        file[desired] = true; changed.push_back(*chosen);
+        file[desired] = true;
+        file.erase(errorKey);
+        changed.push_back(*chosen);
       }
     }
     if (deleting) record["deleted"] = true;
@@ -313,8 +314,9 @@ struct XrdOfsPrepPersist::Impl {
       if (!actual.insert(path).second || !expected.count(path)) Fail(EIO, "invalid backend file set");
       if (id != ArchiveQuery && !State(file.at("state").get<std::string>()))
         Fail(EIO, "invalid backend file state");
-      if (file.contains("error") && (!file["error"].is_string() || file["error"].get<std::string>().size() > 2048))
-        Fail(EIO, "invalid backend file error");
+      for (const char *key : {"error", "cancelError", "releaseError"})
+        if (file.contains(key) && (!file[key].is_string() || file[key].get<std::string>().size() > 2048))
+          Fail(EIO, "invalid backend file error");
       for (const char *key : {"startedAt", "finishedAt"})
         if (file.contains(key) && !file[key].is_number_unsigned()) Fail(EIO, "invalid backend timestamp");
       if (id == ArchiveQuery && !file.contains("error")) {
@@ -343,12 +345,23 @@ struct XrdOfsPrepPersist::Impl {
             for (const char *key : {"state", "startedAt", "finishedAt", "error"})
               if (file.contains(key)) local[key] = file[key];
           }
+          if (file.contains("cancelError")) {
+            local["cancelError"] = file["cancelError"];
+            local.erase("cancelRequested");
+          }
+          if (file.contains("releaseError")) {
+            local["releaseError"] = file["releaseError"];
+            local.erase("releaseRequested");
+          }
         }
       }
       std::set<std::string> acknowledged;
       for (const auto &value : observed.at("acknowledged")) acknowledged.insert(value);
-      for (auto &operation : record["operations"])
-        if (acknowledged.count(operation.at("id"))) operation["state"] = "done";
+      for (auto &operation : record["operations"]) {
+        if (acknowledged.count(operation.at("id"))) {
+          if (operation.at("state") != "failed") operation["state"] = "done";
+        }
+      }
       // Cancellation before the first dispatch can be completed without tape IO.
       bool allCancelled = true;
       for (const auto &file : record["files"]) allCancelled &= file.value("cancelRequested", false);
@@ -357,10 +370,12 @@ struct XrdOfsPrepPersist::Impl {
         for (auto &file : record["files"]) { file["state"] = "CANCELLED"; file["finishedAt"] = XrdOfsPrepStore::Now(); }
         for (auto &operation : record["operations"]) operation["state"] = "done";
       }
-      for (auto &operation : record["operations"]) if (operation.at("state") != "done") {
-        operation["state"] = "dispatched";
-        pending = operation;
-        break;
+      for (auto &operation : record["operations"]) {
+        if (operation.at("state") != "done" && operation.at("state") != "failed") {
+          operation["state"] = "dispatched";
+          pending = operation;
+          break;
+        }
       }
       bool terminal = true;
       for (const auto &file : record["files"]) terminal &= Terminal(file.at("state").get<std::string>());
@@ -378,7 +393,7 @@ struct XrdOfsPrepPersist::Impl {
                                       : backend.begin(args.args, error, &service);
       if (rc != SFS_OK && rc != SFS_DATA) {
         const int err = error.getErrInfo();
-        if (IsRetryable(err)) Fail(EAGAIN, "prepare backend dispatch unavailable");
+        if (!IsDefinitiveRejection(err)) Fail(EAGAIN, "prepare backend dispatch unavailable");
         const char *msg = error.getErrText();
         std::string reason = (msg && *msg) ? msg : "operation rejected by backend";
         std::lock_guard<std::mutex> guard(Lock(id));
@@ -393,10 +408,28 @@ struct XrdOfsPrepPersist::Impl {
               }
             }
           }
+        } else if (kind == "cancel") {
+          for (auto &file : record["files"]) {
+            for (const auto &pf : pending.at("files")) {
+              if (file.at("path") == pf.at("path")) {
+                file["cancelError"] = reason;
+                file.erase("cancelRequested");
+              }
+            }
+          }
+        } else if (kind == "evict") {
+          for (auto &file : record["files"]) {
+            for (const auto &pf : pending.at("files")) {
+              if (file.at("path") == pf.at("path")) {
+                file["releaseError"] = reason;
+                file.erase("releaseRequested");
+              }
+            }
+          }
         }
         for (auto &operation : record["operations"]) {
           if (operation.at("id") == pending.at("id")) {
-            operation["state"] = "done";
+            operation["state"] = "failed";
             operation["error"] = reason;
           }
         }
