@@ -104,7 +104,7 @@ class ProgressDisplay: public XrdCl::CopyProgressHandler
     virtual void BeginJob( uint32_t          jobNum,
                            uint32_t          jobTotal,
                            const XrdCl::URL *source,
-                           const XrdCl::URL *destination )
+                           const XrdCl::URL *destination ) override
     {
       XrdSysMutexHelper scopedLock( pMutex );
       if( pPrintProgressBar )
@@ -128,7 +128,7 @@ class ProgressDisplay: public XrdCl::CopyProgressHandler
     //--------------------------------------------------------------------------
     //! End job
     //--------------------------------------------------------------------------
-    virtual void EndJob( uint32_t jobNum, const XrdCl::PropertyList *results )
+    virtual void EndJob( uint32_t jobNum, const XrdCl::PropertyList *results ) override
     {
       XrdSysMutexHelper scopedLock( pMutex );
 
@@ -263,7 +263,7 @@ class ProgressDisplay: public XrdCl::CopyProgressHandler
     //--------------------------------------------------------------------------
     virtual void JobProgress( uint32_t jobNum,
                               uint64_t bytesProcessed,
-                              uint64_t bytesTotal )
+                              uint64_t bytesTotal ) override
     {
       XrdSysMutexHelper scopedLock( pMutex );
 
