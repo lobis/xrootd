@@ -135,6 +135,7 @@ namespace XrdCl
       //! thirdParty     [string]   - "first" try third party copy, if it fails
       //!                             try normal copy; "only" only try third
       //!                             party copy
+      //! thirdPartyMode [string]   - HTTP TPC direction: "pull" (default), "push", or "auto"
       //! checkSumMode   [string]   - "none"    - no checksumming
       //!                             "end2end" - end to end checksumming
       //!                             "source"  - calculate checksum at source

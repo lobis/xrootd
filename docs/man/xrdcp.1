@@ -134,6 +134,16 @@ Delegation is ignored if the target server is not configured to use delegated
 credentials. Currently, only gsi credentials can be delegated.
 
 .RE
+\fB--tpc-mode\fR \fBpull\fR|\fBpush\fR|\fBauto\fR
+.RS 5
+selects the direction for HTTP/WebDAV third-party copies. The default is pull:
+the destination server retrieves the source. Push asks the source server to
+write to the destination. Auto tries pull, then push after a transfer-channel
+I/O failure. With '--tpc first', it can then try a streamed copy. Authentication,
+cancellation, deadline and checksum failures are terminal. This option requires
+the HTTP client plug-in; proxy delegation for HTTP copies is not implemented.
+
+.RE
 \fB-v\fR | \fB--verbose\fR
 .RS 5
 displays summary output.

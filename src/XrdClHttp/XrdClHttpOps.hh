@@ -34,6 +34,7 @@
 #include <XrdCl/XrdClXRootDResponses.hh>
 
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -77,6 +78,9 @@ struct HttpClientConfig {
 std::string ExtractHttpClientConfig(const std::string &url,
     HttpClientConfig &config, std::string *client_query = nullptr);
 
+XrdCl::XRootDStatus HttpTransferHeaders(std::string &url,
+    std::vector<std::pair<std::string, std::string>> &headers, XrdCl::Log *logger);
+
 class CurlOperation {
 public:
     using HeaderList = std::vector<std::pair<std::string, std::string>>;
@@ -103,6 +107,7 @@ public:
     virtual bool Setup(CURL *curl, CurlWorker &);
 
     virtual void Fail(uint16_t errCode, uint32_t errNum, const std::string &);
+    void SetCancelCallback(std::function<bool()> callback) { m_cancel = std::move(callback); }
 
     virtual void ReleaseHandle();
 
@@ -343,6 +348,8 @@ protected:
 
     // Set the pause status
     void SetPaused(bool paused);
+
+    std::function<bool()> m_cancel;
 
     // The default minimum transfer rate for the operation, in bytes / sec
     static constexpr int m_default_minimum_rate{1024 * 256}; // 256 KB/sec
@@ -1019,7 +1026,7 @@ public:
     using Headers = std::vector<std::pair<std::string, std::string>>;
 
     CurlCopyOp(XrdCl::ResponseHandler *handler, const std::string &source_url, const Headers &source_hdrs, const std::string &dest_url, const Headers &dest_hdrs, struct timespec timeout,
-        XrdCl::Log *logger, CreateConnCalloutType callout);
+        XrdCl::Log *logger, CreateConnCalloutType callout, bool push = false);
 
     virtual ~CurlCopyOp() {}
 
@@ -1042,7 +1049,10 @@ private:
     static size_t WriteCallback(char *buffer, size_t size, size_t nitems, void *this_ptr);
 
     // Source of the TPC transfer
-    std::string m_source_url;
+    std::string m_remote_url;
+    Headers m_transfer_headers;
+    bool m_push{false};
+    bool m_transfer_prepared{false};
     CopyResponse m_response;
     std::unique_ptr<CurlProgressCallback> m_callback;
 };

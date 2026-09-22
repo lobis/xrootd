@@ -17,6 +17,7 @@
 #include "XrdClHttp/XrdClHttpFactory.hh"
 #include "XrdClHttp/XrdClHttpOps.hh"
 #include <XrdCl/XrdClDefaultEnv.hh>
+#include <XrdCl/XrdClPropertyList.hh>
 #include "Server.hh"
 #include "Utils.hh"
 
@@ -269,3 +270,27 @@ TEST(CopyResponseParser, RejectsMalformedByteCountsAndDuplicateEnds)
 }
 
 } // namespace
+
+
+TEST(HttpCopySafety, RejectSelfCopyBeforeNetworkOrOverwrite)
+{
+    XrdClHttp::Factory factory;
+    const std::vector<std::pair<std::string, std::string>> urls = {
+        {"http://storage.invalid/file", "http://storage.invalid/file"},
+        {"dav://storage.invalid/file", "http://storage.invalid:80/file"},
+        {"https://STORAGE.invalid/file?authz=source", "davs://storage.invalid/file?authz=target"},
+        {"http://storage.invalid/file?xrdcl.http.noauth=true", "http://storage.invalid/file"}
+    };
+    for (const auto &url : urls) {
+        for (const auto *mode : {"pull", "push", "auto"}) {
+            XrdCl::PropertyList properties, results;
+            properties.Set("source", url.first);
+            properties.Set("target", url.second);
+            properties.Set("force", true);
+            properties.Set("thirdPartyMode", std::string(mode));
+            auto status = factory.ThirdPartyCopy(0, properties, results, nullptr);
+            EXPECT_EQ(status.code, XrdCl::errInvalidArgs);
+            EXPECT_EQ(status.errNo, EINVAL);
+        }
+    }
+}
