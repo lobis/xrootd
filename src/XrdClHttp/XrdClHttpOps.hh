@@ -22,6 +22,7 @@
 #define XRDCLHTTP_CURLOPS_HH
 
 #include "XrdClHttpConnectionCallout.hh"
+#include "XrdClHttpCopyResponse.hh"
 #include "XrdClHttpHeaderCallout.hh"
 #include "XrdClHttpResponseInfo.hh"
 #include "XrdClHttpTape.hh"
@@ -1040,29 +1041,10 @@ private:
     // Callback for writing the response body to the internal buffer.
     static size_t WriteCallback(char *buffer, size_t size, size_t nitems, void *this_ptr);
 
-    // Handle a line of information in the control channel.
-    void HandleLine(std::string_view line);
-
-    // Returns true if the control channel has not gotten data recently enough.
-    bool ControlChannelTimeoutExpired() const;
-
     // Source of the TPC transfer
     std::string m_source_url;
-
-    // Buffer of current response line
-    std::string m_line_buffer;
-
-    // A callback object for when a performance marker is received
+    CopyResponse m_response;
     std::unique_ptr<CurlProgressCallback> m_callback;
-
-    // The performance marker indication of bytes processed.
-    off_t m_bytemark{-1};
-
-    // Whether the COPY operation indicated a success status in the control channel:
-    bool m_sent_success{false};
-
-    // Failure string sent back in the control channel:
-    std::string m_failure;
 };
 
 // An upload operation
