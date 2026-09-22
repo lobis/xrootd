@@ -143,6 +143,12 @@ I/O failure. With '--tpc first', it can then try a streamed copy. Authentication
 cancellation, deadline and checksum failures are terminal. This option requires
 the HTTP client plug-in; proxy delegation for HTTP copies is not implemented.
 
+.PP
+During a copy, SIGINT and SIGTERM request cancellation through the copy job so
+that configured cleanup can finish. For HTTP third-party copies, --posc removes
+new partial targets; without --posc they are retained. A second signal exits
+immediately without waiting for cleanup.
+
 .RE
 \fB-v\fR | \fB--verbose\fR
 .RS 5

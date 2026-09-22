@@ -55,6 +55,16 @@ target_link_libraries(xrdcl-http-copy-response-test
 gtest_discover_tests(xrdcl-http-copy-response-test TEST_PREFIX XrdClHttp::
   PROPERTIES DISCOVERY_TIMEOUT 10 TIMEOUT 20)
 
+# Signal/cleanup coverage uses only a disposable localhost HTTP server.
+find_package(Python3 QUIET COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+  add_test(NAME XrdClHttp::CopyInterrupt
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/CopyInterruptTest.py"
+      --xrdcp $<TARGET_FILE:xrdcp>
+      --plugin $<TARGET_FILE:XrdClHttp-${PLUGIN_VERSION}>)
+  set_tests_properties(XrdClHttp::CopyInterrupt PROPERTIES TIMEOUT 90)
+endif()
+
 # XrdClHttp integration tests depend on scitokens fixture for authentication
 if(NOT ENABLE_SERVER_TESTS OR NOT BUILD_SCITOKENS)
   return()

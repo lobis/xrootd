@@ -37,9 +37,44 @@
 #include "XrdOuc/XrdOucPrivateUtils.hh"
 
 #include <cstdio>
+#include <atomic>
+#include <csignal>
 #include <iostream>
 #include <iomanip>
 #include <limits>
+
+namespace {
+std::atomic<int> copySignal{0};
+static_assert(ATOMIC_INT_LOCK_FREE == 2, "Copy signal state must be lock-free");
+
+void CancelCopy(int signal)
+{
+  // A second signal is an explicit request to stop without waiting for cleanup.
+  if (copySignal.exchange(signal, std::memory_order_relaxed)) _exit(128 + signal);
+}
+
+class CopySignalHandlers
+{
+public:
+  CopySignalHandlers()
+  {
+    struct sigaction action{};
+    action.sa_handler = CancelCopy;
+    sigemptyset(&action.sa_mask);
+    action.sa_flags = SA_RESTART;
+    pInt = sigaction(SIGINT, &action, &pOldInt) == 0;
+    pTerm = sigaction(SIGTERM, &action, &pOldTerm) == 0;
+  }
+  ~CopySignalHandlers()
+  {
+    if (pInt) sigaction(SIGINT, &pOldInt, nullptr);
+    if (pTerm) sigaction(SIGTERM, &pOldTerm, nullptr);
+  }
+private:
+  struct sigaction pOldInt{}, pOldTerm{};
+  bool pInt{false}, pTerm{false};
+};
+}
 
 //------------------------------------------------------------------------------
 // Progress notifier
@@ -56,12 +91,20 @@ class ProgressDisplay: public XrdCl::CopyProgressHandler
     {}
 
     //--------------------------------------------------------------------------
+    //! Stop gracefully when the command receives an interrupt
+    //--------------------------------------------------------------------------
+    bool ShouldCancel(uint32_t) override
+    {
+      return copySignal.load(std::memory_order_relaxed) != 0;
+    }
+
+    //--------------------------------------------------------------------------
     //! Begin job
     //--------------------------------------------------------------------------
     virtual void BeginJob( uint32_t          jobNum,
                            uint32_t          jobTotal,
                            const XrdCl::URL *source,
-                           const XrdCl::URL *destination )
+                           const XrdCl::URL *destination ) override
     {
       XrdSysMutexHelper scopedLock( pMutex );
       if( pPrintProgressBar )
@@ -85,7 +128,7 @@ class ProgressDisplay: public XrdCl::CopyProgressHandler
     //--------------------------------------------------------------------------
     //! End job
     //--------------------------------------------------------------------------
-    virtual void EndJob( uint32_t jobNum, const XrdCl::PropertyList *results )
+    virtual void EndJob( uint32_t jobNum, const XrdCl::PropertyList *results ) override
     {
       XrdSysMutexHelper scopedLock( pMutex );
 
@@ -220,7 +263,7 @@ class ProgressDisplay: public XrdCl::CopyProgressHandler
     //--------------------------------------------------------------------------
     virtual void JobProgress( uint32_t jobNum,
                               uint64_t bytesProcessed,
-                              uint64_t bytesTotal )
+                              uint64_t bytesTotal ) override
     {
       XrdSysMutexHelper scopedLock( pMutex );
 
@@ -944,7 +987,13 @@ int main( int argc, char **argv )
     return st.GetShellCode();
   }
 
+  CopySignalHandlers signalHandlers;
   st = process.Run( &progress );
+  if (const auto signal = copySignal.load(std::memory_order_relaxed))
+  {
+    CleanUpResults(resultVect);
+    return 128 + signal;
+  }
   if( !st.IsOK() )
   {
     if( resultVect.size() == 1 )
