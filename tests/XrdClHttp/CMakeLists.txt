@@ -49,6 +49,12 @@ target_link_libraries(xrdcl-http-delete-test XrdClHttpTesting XrdTestUtils GTest
 
 gtest_add_tests(TARGET xrdcl-http-delete-test TEST_LIST CurlDeleteTests)
 
+add_executable(xrdcl-http-copy-response-test CopyResponseTest.cc)
+target_link_libraries(xrdcl-http-copy-response-test
+  XrdClHttpTesting XrdTestUtils GTest::gtest_main)
+gtest_discover_tests(xrdcl-http-copy-response-test TEST_PREFIX XrdClHttp::
+  PROPERTIES DISCOVERY_TIMEOUT 10 TIMEOUT 20)
+
 # XrdClHttp integration tests depend on scitokens fixture for authentication
 if(NOT ENABLE_SERVER_TESTS OR NOT BUILD_SCITOKENS)
   return()
