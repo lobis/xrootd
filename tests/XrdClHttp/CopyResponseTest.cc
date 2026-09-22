@@ -176,11 +176,14 @@ TEST_P(CurlCopyResponseTest, RequiresSuccessfulTerminalMarker)
         EXPECT_EQ(status->code, XrdCl::errErrorResponse);
         EXPECT_EQ(status->errNo, body.find("aborted:") == 0 ? kXR_Cancelled : kXR_IOError);
     }
-    if (std::get<2>(GetParam()) == 403) EXPECT_EQ(status->errNo, kXR_NotAuthorized);
-    if (body.find("Transferred: 42") != std::string::npos)
+    if (std::get<2>(GetParam()) == 403) {
+        EXPECT_EQ(status->errNo, kXR_NotAuthorized);
+    }
+    if (body.find("Transferred: 42") != std::string::npos) {
         EXPECT_EQ(progress, std::vector<off_t>{42});
-    else
+    } else {
         EXPECT_TRUE(progress.empty());
+    }
     EXPECT_FALSE(exchange.read_failed);
     EXPECT_FALSE(exchange.write_failed);
     EXPECT_EQ(exchange.request.substr(0, exchange.request.find("\r\n")), "COPY /target HTTP/1.1");
