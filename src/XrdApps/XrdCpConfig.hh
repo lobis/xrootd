@@ -75,6 +75,7 @@ struct defVar
              int    nSrcs;          // Number of sources wanted    (dflt 1)
              int    nStrm;          // Number of streams wanted    (dflt 1)
              int    Retry;          // Max times to retry failed copy job
+        std::string TpcMode{"pull"};
         std::string RetryPolicy;    // retry policy (to force or to continue)
              int    Verbose;        // True if --verbose specified
              int    CksLen;         // Binary length of checksum, if any
@@ -200,6 +201,7 @@ static const uint64_t    DoXrateThreshold = 0x0000000200000000LL; // --xrate-thr
 static const uint64_t    OpRetryPolicy     = 0x12;
 static const uint64_t    DoRetryPolicy     = 0x0000000400000000LL; // --retry-policy
 
+static const uint64_t    OpTpcMode         = 0x14;
 static const uint64_t    OpZipAppend       = 0x13;
 static const uint64_t    DoZipAppend       = 0x0000000800000000LL; // --zip-append
 

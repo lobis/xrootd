@@ -41,12 +41,16 @@ class CurlOperation;
 class CurlWorker;
 class HandlerQueue;
 
-class Factory final : public XrdCl::PlugInFactory {
+class Factory final : public XrdCl::PlugInFactory, public XrdCl::ThirdPartyCopyPlugIn {
 public:
     Factory() {}
 
     virtual XrdCl::FilePlugIn *CreateFile(const std::string &url) override;
     virtual XrdCl::FileSystemPlugIn *CreateFileSystem(const std::string &url) override;
+
+    XrdCl::XRootDStatus ThirdPartyCopy(uint32_t jobId,
+        const XrdCl::PropertyList &properties, XrdCl::PropertyList &results,
+        XrdCl::CopyProgressHandler *progress) override;
 
     // Get the header timeout value, taking into consideration the provided command timeout, and XrdCl's default values
     static struct timespec GetHeaderTimeoutWithDefault(time_t oper_timeout);

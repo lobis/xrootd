@@ -604,6 +604,21 @@ namespace XrdCl
       }
   };
 
+  class PropertyList;
+  class CopyProgressHandler;
+
+  // Optional factory interface for protocol-specific third-party copies.
+  // Kept separate from PlugInFactory so existing plug-in vtables do not change.
+  class ThirdPartyCopyPlugIn
+  {
+    public:
+      virtual ~ThirdPartyCopyPlugIn();
+      virtual XRootDStatus ThirdPartyCopy(uint32_t jobId,
+                                          const PropertyList &properties,
+                                          PropertyList &results,
+                                          CopyProgressHandler *progress) = 0;
+  };
+
   //----------------------------------------------------------------------------
   //! Plugin factory
   //----------------------------------------------------------------------------

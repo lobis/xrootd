@@ -25,6 +25,7 @@
 #include "../XrdClHttpCommon/TransferTest.hh"
 
 #include <XrdCl/XrdClDefaultEnv.hh>
+#include <XrdCl/XrdClCopyProcess.hh>
 #include <XrdCl/XrdClLog.hh>
 
 #include <gtest/gtest.h>
@@ -71,4 +72,31 @@ TEST_F(CurlCopyFixture, Test)
     ASSERT_TRUE(status->IsOK()) << "Copy command failed with error: " << status->ToString();
 
     VerifyContents(dest_url, 2*1024, 'a', 1023);
+}
+
+
+TEST_F(CurlCopyFixture, CopyProcessPullAndPush)
+{
+    for (const auto *mode : {"pull", "push"}) {
+        SCOPED_TRACE(mode);
+        const auto source = GetOriginURL() + "/test/process_source_" + mode;
+        const auto target = GetOriginURL() + "/test/process_target_" + mode;
+        WritePattern(source, 16384, 'b', 1023);
+        XrdCl::PropertyList properties, results;
+        properties.Set("source", source + "?authz=" + GetReadToken());
+        properties.Set("target", target + "?authz=" + GetWriteToken());
+        properties.Set("thirdParty", "only");
+        properties.Set("thirdPartyMode", mode);
+        properties.Set("force", true);
+        properties.Set("tpcTimeout", 15);
+        XrdCl::CopyProcess process;
+        ASSERT_TRUE(process.AddJob(properties, &results).IsOK());
+        ASSERT_TRUE(process.Prepare().IsOK());
+        const auto status = process.Run(nullptr);
+        ASSERT_TRUE(status.IsOK()) << status.ToString();
+        uint64_t size = 0;
+        ASSERT_TRUE(results.Get("size", size));
+        EXPECT_EQ(size, 16384u);
+        VerifyContents(target, 16384, 'b', 1023);
+    }
 }

@@ -14,6 +14,7 @@ add_library(XrdClHttpObj OBJECT
   XrdClHttpFilesystem.cc     XrdClHttpFilesystem.hh
   XrdClHttpOpChecksum.cc
   XrdClHttpOpCopy.cc
+  XrdClHttpCopyJob.cc
   XrdClHttpCopyResponse.cc   XrdClHttpCopyResponse.hh
   XrdClHttpOpDelete.cc
   XrdClHttpOpListdir.cc

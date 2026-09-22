@@ -109,6 +109,7 @@ struct option XrdCpConfig::opVec[] =         // For getopt_long()
       {OPT_TYPE "streams",        1, 0, XrdCpConfig::OpStreams},
       {OPT_TYPE "tlsmetalink",    0, 0, XrdCpConfig::OpTlsMLF},
       {OPT_TYPE "tlsnodata",      0, 0, XrdCpConfig::OpTlsNoData},
+      {OPT_TYPE "tpc-mode",       1, 0, XrdCpConfig::OpTpcMode},
       {OPT_TYPE "tpc",            1, 0, XrdCpConfig::OpTpc},
       {OPT_TYPE "verbose",        0, 0, XrdCpConfig::OpVerbose},
       {OPT_TYPE "version",        0, 0, XrdCpConfig::OpVersion},
@@ -287,6 +288,9 @@ do{while(optind < Argc && Legacy(optind)) {}
           case OpTlsNoData:     OpSpec |= DoTlsNoData;
                                 break;
           case OpTlsMLF:        OpSpec |= DoTlsMLF;
+                                break;
+          case OpTpcMode:       TpcMode = optarg;
+                                if (TpcMode != "pull" && TpcMode != "push" && TpcMode != "auto") Usage(22);
                                 break;
           case OpTpc:           OpSpec |= DoTpc;
                                 if (!strcmp("delegate",  optarg))
@@ -990,6 +994,7 @@ void XrdCpConfig::Usage(int rc)
    "     --tlsmetalink            convert [x]root to [x]roots protocol in metalinks\n"
    "-E | --tlsnodata              in case of [x]roots protocol, encrypt only the control\n"
    "                              stream and leave the data streams unencrypted\n"
+   "     --tpc-mode <pull|push|auto>   HTTP third-party-copy direction (default: pull).\n"
    "-T | --tpc <args>             uses third party copy mode between the src and dest.\n"
    "                              Both the src and dest must allow tpc mode. Argument\n"
    "                              'first' tries tpc and if it fails, does a normal copy;\n"

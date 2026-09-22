@@ -231,6 +231,33 @@ std::string DavToHttp(const std::string &url) {
 
 } // namespace
 
+XrdCl::XRootDStatus XrdClHttp::HttpTransferHeaders(std::string &url,
+    std::vector<std::pair<std::string, std::string>> &headers, XrdCl::Log *logger)
+{
+    HttpClientConfig config;
+    url = DavToHttp(ExtractHttpClientConfig(url, config));
+    if (url.find_first_of("\r\n") != std::string::npos)
+        return XrdCl::XRootDStatus(XrdCl::stError, XrdCl::errInvalidArgs, EINVAL,
+            "Invalid HTTP TPC transfer URL");
+    if (config.no_verify || !config.ca_file.empty() || !config.ca_dir.empty())
+        return XrdCl::XRootDStatus(XrdCl::stError, XrdCl::errNotSupported, ENOTSUP,
+            "HTTP TPC cannot forward client-local transfer-leg TLS settings");
+    if (config.no_auth) return XrdCl::XRootDStatus();
+    if (!config.bearer_token_file.empty()) {
+        std::string token;
+        if (!ReadBearerToken(config.bearer_token_file, token))
+            return XrdCl::XRootDStatus(XrdCl::stError, XrdCl::errAuthFailed, EACCES,
+                "Unable to read HTTP TPC transfer bearer token");
+        headers.emplace_back("Authorization", "Bearer " + token);
+    } else if (!config.client_cert.empty() || !config.client_key.empty()) {
+        return XrdCl::XRootDStatus(XrdCl::stError, XrdCl::errNotSupported, ENOTSUP,
+            "HTTP TPC cannot delegate an explicit transfer-leg client certificate");
+    } else {
+        InjectBearerToken(XrdCl::URL(url), headers, logger);
+    }
+    return XrdCl::XRootDStatus();
+}
+
 std::string
 XrdClHttp::ExtractHttpClientConfig(const std::string &url,
     HttpClientConfig &config, std::string *client_query)
@@ -935,6 +962,10 @@ CurlOperation::XferInfoCallback(void *clientp, curl_off_t /*dltotal*/, curl_off_
 {
     auto me = reinterpret_cast<CurlOperation*>(clientp);
     auto now = std::chrono::steady_clock::now();
+    if (me->m_cancel && me->m_cancel()) {
+        me->FailCallback(kXR_Cancelled, "HTTP operation cancelled");
+        return 1;
+    }
     if (me->HeaderTimeoutExpired(now) || me->OperationTimeoutExpired(now)) {
         return 1; // return value triggers CURLE_ABORTED_BY_CALLBACK
     }

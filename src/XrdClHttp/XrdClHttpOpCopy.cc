@@ -24,30 +24,37 @@ using namespace XrdClHttp;
 
 CurlCopyOp::CurlCopyOp(XrdCl::ResponseHandler *handler, const std::string &source_url, const Headers &source_hdrs,
     const std::string &dest_url, const Headers &dest_hdrs, struct timespec timeout, XrdCl::Log *logger,
-    CreateConnCalloutType callout) :
-        CurlOperation(handler, dest_url, timeout, logger, callout, nullptr),
-        m_source_url(source_url)
+    CreateConnCalloutType callout, bool push) :
+        CurlOperation(handler, push ? source_url : dest_url, timeout, logger, callout, nullptr),
+        m_remote_url(push ? dest_url : source_url),
+        m_transfer_headers(push ? dest_hdrs : source_hdrs), m_push(push)
     {
         m_minimum_rate = 1;
-    
-        for (const auto &info : source_hdrs) {
-            m_headers_list.emplace_back(std::string("TransferHeader") + info.first, info.second);
-        }
-        for (const auto &info : dest_hdrs) {
+        m_operation_expiry = GetHeaderExpiry();
+        for (const auto &info : (push ? source_hdrs : dest_hdrs))
             m_headers_list.emplace_back(info.first, info.second);
-        }
     }
     
     bool
     CurlCopyOp::Setup(CURL *curl, CurlWorker &worker)
     {
+        if (!m_transfer_prepared) {
+            auto status = HttpTransferHeaders(m_remote_url, m_transfer_headers, m_logger);
+            if (!status.IsOK()) {
+                Fail(status.code, status.errNo, status.GetErrorMessage());
+                return false;
+            }
+            for (const auto &header : m_transfer_headers)
+                m_headers_list.emplace_back("TransferHeader" + header.first, header.second);
+            m_transfer_prepared = true;
+        }
         auto rv = CurlOperation::Setup(curl, worker);
         if (!rv) return false;
 
         curl_easy_setopt(m_curl.get(), CURLOPT_WRITEFUNCTION, CurlCopyOp::WriteCallback);
         curl_easy_setopt(m_curl.get(), CURLOPT_WRITEDATA, this);
         curl_easy_setopt(m_curl.get(), CURLOPT_CUSTOMREQUEST, "COPY");
-        m_headers_list.emplace_back("Source", m_source_url);
+        m_headers_list.emplace_back(m_push ? "Destination" : "Source", m_remote_url);
 
         return true;
     }

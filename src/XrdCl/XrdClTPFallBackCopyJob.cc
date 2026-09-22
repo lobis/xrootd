@@ -28,10 +28,14 @@
 #include "XrdCl/XrdClConstants.hh"
 #include "XrdCl/XrdClLog.hh"
 #include "XrdCl/XrdClDefaultEnv.hh"
+#include "XrdCl/XrdClPlugInInterface.hh"
+#include "XrdCl/XrdClPlugInManager.hh"
 #include <string>
 
 namespace XrdCl
 {
+  ThirdPartyCopyPlugIn::~ThirdPartyCopyPlugIn() {}
+
   //----------------------------------------------------------------------------
   // Constructor
   //----------------------------------------------------------------------------
@@ -70,19 +74,43 @@ namespace XrdCl
     if( tmp == "first" )
       tpcFallBack = true;
 
-    pJob = new ThirdPartyCopyJob( pJobId, pProperties, pResults );
-    XRootDStatus st = pJob->Run( progress );
+    auto factory = DefaultEnv::GetPlugInManager()->GetFactory(GetTarget().GetURL());
+    auto copyPlugin = dynamic_cast<ThirdPartyCopyPlugIn *>(factory);
+    XRootDStatus st;
+    if (copyPlugin)
+      st = copyPlugin->ThirdPartyCopy(pJobId, *pProperties, *pResults, progress);
+    else
+    {
+      std::string direction = "pull";
+      pProperties->Get("thirdPartyMode", direction);
+      if (direction != "pull")
+        return XRootDStatus(stError, errNotSupported, ENOTSUP,
+            "Selected TPC direction requires a protocol copy plug-in");
+      pJob = new ThirdPartyCopyJob(pJobId, pProperties, pResults);
+      st = pJob->Run(progress);
+    }
     if( st.IsOK() ) return st; // we are done
 
     // check if we can fall back to streaming
-    if( tpcFallBack && ( st.code == errNotSupported || st.code == errOperationExpired ) )
+    if( tpcFallBack && ( st.code == errNotSupported || (!copyPlugin && st.code == errOperationExpired) ) )
     {
       Log *log = DefaultEnv::GetLog();
       log->Debug( UtilityMsg, "TPC is not supported, falling back to streaming mode." );
 
       delete pJob;
       pJob = new ClassicCopyJob( pJobId, pProperties, pResults );
-      return pJob->Run( progress );
+      bool force = false, overwrite = false;
+      pProperties->Get("force", force);
+      pResults->Get("httpTpcOverwrite", overwrite);
+      time_t copyTimeout = 0, remaining = 0;
+      pProperties->Get("cpTimeout", copyTimeout);
+      pResults->Get("httpTpcRemaining", remaining);
+      if (copyPlugin && remaining > 0) pProperties->Set("cpTimeout", remaining);
+      if (copyPlugin && overwrite) pProperties->Set("force", true);
+      auto result = pJob->Run(progress);
+      pProperties->Set("force", force);
+      pProperties->Set("cpTimeout", copyTimeout);
+      return result;
     }
 
     return st;

@@ -888,6 +888,7 @@ int main( int argc, char **argv )
     properties.Set( "makeDir",         makedir                );
     properties.Set( "dynamicSource",   dynSrc                 );
     properties.Set( "thirdParty",      thirdParty             );
+    properties.Set( "thirdPartyMode",  config.TpcMode         );
     properties.Set( "checkSumMode",    checkSumMode           );
     properties.Set( "checkSumType",    checkSumType           );
     properties.Set( "checkSumPreset",  checkSumPreset         );
