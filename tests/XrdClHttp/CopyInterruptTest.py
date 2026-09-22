@@ -7,12 +7,18 @@ import http.server
 import os
 from pathlib import Path
 import signal
+import socketserver
 import subprocess
 import tempfile
 import threading
 from urllib.parse import urlsplit
 
 PAYLOAD = b"copy-interruption\0\xff" * 128
+
+
+class ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    # Keep the fixture usable with the older Python shipped by EL8 builders.
+    daemon_threads = True
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -58,7 +64,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 def check_case(xrdcp, environment, mode, sig, posc):
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     server.mode = mode
     server.files = {"/source": PAYLOAD}
     server.ready = threading.Event()
