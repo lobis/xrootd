@@ -63,6 +63,11 @@ if(Python3_Interpreter_FOUND)
       --xrdcp $<TARGET_FILE:xrdcp>
       --plugin $<TARGET_FILE:XrdClHttp-${PLUGIN_VERSION}>)
   set_tests_properties(XrdClHttp::CopyInterrupt PROPERTIES TIMEOUT 90)
+  add_test(NAME XrdClHttp::FileCredentials
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/FileCredentialsTest.py"
+      --xrdcp $<TARGET_FILE:xrdcp>
+      --plugin $<TARGET_FILE:XrdClHttp-${PLUGIN_VERSION}>)
+  set_tests_properties(XrdClHttp::FileCredentials PROPERTIES TIMEOUT 150)
 endif()
 
 # XrdClHttp integration tests depend on scitokens fixture for authentication
