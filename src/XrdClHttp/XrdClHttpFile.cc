@@ -1079,16 +1079,34 @@ File::GetCurrentURL() const {
 
     auto iter = m_properties.find("XrdClHttpQueryParam");
     if (iter == m_properties.end()) {
-        return m_last_url.empty() ? m_url : m_last_url;
+        return WithClientConfig(m_last_url.empty() ? m_url : m_last_url);
     }
     CalculateCurrentURL(iter->second);
 
     return m_url_current;
 }
 
+std::string
+File::WithClientConfig(const std::string &url) const {
+    HttpClientConfig ignored;
+    std::string client_query;
+    ExtractHttpClientConfig(m_url, ignored, &client_query);
+    if (client_query.empty()) return url;
+
+    // LastURL is obtained from CURLINFO_EFFECTIVE_URL, which deliberately has
+    // no client-local parameters. Keep those settings for subsequent operations
+    // without changing the public LastURL or rebuilding signed server queries.
+    auto result = ExtractHttpClientConfig(url, ignored);
+    auto fragment = result.find('#');
+    if (fragment == std::string::npos) fragment = result.size();
+    const auto query = result.find('?');
+    result.insert(fragment, (query < fragment ? "&" : "?") + client_query);
+    return result;
+}
+
 void
 File::CalculateCurrentURL(const std::string &value) const {
-    const auto &last_url = m_last_url.empty() ? m_url : m_last_url;
+    const auto last_url = WithClientConfig(m_last_url.empty() ? m_url : m_last_url);
     if (value.empty()) {
         m_url_current = last_url;
     } else {
