@@ -2,6 +2,19 @@ find_package(CURL REQUIRED)
 
 include(GoogleTest)
 
+add_executable(xrdcl-http-token-unit-tests
+  TokenTest.cc
+  ${PROJECT_SOURCE_DIR}/src/XrdClHttp/XrdClHttpToken.cc
+)
+target_link_libraries(xrdcl-http-token-unit-tests GTest::gtest_main)
+if(nlohmann_json_FOUND)
+  target_link_libraries(xrdcl-http-token-unit-tests
+    nlohmann_json::nlohmann_json)
+endif()
+gtest_discover_tests(xrdcl-http-token-unit-tests
+  TEST_PREFIX XrdClHttp::
+  PROPERTIES DISCOVERY_TIMEOUT 10)
+
 add_executable(xrdcl-http-unit-tests
   HeaderParserTest.cc
   ParseTimeoutTest.cc
