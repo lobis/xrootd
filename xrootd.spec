@@ -644,6 +644,7 @@ fi
 %{_bindir}/xrdcp
 %{_bindir}/xrdcrc32c
 %{_bindir}/xrdfs
+%{_bindir}/xrdtoken
 %{_bindir}/xrdgsiproxy
 %{_bindir}/xrdgsitest
 %{_bindir}/xrdmapc
@@ -653,6 +654,7 @@ fi
 %{_mandir}/man1/xrdcopy.1*
 %{_mandir}/man1/xrdcp.1*
 %{_mandir}/man1/xrdfs.1*
+%{_mandir}/man1/xrdtoken.1*
 %{_mandir}/man1/xrdgsiproxy.1*
 %{_mandir}/man1/xrdgsitest.1*
 %{_mandir}/man1/xrdmapc.1*
