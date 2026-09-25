@@ -149,6 +149,7 @@ setup(name='xrootd',
       },
       ext_modules= [ CMakeExtension('pyxrootd') ],
       cmdclass={ 'build_ext': CMakeBuild },
+      extras_require={'fsspec': ['fsspec>=2024.2.0']},
       zip_safe=False,
       classifiers=[
           "Intended Audience :: Information Technology",
