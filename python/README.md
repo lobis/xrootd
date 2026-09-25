@@ -371,3 +371,7 @@ late/duplicate callbacks, cursor ownership, concurrent ranges, malformed
 vector responses, cache invalidation and eviction, source fallback, and local
 transfer threads. Failure tests verify resource cleanup and error identity,
 not only that an exception was raised.
+
+A read-only comparison against `fsspec-xrootd` is in
+`benchmarks/compare_fsspec.py`. Its recorded EOS public run and limitations are
+in `benchmarks/results/2026-09-25-eospublic.md`.
