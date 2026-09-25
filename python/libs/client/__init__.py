@@ -1,8 +1,9 @@
 from __future__ import absolute_import, division, print_function
 
 from .glob_funcs import glob, iglob
-from .filesystem import FileSystem
+from .filesystem import DirectoryEntry, FileSystem, RemoveTreeResult
 from .file import File
+from .stream import open  # noqa: F401
 from pyxrootd.client import setXAttrAdler32_cpp as setXAttrAdler32
 from .url import URL
 from .copyprocess import CopyProcess
