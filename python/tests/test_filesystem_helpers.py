@@ -1,5 +1,6 @@
 """Python-style filesystem helpers over a local XRootD server."""
 
+import asyncio
 import uuid
 from types import SimpleNamespace
 
@@ -148,3 +149,40 @@ def test_copy_one_handles_job_status():
         for path in (source, target):
             if fs.exists(path):
                 fs.rm(path)
+
+
+@pytest.mark.parametrize('asynchronous', [False, True])
+def test_stat_info_and_unlink_contract(asynchronous):
+    from XRootD.client import aio
+
+    async def run():
+        fs_type = aio.FileSystem if asynchronous else client.FileSystem
+        fs = fs_type(SERVER_URL)
+
+        async def call(name, *args, **kwargs):
+            result = getattr(fs, name)(*args, **kwargs)
+            return await result if asynchronous else result
+
+        path = '/tmp/stat-unlink-' + uuid.uuid4().hex
+        with client.open(SERVER_URL + path, 'wb') as file:
+            file.write(b'data')
+        try:
+            assert (await call('stat_info', path, timeout=5)).size == 4
+            await call('unlink', path, timeout=5)
+            await call('unlink', path, missing_ok=True, timeout=5)
+            for method in ('stat_info', 'unlink'):
+                with pytest.raises(FileNotFoundError) as caught:
+                    await call(method, path, timeout=5)
+                assert caught.value.filename == path
+                assert not caught.value.xrootd_status.ok
+            # missing_ok must not swallow other failures (a directory here).
+            with pytest.raises(OSError):
+                await call('unlink', '/tmp', missing_ok=True, timeout=5)
+        finally:
+            await call('unlink', path, missing_ok=True)
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(run())
+    finally:
+        loop.close()

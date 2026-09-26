@@ -82,7 +82,9 @@ for entry in fs.scandir('/data'):
     if entry.is_file():
         print(entry.path, entry.size)
 
+info = fs.stat_info('/data/file')  # metadata or a standard OSError subclass
 algorithm, value = fs.checksum('/data/file')
+fs.unlink('/data/obsolete', missing_ok=True)
 removed = fs.remove_tree('/data/obsolete')
 print(removed.files_removed, removed.size_removed)
 
@@ -261,6 +263,7 @@ for entry in await fs.scandir('/data'):
     if entry.is_file():
         print(entry.path, entry.size)
 await fs.makedirs('/data/output', exist_ok=True)
+info = await fs.stat_info('/data/input')
 exists = await fs.exists('/data/input')
 algorithm, digest = await fs.checksum('/data/input', algorithm='adler32')
 await fs.unlink('/data/temporary', missing_ok=True)

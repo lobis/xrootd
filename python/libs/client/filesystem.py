@@ -364,6 +364,24 @@ class FileSystem(object):
     if response: response = DirectoryList(response)
     return XRootDStatus(status), response
 
+  def stat_info(self, path, timeout=0):
+    """Return native stat metadata; raise an OSError subclass on failure.
+
+    Unlike ``stat``, this convenience method does not return a status tuple.
+    """
+    status, info = self.stat(path, timeout=timeout)
+    raise_as_oserror(status, path)
+    return info
+
+  def unlink(self, path, missing_ok=False, timeout=0):
+    """Remove one file, optionally ignoring a missing path."""
+    status, _ = self.rm(path, timeout=timeout)
+    try:
+      raise_as_oserror(status, path)
+    except FileNotFoundError:
+      if not missing_ok:
+        raise
+
   def _stat_if_exists(self, path, timeout=0):
     status, info = self.stat(path, timeout=timeout)
     if status.ok:

@@ -159,6 +159,10 @@ class FileSystem:
         except XRootDError as error:
             raise_as_oserror(error.status, path)
 
+    async def stat_info(self, path, timeout=0):
+        """Return native stat metadata with standard OSError failures."""
+        return await self._call(self.stat(path, timeout), path)
+
     async def _stat_if_exists(self, path, timeout):
         try:
             return await self._call(self.stat(path, timeout), path)
