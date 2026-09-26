@@ -261,7 +261,7 @@ def test_cancellation_drains_request_before_closing(
     run_async(run())
 
 
-def test_stream_matches_local_file_contract(tmp_path, open_stream):
+def test_stream_matches_local_file_contract(tmpdir, open_stream):
     """Run the same public operations on local and remote files."""
     path = SERVER_URL + '/tmp/stream-contract-' + uuid.uuid4().hex
 
@@ -298,7 +298,8 @@ def test_stream_matches_local_file_contract(tmp_path, open_stream):
 
     async def run():
         data = b'first\nsecond\nlast'
-        local_path = tmp_path / 'local'
+        from pathlib import Path
+        local_path = Path(str(tmpdir)) / 'local'
         local_path.write_bytes(data)
         try:
             with client.open(path, 'wb') as file:
@@ -504,5 +505,109 @@ def test_async_read_example(task_group, capsys):
             assert 'native request expired' in capsys.readouterr().err
         finally:
             await aio.FileSystem(SERVER_URL).rm(client.URL(path).path)
+
+    run_async(run())
+
+
+@pytest.mark.parametrize('operation', ['read', 'write', 'seek', 'truncate'])
+def test_stream_rejects_unsupported_or_invalid_operations(
+        open_stream, operation):
+    path = SERVER_URL + '/tmp/stream-rejection-' + uuid.uuid4().hex
+
+    async def run():
+        try:
+            with client.open(path, 'wb') as file:
+                file.write(b'unchanged')
+            mode = 'wb' if operation == 'read' else 'rb'
+            async with await open_stream(path, mode) as file:
+                if operation == 'read':
+                    with pytest.raises(io.UnsupportedOperation):
+                        await file.read(1)
+                    with pytest.raises(io.UnsupportedOperation):
+                        await file.read_at(0, 1)
+                elif operation == 'write':
+                    with pytest.raises(io.UnsupportedOperation):
+                        await file.write(b'change')
+                    await file.flush()
+                elif operation == 'seek':
+                    with pytest.raises(ValueError):
+                        await file.seek(0, 99)
+                else:
+                    with pytest.raises(io.UnsupportedOperation):
+                        await file.truncate(0)
+            async with await open_stream(path, 'r+b') as file:
+                with pytest.raises(ValueError):
+                    await file.truncate(-1)
+        finally:
+            await aio.FileSystem(SERVER_URL).rm(client.URL(path).path)
+
+    run_async(run())
+
+
+def test_cancelled_request_preserves_cancellation_if_callback_fails():
+    async def run():
+        from XRootD.client.asyncstream import _finish, _open_stream
+
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def failing():
+            entered.set()
+            await release.wait()
+            raise OSError('late native failure')
+
+        task = asyncio.ensure_future(_finish(failing()))
+        await entered.wait()
+        task.cancel()
+        await asyncio.sleep(0)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 2)
+
+        class Stream:
+            async def _initialize(self):
+                raise PermissionError('open denied')
+
+            async def close(self):
+                raise OSError('cleanup also failed')
+
+        with pytest.raises(PermissionError, match='open denied'):
+            await _open_stream(Stream())
+
+    run_async(run())
+
+
+def test_append_creation_race_retries_on_a_fresh_handle(monkeypatch):
+    from types import SimpleNamespace
+    from XRootD.client.flags import OpenFlags
+
+    async def run():
+        handles, flags = [], []
+
+        class File:
+            def __init__(self):
+                handles.append(self)
+
+            async def open(self, url, flag, timeout):
+                flags.append(flag)
+                if len(handles) == 1:
+                    raise FileNotFoundError(url)
+                if len(handles) == 2:
+                    raise FileExistsError(url)
+                return self
+
+            async def stat(self, **kwargs):
+                return SimpleNamespace(size=3)
+
+            async def sync(self, timeout):
+                pass
+
+            async def close(self, timeout):
+                pass
+
+        monkeypatch.setattr(aio, 'File', File)
+        async with aio.open('root://example//data', 'ab') as stream:
+            assert stream.tell() == 3
+        assert len(handles) == 3
+        assert flags == [OpenFlags.UPDATE, OpenFlags.NEW, OpenFlags.UPDATE]
 
     run_async(run())

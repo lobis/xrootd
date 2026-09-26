@@ -143,3 +143,60 @@ def test_invalid_arguments_do_not_modify_file_or_cursor():
             assert file.read() == b'ab'
     finally:
         remove(path)
+
+
+@pytest.mark.parametrize('mode', [None, '', 'rw', 'rbt', 'zz'])
+def test_invalid_modes_never_open(mode):
+    expected = TypeError if mode is None else ValueError
+    with pytest.raises(expected):
+        client.open(remote_path(), mode)
+
+
+def test_raw_stream_permissions_zero_reads_and_truncate():
+    path = remote_path()
+    try:
+        with client.open(path, 'wb', buffering=0) as file:
+            with pytest.raises(io.UnsupportedOperation):
+                file.read(1)
+            file.write(b'abcdef')
+            file.seek(3)
+            assert file.truncate() == 3
+            with pytest.raises(ValueError):
+                file.seek(0, 99)
+        with client.open(path, 'rb', buffering=0) as file:
+            assert file.read(0) == b''
+            with pytest.raises(io.UnsupportedOperation):
+                file.write(b'no')
+            with pytest.raises(io.UnsupportedOperation):
+                file.truncate(1)
+            assert file.read() == b'abc'
+        with client.open(path, 'r', buffering=1) as file:
+            assert file.read() == 'abc'
+    finally:
+        remove(path)
+
+
+def test_wrapper_failure_closes_raw_file(monkeypatch):
+    from XRootD.client import stream
+
+    path = remote_path()
+    opened = []
+    original = stream.File
+
+    def track():
+        file = original()
+        opened.append(file)
+        return file
+
+    monkeypatch.setattr(stream, 'File', track)
+    try:
+        with client.open(path, 'wb') as file:
+            file.write(b'data')
+        with pytest.raises(LookupError):
+            client.open(path, 'r', encoding='no-such-encoding')
+        assert all(not file.is_open() for file in opened)
+        with pytest.raises(ValueError):
+            client.open(path, 'wb', buffering=-2)
+        assert len(opened) == 2
+    finally:
+        remove(path)

@@ -35,7 +35,24 @@ async def _to_thread(function, *args):
     """Keep local file operations off the loop on Python before 3.9 too."""
     running_loop = getattr(asyncio, 'get_running_loop', asyncio.get_event_loop)
     loop = running_loop()
-    return await loop.run_in_executor(None, partial(function, *args))
+    return await _finish(loop.run_in_executor(None, partial(function, *args)))
+
+
+@asynccontextmanager
+async def _local_file(path, mode):
+    """Own the result of a threaded open through cancellation and cleanup."""
+    file = None
+
+    async def acquire():
+        nonlocal file
+        file = await _to_thread(open, path, mode)
+
+    try:
+        await _finish(acquire())
+        yield file
+    finally:
+        if file is not None:
+            await _finish(_to_thread(file.close))
 
 
 class _CachedHandle:
@@ -60,15 +77,15 @@ class _ReadHandleCache:
         self._pruner_task = None
         self._pruner_stop = None
 
-    async def _prune_idle(self):
+    async def _prune_idle(self, stop):
         try:
             while True:
                 try:
-                    await asyncio.wait_for(self._pruner_stop.wait(),
+                    await asyncio.wait_for(stop.wait(),
                                            timeout=self.ttl)
                 except asyncio.TimeoutError:
                     pass
-                if self._pruner_stop.is_set():
+                if stop.is_set():
                     return
                 async with self.lock:
                     to_close = self._prune()
@@ -77,10 +94,14 @@ class _ReadHandleCache:
             pass
 
     async def acquire(self, url, timeout):
+        if self._pruner_task is not None and self._pruner_task.done():
+            # Surface a background close failure before replacing its task.
+            self._pruner_task.result()
         if self.ttl > 0 and (self._pruner_task is None or
                              self._pruner_task.done()):
             self._pruner_stop = asyncio.Event()
-            self._pruner_task = asyncio.create_task(self._prune_idle())
+            self._pruner_task = asyncio.create_task(
+                self._prune_idle(self._pruner_stop))
         to_close = []
         async with self.lock:
             now = time.monotonic()
@@ -103,9 +124,9 @@ class _ReadHandleCache:
                     pending = asyncio.create_task(
                         self._open_entry(url, timeout, generation))
                     self.pending[url] = pending
-        await self._close_entries(to_close, timeout)
         if pending is None:
-            return entry
+            return await self._return_lease(entry, to_close, timeout)
+        await self._close_entries(to_close, timeout)
         await asyncio.shield(pending)
         async with self.lock:
             entry = self.handles.get(url)
@@ -115,10 +136,20 @@ class _ReadHandleCache:
                 to_close = self._prune()
             else:
                 to_close = []
-        await self._close_entries(to_close, timeout)
         if entry is not None:
-            return entry
+            return await self._return_lease(entry, to_close, timeout)
         return await self.acquire(url, timeout)
+
+    async def _return_lease(self, entry, to_close, timeout):
+        try:
+            await self._close_entries(to_close, timeout)
+        except BaseException as error:
+            try:
+                await _finish(self.release(entry, timeout))
+            except BaseException:
+                pass
+            raise error
+        return entry
 
     async def _open_entry(self, url, timeout, generation):
         try:
@@ -139,8 +170,16 @@ class _ReadHandleCache:
 
     @staticmethod
     async def _close_entries(entries, timeout):
+        error = None
         for entry in entries:
-            await _finish(entry.file.close(timeout))
+            try:
+                await _finish(entry.file.close(timeout))
+            except (Exception, asyncio.CancelledError) as failure:
+                if error is None or isinstance(
+                        failure, asyncio.CancelledError):
+                    error = failure
+        if error is not None:
+            raise error
 
     async def release(self, entry, timeout):
         async with self.lock:
@@ -160,12 +199,18 @@ class _ReadHandleCache:
         await self._close_entries(to_close, timeout)
 
     async def close(self, timeout):
-        task = self._pruner_task
+        task, stop = self._pruner_task, self._pruner_stop
         self._pruner_task = None
-        if task is not None and not task.done():
-            self._pruner_stop.set()
-            await task
-        self._pruner_stop = None
+        pruner_error = None
+        if task is not None:
+            if not task.done():
+                stop.set()
+            try:
+                await task
+            except Exception as error:
+                pruner_error = error
+        if self._pruner_stop is stop:
+            self._pruner_stop = None
         async with self.lock:
             entries = list(self.handles.values())
             pending = dict(self.pending)
@@ -182,6 +227,8 @@ class _ReadHandleCache:
             # Keep the loop alive until that cleanup has completed.
             if pending:
                 await asyncio.gather(*pending.values(), return_exceptions=True)
+        if pruner_error is not None:
+            raise pruner_error
 
     def _prune(self):
         now = time.monotonic()
@@ -334,6 +381,7 @@ class XRootDFile(AbstractBufferedFile):
                 status, _ = self._file.open(remote_path, OpenFlags.UPDATE,
                                             timeout=fs.timeout)
         if not status.ok and mode == 'rb' and fs.locate_all_sources:
+            original = status
             try:
                 sources = sync(fs.loop, fs._source_urls, path)
             except (XRootDError, OSError):
@@ -344,6 +392,8 @@ class XRootDFile(AbstractBufferedFile):
                                             timeout=fs.timeout)
                 if status.ok:
                     break
+            if not status.ok:
+                status = original
         raise_as_oserror(status, remote_path)
         try:
             append_size = None
@@ -821,10 +871,13 @@ class XRootDFileSystem(AsyncFileSystem):
             return [(index, data)
                     for (index, _), data in zip(indexed, content)]
 
-        responses = await _run_coros_in_chunks(
+        responses = await _finish(_run_coros_in_chunks(
             [read_one(path, indexed) for path, indexed in grouped.items()],
-            batch_size=batch_size or self.batch_size, nofiles=True)
+            batch_size=batch_size or self.batch_size, nofiles=True,
+            return_exceptions=True))
         for response in responses:
+            if isinstance(response, BaseException):
+                raise response
             for index, data in response:
                 results[index] = data
         return results
@@ -844,8 +897,7 @@ class XRootDFileSystem(AsyncFileSystem):
         if chunk_size <= 0:
             raise ValueError('chunk_size must be positive')
         async with await self.open_async(rpath) as remote:
-            local = await _to_thread(open, lpath, 'wb')
-            try:
+            async with _local_file(lpath, 'wb') as local:
                 while True:
                     data = await remote.read(chunk_size)
                     if not data:
@@ -853,15 +905,12 @@ class XRootDFileSystem(AsyncFileSystem):
                     await _to_thread(local.write, data)
                     if callback is not None:
                         callback.relative_update(len(data))
-            finally:
-                await _to_thread(local.close)
 
     async def _put_file(self, lpath, rpath, mode='overwrite',
                         callback=None, **kwargs):
-        local = await _to_thread(open, lpath, 'rb')
-        try:
-            if mode not in ('create', 'overwrite'):
-                raise ValueError('unsupported write mode: %s' % mode)
+        if mode not in ('create', 'overwrite'):
+            raise ValueError('unsupported write mode: %s' % mode)
+        async with _local_file(lpath, 'rb') as local:
             await self._invalidate_read_file(rpath)
             open_mode = 'xb' if mode == 'create' else 'wb'
             async with await self.open_async(rpath, open_mode) as remote:
@@ -872,8 +921,6 @@ class XRootDFileSystem(AsyncFileSystem):
                     await remote.write(data)
                     if callback is not None:
                         callback.relative_update(len(data))
-        finally:
-            await _to_thread(local.close)
         await self.invalidate_cache_async(self._parent(rpath))
 
     async def _cp_file(self, path1, path2, **kwargs):

@@ -110,3 +110,65 @@ def test_file_round_trip_with_native_callbacks():
         await fs.rm('/tmp/spam')
 
     run_async(run())
+
+
+def test_request_rejects_callback_override_and_bounded_reads():
+    async def run():
+        with pytest.raises(TypeError, match='manages the callback'):
+            await aio.request(None, callback=None)
+        file = aio.File(native=object())
+        for size in [0, -1, 0x100000000]:
+            with pytest.raises(ValueError, match='bounded'):
+                await file.read(0, size)
+
+    run_async(run())
+
+
+def test_request_ignores_duplicate_callback_and_closed_loop():
+    callbacks = []
+    failures = []
+
+    def operation(callback):
+        callbacks.append(callback)
+        callback(status(), b'first', [])
+        callback(status(False), None, [])
+        return status()
+
+    loop = asyncio.new_event_loop()
+    loop.set_exception_handler(lambda loop, context: failures.append(context))
+    try:
+        assert loop.run_until_complete(aio.request(operation)) == b'first'
+        loop.run_until_complete(asyncio.sleep(0))
+    finally:
+        loop.close()
+    # A native thread may finish after a low-level waiter's loop has closed.
+    callbacks[0](status(), b'late', [])
+    assert not failures
+
+
+def test_low_level_context_closes_only_open_files():
+    async def run():
+        calls = []
+
+        class Native:
+            opened = False
+
+            def is_open(self):
+                return self.opened
+
+            def close(self, timeout, callback):
+                calls.append(timeout)
+                self.opened = False
+                callback(status(), None, [])
+                return status()
+
+        native = Native()
+        async with aio.File(native=native):
+            pass
+        assert not calls
+        native.opened = True
+        async with aio.File(native=native):
+            pass
+        assert calls == [0]
+
+    run_async(run())

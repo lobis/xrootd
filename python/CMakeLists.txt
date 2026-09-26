@@ -239,7 +239,7 @@ execute_process(COMMAND ${Python_EXECUTABLE} -c "import fsspec"
   OUTPUT_QUIET ERROR_QUIET)
 
 if(PYXROOTD_FSSPEC_STATUS EQUAL 0)
-  list(APPEND PYXROOTD_TESTS fsspec)
+  list(APPEND PYXROOTD_TESTS fsspec fsspec_contracts)
 else()
   message(STATUS "fsspec not installed; skipping PyXRootD::fsspec")
 endif()
