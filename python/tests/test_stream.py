@@ -106,3 +106,40 @@ def test_seek_end_after_write_keeps_existing_bytes():
             assert file.read() == b'root' + b'\0' * 16
     finally:
         remove(path)
+
+
+def test_invalid_arguments_do_not_modify_file_or_cursor():
+    path = remote_path()
+
+    class Index:
+        def __index__(self):
+            return 2
+
+    try:
+        with client.open(path, 'wb') as file:
+            file.write(b'abcdef')
+        with pytest.raises(TypeError):
+            client.open(path, 'wb', buffering=2.5)
+        with client.open(path, 'r+b', buffering=0) as file:
+            assert file.read() == b'abcdef'
+            assert file.seek(Index()) == 2
+            with pytest.raises(TypeError):
+                file.seek(1.5)
+            assert file.tell() == 2
+            with pytest.raises(TypeError):
+                file.readinto(b'readonly')
+            assert file.tell() == 2
+            with pytest.raises(TypeError):
+                file.truncate(2.5)
+            with pytest.raises(ValueError):
+                file.truncate(-1)
+            assert file.read() == b'cdef'
+            assert file.truncate(Index()) == 2
+        methods = file.readable, file.writable, file.seekable, file.flush
+        for method in methods:
+            with pytest.raises(ValueError):
+                method()
+        with client.open(path) as file:
+            assert file.read() == b'ab'
+    finally:
+        remove(path)

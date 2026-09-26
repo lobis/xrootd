@@ -4,6 +4,7 @@
 """Standard Python file objects backed by the synchronous XRootD client."""
 
 import io
+import operator
 
 from XRootD.client.file import File
 from XRootD.client.flags import OpenFlags
@@ -76,12 +77,15 @@ class RemoteFile(io.RawIOBase):
         return info.size
 
     def readable(self):
+        self._checkClosed()
         return self._readable
 
     def writable(self):
+        self._checkClosed()
         return self._writable
 
     def seekable(self):
+        self._checkClosed()
         return True
 
     def tell(self):
@@ -90,6 +94,7 @@ class RemoteFile(io.RawIOBase):
 
     def seek(self, offset, whence=io.SEEK_SET):
         self._checkClosed()
+        offset, whence = operator.index(offset), operator.index(whence)
         if whence == io.SEEK_SET:
             position = offset
         elif whence == io.SEEK_CUR:
@@ -108,6 +113,8 @@ class RemoteFile(io.RawIOBase):
         if not self._readable:
             raise io.UnsupportedOperation('file is not readable')
         target = memoryview(buffer).cast('B')
+        if target.readonly:
+            raise TypeError('readinto() requires a writable buffer')
         total = 0
         while total < len(target):
             size = min(len(target) - total, _CHUNK_SIZE)
@@ -146,11 +153,16 @@ class RemoteFile(io.RawIOBase):
             raise io.UnsupportedOperation('file is not writable')
         if size is None:
             size = self._position
+        else:
+            size = operator.index(size)
+        if size < 0:
+            raise ValueError('negative truncate size')
         status, _ = self._file.truncate(size, timeout=self.timeout)
         raise_as_oserror(status, self.name)
         return size
 
     def flush(self):
+        self._checkClosed()
         if (not self.closed and getattr(self, '_writable', False) and
                 self._file is not None and self._file.is_open()):
             status, _ = self._file.sync(timeout=self.timeout)
@@ -176,6 +188,7 @@ def open(url, mode='rb', buffering=-1, encoding=None, errors=None,
     available for callers that need explicit offsets or native callbacks.
     """
     _mode_flags(mode)
+    buffering = operator.index(buffering)
     binary = 'b' in mode
     if binary and any(value is not None
                       for value in (encoding, errors, newline)):
