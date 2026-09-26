@@ -9,10 +9,14 @@ not run synchronous network calls in an executor.
 """
 
 import asyncio
+import errno
 
 from XRootD import client
-from XRootD.client.flags import AccessMode, OpenFlags
+from XRootD.client.flags import AccessMode, DirListFlags, MkDirFlags, OpenFlags
+from XRootD.client.flags import QueryCode, StatInfoFlags
+from XRootD.client.responses import XRootDError, raise_as_oserror
 from XRootD.client.responses import raise_on_error
+from XRootD.client.responses import checksum_query_path, parse_checksum
 
 
 async def request(method, *args, **kwargs):
@@ -144,6 +148,80 @@ class FileSystem:
 
     async def query(self, code, arg, timeout=0):
         return await request(self.native.query, code, arg, timeout)
+
+    async def _call(self, operation, path):
+        try:
+            return await operation
+        except XRootDError as error:
+            raise_as_oserror(error.status, path)
+
+    async def _stat_if_exists(self, path, timeout):
+        try:
+            return await self._call(self.stat(path, timeout), path)
+        except FileNotFoundError:
+            return None
+
+    async def exists(self, path, timeout=0):
+        """Return False only for missing paths; propagate other errors."""
+        return await self._stat_if_exists(path, timeout) is not None
+
+    async def is_file(self, path, timeout=0):
+        """Return whether the path is a regular file."""
+        info = await self._stat_if_exists(path, timeout)
+        return bool(info and not info.flags &
+                    (StatInfoFlags.IS_DIR | StatInfoFlags.OTHER))
+
+    async def is_dir(self, path, timeout=0):
+        """Return whether the path is a directory."""
+        info = await self._stat_if_exists(path, timeout)
+        return bool(info and info.flags & StatInfoFlags.IS_DIR)
+
+    async def listdir(self, path, timeout=0):
+        """Return entry names, like os.listdir."""
+        listing = await self._call(self.dirlist(path, timeout=timeout), path)
+        return [entry.name for entry in listing]
+
+    async def scandir(self, path, timeout=0):
+        """Return DirectoryEntry objects with paths and stat metadata."""
+        listing = await self._call(self.dirlist(
+            path, DirListFlags.STAT, timeout), path)
+        result = []
+        for entry in listing:
+            item = client.DirectoryEntry(path, entry, entry.statinfo)
+            if item.statinfo is None:
+                item.statinfo = await self._call(
+                    self.stat(item.path, timeout), item.path)
+            result.append(item)
+        return result
+
+    async def makedirs(self, path, mode=0, exist_ok=False, timeout=0):
+        """Create parents and a directory, like os.makedirs."""
+        info = await self._stat_if_exists(path, timeout)
+        if info is not None:
+            if exist_ok and info.flags & StatInfoFlags.IS_DIR:
+                return
+            raise FileExistsError(errno.EEXIST, 'File exists', path)
+        try:
+            await self._call(self.mkdir(
+                path, MkDirFlags.MAKEPATH, mode, timeout), path)
+        except FileExistsError as error:
+            if not exist_ok or not await self.is_dir(path, timeout):
+                raise error
+
+    async def checksum(self, path, algorithm=None, timeout=0):
+        """Return (algorithm, digest), optionally selecting a checksum type."""
+        query_path = checksum_query_path(path, algorithm)
+        response = await self._call(self.query(
+            QueryCode.CHECKSUM, query_path, timeout), path)
+        return parse_checksum(response, algorithm)
+
+    async def unlink(self, path, missing_ok=False, timeout=0):
+        """Remove one file and optionally ignore a missing path."""
+        try:
+            await self._call(self.rm(path, timeout), path)
+        except FileNotFoundError:
+            if not missing_ok:
+                raise
 
 
 def open(url, mode='rb', timeout=0):

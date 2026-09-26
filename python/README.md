@@ -172,6 +172,36 @@ Append obtains the current EOF before writing; concurrent writers on separate
 handles do not have an atomic append guarantee. These stream interfaces use
 Python 3.6-compatible asyncio APIs.
 
+The filesystem also provides awaitable Python-style helpers. Previously each
+caller had to inspect stat flags, listing responses, and native errors:
+
+```python
+status, listing = client.FileSystem('root://host').dirlist('/data')
+client.raise_on_error(status)
+names = [entry.name for entry in listing]
+```
+
+With the asynchronous helpers:
+
+```python
+fs = aio.FileSystem('root://host')
+names = await fs.listdir('/data')
+for entry in await fs.scandir('/data'):
+    if entry.is_file():
+        print(entry.path, entry.size)
+await fs.makedirs('/data/output', exist_ok=True)
+exists = await fs.exists('/data/input')
+algorithm, digest = await fs.checksum('/data/input', algorithm='adler32')
+await fs.unlink('/data/temporary', missing_ok=True)
+```
+
+`exists`, `is_file`, and `is_dir` return false for missing paths and propagate
+permission and connection errors. `listdir`, `scandir`, `makedirs`, `checksum`,
+and `unlink` use standard `OSError` subclasses. The original awaitable methods
+such as `stat`, `dirlist`, and `rm` retain their native response objects and
+XRootD exception classes. Cancelling filesystem operations stops waiting;
+an already submitted mutation may still finish on the server.
+
 Install `xrootd[fsspec]` to use the optional `root` fsspec implementation. The
 same class supports normal synchronous fsspec methods and asynchronous calls:
 
