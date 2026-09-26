@@ -1,0 +1,299 @@
+# Copyright (c) 2026 by the XRootD developers
+# This file is part of the XRootD software suite and is distributed under the
+# terms of the GNU Lesser General Public License, version 3 or later.
+"""Sequential binary streams over XrdCl callbacks, independent of fsspec."""
+
+import asyncio
+import io
+import operator
+
+from XRootD.client import aio
+from XRootD.client.flags import OpenFlags
+from XRootD.client.responses import XRootDError, raise_as_oserror
+from XRootD.client.stream import _CHUNK_SIZE, _mode_flags
+
+
+async def _finish(operation):
+    """Drain a submitted operation before propagating caller cancellation."""
+    task = asyncio.ensure_future(operation)
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError as cancelled:
+        # shield alone leaves a background task behind. Keep ownership until
+        # completion, including if the caller is cancelled more than once.
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                break
+        try:
+            task.result()
+        except BaseException:
+            pass
+        # Python 3.6 can lose the active exception across these awaits.
+        raise cancelled
+
+
+class AsyncRemoteFile:
+    """An awaitable binary file with a sequential cursor and line iteration.
+
+    Use ``aio.open`` to construct an opened stream. I/O and cursor changes
+    on one stream are serialized; independent streams can run concurrently.
+    Network work uses native callbacks. Cancellation waits for the current
+    native request to finish before releasing the stream lock, so closing
+    never races that request. A cancelled write can have written bytes and
+    advanced the cursor. Use a native ``timeout`` to bound request waits.
+    Append mode seeks to the current EOF before each write; it is not an
+    atomic append across independent clients.
+    """
+
+    def __init__(self, url, mode, timeout):
+        self._flags, self._readable, self._writable = _mode_flags(mode)
+        if 'b' not in mode:
+            raise ValueError('async streams currently require binary mode')
+        self.name = url
+        self.mode = mode
+        self.timeout = timeout
+        self._file = aio.File()
+        self._lock = asyncio.Lock()
+        self._closed = True
+        self._position = 0
+        self._buffer = b''
+
+    @property
+    def closed(self):
+        return self._closed
+
+    def _check(self):
+        if self.closed:
+            raise ValueError('I/O operation on closed file')
+
+    async def _call(self, operation):
+        try:
+            return await operation
+        except XRootDError as error:
+            raise_as_oserror(error.status, self.name)
+
+    async def _initialize(self):
+        try:
+            await self._call(self._file.open(
+                self.name, self._flags, timeout=self.timeout))
+        except FileNotFoundError:
+            if 'a' not in self.mode:
+                raise
+            self._file = aio.File()
+            try:
+                await self._call(self._file.open(
+                    self.name, OpenFlags.NEW, timeout=self.timeout))
+            except FileExistsError:
+                self._file = aio.File()
+                await self._call(self._file.open(
+                    self.name, OpenFlags.UPDATE, timeout=self.timeout))
+        self._closed = False
+        if 'a' in self.mode:
+            self._position = await self._size()
+        return self
+
+    async def _size(self):
+        return (await self._call(self._file.stat(
+            force=True, timeout=self.timeout))).size
+
+    def readable(self):
+        self._check()
+        return self._readable
+
+    def writable(self):
+        self._check()
+        return self._writable
+
+    def seekable(self):
+        self._check()
+        return True
+
+    def tell(self):
+        self._check()
+        return self._position
+
+    async def seek(self, offset, whence=io.SEEK_SET):
+        offset, whence = operator.index(offset), operator.index(whence)
+        async with self._lock:
+            self._check()
+            if whence == io.SEEK_SET:
+                position = offset
+            elif whence == io.SEEK_CUR:
+                position = self._position + offset
+            elif whence == io.SEEK_END:
+                position = await _finish(self._size()) + offset
+            else:
+                raise ValueError('invalid whence: %r' % whence)
+            if position < 0:
+                raise ValueError('negative seek position')
+            self._position = position
+            self._buffer = b''
+            return position
+
+    async def _fill(self, size):
+        data = await self._call(self._file.read(
+            self._position + len(self._buffer), size, self.timeout))
+        self._buffer += data
+        return bool(data)
+
+    def _consume(self, size):
+        data, self._buffer = self._buffer[:size], self._buffer[size:]
+        self._position += len(data)
+        return data
+
+    async def _read(self, size, line=False):
+        self._check()
+        if not self._readable:
+            raise io.UnsupportedOperation('file is not readable')
+        parts = []
+        remaining = size
+        while remaining != 0:
+            if not self._buffer:
+                count = 65536 if line else _CHUNK_SIZE
+                if remaining > 0:
+                    count = min(count, remaining)
+                if not await _finish(self._fill(count)):
+                    break
+            count = len(self._buffer)
+            if remaining > 0:
+                count = min(count, remaining)
+            end = self._buffer.find(b'\n', 0, count) if line else -1
+            if end >= 0:
+                count = end + 1
+            parts.append(self._consume(count))
+            if end >= 0:
+                break
+            if remaining > 0:
+                remaining -= count
+        return b''.join(parts)
+
+    async def read(self, size=-1):
+        size = -1 if size is None else operator.index(size)
+        async with self._lock:
+            return await self._read(size)
+
+    async def readline(self, size=-1):
+        size = -1 if size is None else operator.index(size)
+        async with self._lock:
+            return await self._read(size, line=True)
+
+    async def readinto(self, buffer):
+        target = memoryview(buffer).cast('B')
+        if target.readonly:
+            raise TypeError('readinto() requires a writable buffer')
+        async with self._lock:
+            data = await self._read(len(target))
+            target[:len(data)] = data
+            return len(data)
+
+    async def _write_chunk(self, data):
+        count = await self._call(self._file.write(
+            data, self._position, self.timeout))
+        self._position += count
+        return count
+
+    async def write(self, data):
+        # Own a stable copy before yielding, including mutable buffer inputs.
+        data = memoryview(data).tobytes()
+        async with self._lock:
+            self._check()
+            if not self._writable:
+                raise io.UnsupportedOperation('file is not writable')
+            self._buffer = b''
+            if 'a' in self.mode:
+                self._position = await _finish(self._size())
+            count = 0
+            while count < len(data):
+                count += await _finish(self._write_chunk(
+                    data[count:count + _CHUNK_SIZE]))
+            return count
+
+    async def _truncate(self, size):
+        await self._call(self._file.truncate(size, self.timeout))
+        self._buffer = b''
+        return size
+
+    async def truncate(self, size=None):
+        async with self._lock:
+            self._check()
+            if not self._writable:
+                raise io.UnsupportedOperation('file is not writable')
+            size = self._position if size is None else operator.index(size)
+            if size < 0:
+                raise ValueError('negative truncate size')
+            return await _finish(self._truncate(size))
+
+    async def flush(self):
+        async with self._lock:
+            self._check()
+            if self._writable:
+                await _finish(self._call(self._file.sync(self.timeout)))
+
+    async def _close(self):
+        try:
+            if self._writable:
+                await self._call(self._file.sync(self.timeout))
+        finally:
+            await self._call(self._file.close(self.timeout))
+            self._closed = True
+            self._buffer = b''
+
+    async def _close_locked(self):
+        async with self._lock:
+            if not self.closed:
+                await self._close()
+
+    async def close(self):
+        await _finish(self._close_locked())
+
+    aclose = close
+
+    async def __aenter__(self):
+        self._check()
+        return self
+
+    async def __aexit__(self, exc_type, exc_value, traceback):
+        await self.close()
+
+    def __aiter__(self):
+        self._check()
+        return self
+
+    async def __anext__(self):
+        line = await self.readline()
+        if not line:
+            raise StopAsyncIteration
+        return line
+
+
+class _OpenContext:
+    def __init__(self, url, mode, timeout):
+        self._args = url, mode, timeout
+        self._used = False
+        self._stream = None
+
+    async def _open(self):
+        if self._used:
+            raise RuntimeError('an aio.open context can only be used once')
+        self._used = True
+        stream = AsyncRemoteFile(*self._args)
+        try:
+            await _finish(stream._initialize())
+        except BaseException as error:
+            await _finish(stream.close())
+            raise error
+        self._stream = stream
+        return stream
+
+    def __await__(self):
+        return self._open().__await__()
+
+    async def __aenter__(self):
+        return await self._open()
+
+    async def __aexit__(self, exc_type, exc_value, traceback):
+        await self._stream.close()

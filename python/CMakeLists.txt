@@ -97,6 +97,7 @@ set(PYXROOTD_SOURCES
   libs/client/__init__.py
   libs/client/_version.py
   libs/client/aio.py
+  libs/client/asyncstream.py
   libs/client/copyprocess.py
   libs/client/env.py
   libs/client/file.py
@@ -229,7 +230,7 @@ list(APPEND ENVIRON "XROOTD=$<TARGET_FILE:xrootd>")
 list(APPEND ENVIRON "XRDFS=$<TARGET_FILE:xrdfs>")
 list(APPEND ENVIRON "PYTHONDONTWRITEBYTECODE=1")
 
-set(PYXROOTD_TESTS aio copy file filesystem filesystem_helpers glob stream threads url)
+set(PYXROOTD_TESTS aio asyncstream copy file filesystem filesystem_helpers glob stream threads url)
 
 # fsspec is an optional Python dependency. A module-level pytest skip with no
 # collected tests exits with status 5, which CTest would report as a failure.

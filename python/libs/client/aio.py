@@ -95,6 +95,12 @@ class File:
     async def vector_read(self, chunks, timeout=0):
         return await request(self.native.vector_read, chunks, timeout)
 
+    async def sync(self, timeout=0):
+        await request(self.native.sync, timeout)
+
+    async def truncate(self, size, timeout=0):
+        await request(self.native.truncate, size, timeout)
+
     async def __aenter__(self):
         return self
 
@@ -138,3 +144,15 @@ class FileSystem:
 
     async def query(self, code, arg, timeout=0):
         return await request(self.native.query, code, arg, timeout)
+
+
+def open(url, mode='rb', timeout=0):
+    """Open a binary stream with ``async with aio.open(url) as file``.
+
+    The returned context can also be awaited; the caller then owns the
+    stream and must await ``close()``. No network request is submitted until
+    the context is entered or awaited. See :class:`AsyncRemoteFile` for the
+    cancellation and cursor-sharing contract.
+    """
+    from XRootD.client.asyncstream import _OpenContext
+    return _OpenContext(url, mode, timeout)

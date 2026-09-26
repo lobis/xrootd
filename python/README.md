@@ -99,8 +99,8 @@ The core helpers use syntax compatible with Python 3.6 for AlmaLinux 8.
 
 `XRootD.client.aio` provides awaitable file and filesystem operations backed by
 XrdCl callbacks. It does not use a thread pool for remote I/O. Calls made through
-this interface must use bounded reads; cancellation stops waiting for a request
-but does not abort an already submitted XrdCl operation.
+the low-level `aio.File` interface must use bounded reads; cancellation stops
+waiting for a request but does not abort an already submitted XrdCl operation.
 
 Before, an asyncio caller had to bridge the existing callback API manually
 (shown for a file that is already open):
@@ -135,6 +135,42 @@ file = await File().open('root://host//path/to/file')
 async with file:
     data = await file.read(0, 1024)
 ```
+
+For ordinary sequential file access, `aio.open` manages opening, the cursor,
+and closing. It works independently of fsspec and raises standard `OSError`
+subclasses, with the native status available as `error.xrootd_status`:
+
+```python
+from XRootD.client import aio
+
+async with aio.open('root://host//path/to/file', 'rb', timeout=30) as file:
+    header = await file.read(1024)
+    await file.seek(0)
+    async for line in file:
+        process(line)  # bytes, including the trailing newline
+
+async with aio.open('root://host//path/to/output', 'wb') as file:
+    await file.write(b'hello\n')
+    await file.flush()
+```
+
+The binary modes `rb`, `wb`, `xb`, `ab`, and their `+` variants are supported.
+`read()`, `readline()`, `readinto()`, `write()`, `seek()`, `truncate()`, `flush()`,
+and `close()` are awaitable; `tell()` and `closed` report local state. You may
+also use `file = await aio.open(url)` and later `await file.aclose()`.
+`read()` without a size reads to EOF in bounded native requests and assembles
+the result in memory. Use sized reads or line iteration for large files.
+
+One stream serializes operations on its shared cursor. Use independent streams
+for concurrent reads at independent positions. Cancelling a stream operation
+waits for the current native request to complete before releasing its lock;
+cancelling an open closes any handle obtained by the pending request. Context
+exit and `close()` also finish cleanup when cancelled. This prevents closing a
+handle while its read or write is still pending. Cancellation does not roll
+back writes, and may advance the cursor. Set `timeout` to bound native waits.
+Append obtains the current EOF before writing; concurrent writers on separate
+handles do not have an atomic append guarantee. These stream interfaces use
+Python 3.6-compatible asyncio APIs.
 
 Install `xrootd[fsspec]` to use the optional `root` fsspec implementation. The
 same class supports normal synchronous fsspec methods and asynchronous calls:

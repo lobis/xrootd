@@ -22,7 +22,8 @@ CONFIG = Path(__file__).resolve().parent / 'xrootd.cfg'
 # The remaining test modules do not talk to a server, so there is no point in
 # starting one for them.
 
-NEEDS_SERVER = {'test_aio.py', 'test_copy.py', 'test_file.py',
+NEEDS_SERVER = {'test_aio.py', 'test_asyncstream.py', 'test_copy.py',
+                'test_file.py',
                 'test_filesystem.py', 'test_filesystem_helpers.py',
                 'test_fsspec.py',
                 'test_glob.py', 'test_stream.py', 'test_threads.py'}
