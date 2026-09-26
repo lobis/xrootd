@@ -549,30 +549,71 @@ def test_source_discovery_filters_and_deduplicates():
 
 def test_close_reports_background_pruning_errors():
     async def run():
-        entered = asyncio.Event()
+        closed = []
+        failure = OSError('background close failed')
 
         class File:
+            def __init__(self, url):
+                self.url = url
+
             async def close(self, timeout):
-                entered.set()
-                raise OSError('background close failed')
+                closed.append(self.url)
+                if self.url == '/failed':
+                    raise failure
 
         async def open_file(url, timeout):
-            return File()
+            return File(url)
+
+        async def wait_until(predicate):
+            while not predicate():
+                await asyncio.sleep(0)
 
         cache = _ReadHandleCache(open_file, ttl=0.01)
-        entry = await cache.acquire('/data', 0)
+        entry = await cache.acquire('/failed', 0)
         await cache.release(entry, 0)
-        await asyncio.wait_for(entered.wait(), 2)
-        for _ in range(10):
-            await asyncio.sleep(0)
-        assert cache._pruner_task.done()
-        with pytest.raises(OSError, match='background close failed'):
-            await cache.acquire('/data', 0)
-        with pytest.raises(OSError, match='background close failed'):
+        await asyncio.wait_for(
+            wait_until(lambda: cache._pruner_error is not None), 2)
+        assert not cache._pruner_task.done()
+        # A different server remains readable, and idle pruning continues.
+        entry = await cache.acquire('/healthy', 0)
+        await cache.release(entry, 0)
+        await asyncio.wait_for(
+            wait_until(lambda: '/healthy' in closed), 2)
+        active = await cache.acquire('/active', 0)
+        with pytest.raises(OSError) as caught:
             await cache.close(0)
+        assert caught.value is failure
         assert not cache.handles
+        assert '/active' not in closed
+        await cache.release(active, 0)
+        assert '/active' in closed
+        # The deferred failure is reported once; the cache is reusable.
+        await cache.close(0)
+        entry = await cache.acquire('/reopened', 0)
+        await cache.release(entry, 0)
+        await cache.close(0)
+        assert '/reopened' in closed
 
     asyncio.run(run())
+
+
+def test_filesystem_constructed_without_current_event_loop():
+    from concurrent.futures import ThreadPoolExecutor
+
+    def use_filesystem():
+        # A fresh thread has no implicit event loop, including on Python 3.9.
+        fs = XRootDFileSystem(hostid=client.URL(SERVER_URL).hostid,
+                              skip_instance_cache=True)
+        path = '/tmp/no-event-loop-' + uuid.uuid4().hex
+        try:
+            fs.pipe_file(path, b'content')
+            assert fs.cat_file(path) == b'content'
+            fs.rm(path)
+        finally:
+            fs.close()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        executor.submit(use_filesystem).result(timeout=10)
 
 
 def test_cancelled_invalidation_finishes_all_idle_closes():

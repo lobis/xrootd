@@ -140,8 +140,11 @@ def test_async_stream_append_exclusive_and_shared_cursor():
                 async with aio.open(path, 'xb'):
                     pass
             async with aio.open(path) as file:
-                assert await asyncio.gather(file.read(2), file.read(2)) == \
-                    [b'ab', b'cd']
+                assert await file.read_at(0, 4) == b'abcd'
+                # Python 3.6 gather need not schedule in argument order.
+                chunks = await asyncio.gather(file.read(2), file.read(2))
+                assert sorted(chunks) == [b'ab', b'cd']
+                assert file.tell() == 4
                 with pytest.raises(io.UnsupportedOperation):
                     await file.write(b'x')
                 with pytest.raises(TypeError):

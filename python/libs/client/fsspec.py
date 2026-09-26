@@ -73,9 +73,18 @@ class _ReadHandleCache:
         self.handles = {}
         self.pending = {}
         self.generations = {}
-        self.lock = asyncio.Lock()
+        self._lock = None
         self._pruner_task = None
         self._pruner_stop = None
+        self._pruner_error = None
+
+    @property
+    def lock(self):
+        # Python < 3.10 binds locks at construction. Create this on the
+        # consuming loop, which may be fsspec's worker loop.
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
 
     async def _prune_idle(self, stop):
         try:
@@ -89,14 +98,17 @@ class _ReadHandleCache:
                     return
                 async with self.lock:
                     to_close = self._prune()
-                await self._close_entries(to_close, 0)
+                try:
+                    await self._close_entries(to_close, 0)
+                except Exception as error:
+                    # Removed entries cannot poison later reads. Retain the
+                    # first failure for explicit filesystem cleanup.
+                    if self._pruner_error is None:
+                        self._pruner_error = error
         except asyncio.CancelledError:
             pass
 
     async def acquire(self, url, timeout):
-        if self._pruner_task is not None and self._pruner_task.done():
-            # Surface a background close failure before replacing its task.
-            self._pruner_task.result()
         if self.ttl > 0 and (self._pruner_task is None or
                              self._pruner_task.done()):
             self._pruner_stop = asyncio.Event()
@@ -209,6 +221,9 @@ class _ReadHandleCache:
                 await task
             except Exception as error:
                 pruner_error = error
+        if pruner_error is None:
+            pruner_error = self._pruner_error
+        self._pruner_error = None
         if self._pruner_stop is stop:
             self._pruner_stop = None
         async with self.lock:
