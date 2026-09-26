@@ -17,9 +17,10 @@ from fsspec.spec import AbstractBufferedFile
 
 from XRootD import client
 from XRootD.client import aio
+from XRootD.client.asyncstream import AsyncRemoteFile, _finish, _open_stream
 from XRootD.client.flags import DirListFlags, MkDirFlags, OpenFlags, QueryCode
 from XRootD.client.flags import StatInfoFlags
-from XRootD.client.responses import XRootDError, XRootDNotFoundError
+from XRootD.client.responses import XRootDError
 from XRootD.client.responses import checksum_query_path, parse_checksum
 from XRootD.client.responses import raise_as_oserror
 from XRootD.client.stream import RemoteFile
@@ -139,7 +140,7 @@ class _ReadHandleCache:
     @staticmethod
     async def _close_entries(entries, timeout):
         for entry in entries:
-            await entry.file.close(timeout)
+            await _finish(entry.file.close(timeout))
 
     async def release(self, entry, timeout):
         async with self.lock:
@@ -167,14 +168,20 @@ class _ReadHandleCache:
         self._pruner_stop = None
         async with self.lock:
             entries = list(self.handles.values())
-            pending = list(self.pending)
+            pending = dict(self.pending)
             self.handles.clear()
             for entry in entries:
                 entry.invalid = True
             for url in pending:
                 self.generations[url] = self.generations.get(url, 0) + 1
             to_close = [entry for entry in entries if not entry.users]
-        await self._close_entries(to_close, timeout)
+        try:
+            await self._close_entries(to_close, timeout)
+        finally:
+            # Invalidated in-flight opens close their new handle themselves.
+            # Keep the loop alive until that cleanup has completed.
+            if pending:
+                await asyncio.gather(*pending.values(), return_exceptions=True)
 
     def _prune(self):
         now = time.monotonic()
@@ -227,7 +234,7 @@ def _raise_fsspec_error(error, path):
 
 async def _native(operation, path):
     try:
-        return await operation
+        return await _finish(operation)
     except XRootDError as error:
         _raise_fsspec_error(error, path)
 
@@ -281,79 +288,33 @@ def _statinfo_to_info(path, info):
     return result
 
 
-class AsyncXRootDFile:
-    """A file opened with native callbacks, for fsspec's ``open_async``."""
+class AsyncXRootDFile(AsyncRemoteFile):
+    """Native async stream with fsspec source selection and cache hooks."""
 
-    def __init__(self, file, mode, path, offset=0, on_close=None):
-        self._file = file
-        self.mode = mode
+    def __init__(self, fs, path, mode):
+        super().__init__(fs.unstrip_protocol(path), mode, fs.timeout)
+        self._fs = fs
         self.path = path
-        self.loc = offset
-        self.closed = False
-        self._on_close = on_close
 
-    async def read(self, length=-1):
-        if self.closed or self.mode not in ('rb', 'r+b'):
-            raise ValueError('file is closed or not readable')
-        if length < 0:
-            size = (await _native(self._file.stat(force=True),
-                                  self.path)).size
-            length = max(0, size - self.loc)
-        if length == 0:
-            return b''
-        chunks = []
-        while length:
-            data = await _native(
-                self._file.read(self.loc, min(length, _CHUNK_SIZE)),
-                self.path)
-            if not data:
-                break
-            self.loc += len(data)
-            length -= len(data)
-            chunks.append(data)
-        return b''.join(chunks)
+    @property
+    def loc(self):
+        return self.tell()
 
-    async def write(self, data):
-        if self.closed or self.mode == 'rb':
-            raise ValueError('file is closed or not writable')
-        written = await _native(self._file.write(data, self.loc), self.path)
-        self.loc += written
-        return written
+    async def _initialize(self):
+        if self.mode == 'rb':
+            self._file = await self._fs._open_read_file(
+                self.name, self.timeout)
+            self._closed = False
+            return self
+        await self._fs._invalidate_read_file(self.path)
+        return await super()._initialize()
 
-    async def seek(self, offset, whence=0):
-        if self.closed:
-            raise ValueError('file is closed')
-        if whence == 1:
-            offset += self.loc
-        elif whence == 2:
-            offset += (await _native(self._file.stat(force=True),
-                                     self.path)).size
-        elif whence != 0:
-            raise ValueError('invalid whence')
-        if offset < 0:
-            raise ValueError('negative seek position')
-        self.loc = offset
-        return offset
-
-    def tell(self):
-        if self.closed:
-            raise ValueError('file is closed')
-        return self.loc
-
-    async def close(self):
-        if not self.closed:
-            try:
-                await _native(self._file.close(), self.path)
-                self.closed = True
-            finally:
-                if self._on_close is not None:
-                    await self._on_close()
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc_value, traceback):
-        await self.close()
+    async def _close(self):
+        try:
+            await super()._close()
+        finally:
+            if self._writable:
+                await self._fs.invalidate_cache_async(self.path)
 
 
 class XRootDFile(AbstractBufferedFile):
@@ -470,12 +431,19 @@ class XRootDFileSystem(AsyncFileSystem):
 
     @asynccontextmanager
     async def _read_file(self, path):
-        entry = await self._read_handles.acquire(
-            self.unstrip_protocol(path), self.timeout)
+        entry = None
+
+        async def acquire():
+            nonlocal entry
+            entry = await self._read_handles.acquire(
+                self.unstrip_protocol(path), self.timeout)
+
         try:
+            await _finish(acquire())
             yield entry.file
         finally:
-            await self._read_handles.release(entry, self.timeout)
+            if entry is not None:
+                await _finish(self._read_handles.release(entry, self.timeout))
 
     async def _invalidate_read_file(self, path):
         await self._read_handles.invalidate(self.unstrip_protocol(path),
@@ -517,7 +485,7 @@ class XRootDFileSystem(AsyncFileSystem):
 
     async def close_async(self):
         """Close cached read handles held by this filesystem."""
-        await self._read_handles.close(self.timeout)
+        await _finish(self._read_handles.close(self.timeout))
 
     def close(self):
         """Close cached read handles from synchronous code."""
@@ -730,35 +698,8 @@ class XRootDFileSystem(AsyncFileSystem):
     checksum = sync_wrapper(_checksum)
 
     async def open_async(self, path, mode='rb', **kwargs):
-        remote_path = self.unstrip_protocol(path)
-        if mode == 'rb':
-            file = await self._open_read_file(remote_path, self.timeout)
-        else:
-            _file_mode(mode)
-            await self._invalidate_read_file(path)
-            file = aio.File()
-            try:
-                try:
-                    await file.open(remote_path, _file_mode(mode),
-                                    timeout=self.timeout)
-                except XRootDNotFoundError:
-                    if mode != 'ab':
-                        raise
-                    file = aio.File()
-                    await file.open(remote_path, OpenFlags.NEW,
-                                    timeout=self.timeout)
-            except XRootDError as error:
-                _raise_fsspec_error(error, remote_path)
-        try:
-            offset = (await _native(file.stat(force=True), path)).size if \
-                mode == 'ab' \
-                else 0
-            on_close = None if mode == 'rb' else partial(
-                self.invalidate_cache_async, path)
-            return AsyncXRootDFile(file, mode, remote_path, offset, on_close)
-        except Exception:
-            await file.close()
-            raise
+        _file_mode(mode)
+        return await _open_stream(AsyncXRootDFile(self, path, mode))
 
     def _open(self, path, mode='rb', block_size=None, **kwargs):
         if mode != 'rb':
@@ -833,7 +774,11 @@ class XRootDFileSystem(AsyncFileSystem):
                        for i in range(0, len(requests), max_chunks)]
             responses = await _native(_run_coros_in_chunks(
                 [file.vector_read(batch, self.timeout) for batch in batches],
-                batch_size=batch_size or self.batch_size, nofiles=True), path)
+                batch_size=batch_size or self.batch_size, nofiles=True,
+                return_exceptions=True), path)
+            for response in responses:
+                if isinstance(response, BaseException):
+                    _raise_fsspec_error(response, path)
             chunks = [chunk for response in responses for chunk in response]
             if len(chunks) != len(requests):
                 raise OSError('XRootD vector read returned the wrong chunk '

@@ -36,6 +36,20 @@ async def _finish(operation):
         raise cancelled
 
 
+async def _open_stream(stream):
+    """Acquire a stream, closing a late successful open on cancellation."""
+    try:
+        await _finish(stream._initialize())
+    except BaseException as error:
+        try:
+            await _finish(stream.close())
+        except BaseException:
+            # Preserve the opening/cancellation error if cleanup also fails.
+            pass
+        raise error
+    return stream
+
+
 class AsyncRemoteFile:
     """An awaitable binary file with a sequential cursor and line iteration.
 
@@ -281,11 +295,7 @@ class _OpenContext:
             raise RuntimeError('an aio.open context can only be used once')
         self._used = True
         stream = AsyncRemoteFile(*self._args)
-        try:
-            await _finish(stream._initialize())
-        except BaseException as error:
-            await _finish(stream.close())
-            raise error
+        await _open_stream(stream)
         self._stream = stream
         return stream
 

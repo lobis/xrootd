@@ -103,13 +103,21 @@ def test_async_close_invalidates_even_when_native_close_fails():
         invalidated = []
 
         class File:
-            async def close(self):
+            async def sync(self, timeout):
+                pass
+
+            async def close(self, timeout):
                 raise OSError('close failed')
 
-        async def invalidate():
+        async def invalidate(path):
             invalidated.append(True)
 
-        file = AsyncXRootDFile(File(), 'wb', '/data', on_close=invalidate)
+        fs = XRootDFileSystem(hostid='example', asynchronous=True,
+                              skip_instance_cache=True)
+        fs.invalidate_cache_async = invalidate
+        file = AsyncXRootDFile(fs, '/data', 'wb')
+        file._file = File()
+        file._closed = False
         with pytest.raises(OSError, match='close failed'):
             await file.close()
         assert invalidated == [True]
@@ -602,3 +610,95 @@ def test_fsspec_vector_limits_fall_back_for_older_servers(monkeypatch):
     monkeypatch.setattr(aio, 'FileSystem', lambda endpoint: FakeClient())
     file = SimpleNamespace(native=FakeNative())
     assert asyncio.run(fs._vector_limits(file)) == (1024, 2097136)
+
+
+@pytest.mark.parametrize('operation', ['open', 'read'])
+def test_cancelled_cached_read_retains_handle(monkeypatch, operation):
+    async def run():
+        started, resume = asyncio.Event(), asyncio.Event()
+        closed = []
+
+        class File:
+            async def read(self, offset, size, timeout):
+                if operation == 'read':
+                    started.set()
+                    await resume.wait()
+                return b'data'
+
+            async def close(self, timeout):
+                closed.append(True)
+
+        async def open_file(url, timeout):
+            if operation == 'open':
+                started.set()
+                await resume.wait()
+            return File()
+
+        fs = XRootDFileSystem(hostid='example', asynchronous=True,
+                              filehandle_cache_size=0, filehandle_cache_ttl=0,
+                              skip_instance_cache=True)
+        fs._read_handles.open_file = open_file
+        task = asyncio.create_task(fs._cat_file('/data', 0, 4))
+        await asyncio.wait_for(started.wait(), 2)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        assert not closed
+        resume.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 2)
+        assert closed == [True]
+        assert not fs._read_handles.handles
+        await fs.close_async()
+
+    asyncio.run(run())
+
+
+def test_vector_failure_drains_other_batches_before_release():
+    async def run():
+        from types import SimpleNamespace
+
+        started, resume = asyncio.Event(), asyncio.Event()
+        closed = []
+
+        class File:
+            async def stat(self, force):
+                return SimpleNamespace(size=8)
+
+            async def vector_read(self, batch, timeout):
+                if batch[0][0] == 0:
+                    await started.wait()
+                    raise OSError('first batch failed')
+                started.set()
+                await resume.wait()
+                return [SimpleNamespace(offset=4, buffer=b'data')]
+
+            async def close(self, timeout):
+                closed.append(True)
+
+        async def open_file(url, timeout):
+            return File()
+
+        async def limits(file):
+            return 1, 4
+
+        fs = XRootDFileSystem(hostid='example', asynchronous=True,
+                              filehandle_cache_size=0, filehandle_cache_ttl=0,
+                              skip_instance_cache=True)
+        fs._read_handles.open_file = open_file
+        fs._vector_limits = limits
+        task = asyncio.create_task(fs._vector_read_ranges('/data', [(0, 8)]))
+        await asyncio.wait_for(started.wait(), 2)
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert not task.done()
+        assert not closed
+        resume.set()
+        with pytest.raises(OSError, match='first batch failed'):
+            await asyncio.wait_for(task, 2)
+        assert closed == [True]
+        await fs.close_async()
+
+    asyncio.run(run())

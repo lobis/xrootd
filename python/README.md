@@ -172,6 +172,30 @@ Append obtains the current EOF before writing; concurrent writers on separate
 handles do not have an atomic append guarantee. These stream interfaces use
 Python 3.6-compatible asyncio APIs.
 
+#### Cancellation and resource ownership
+
+The sequential streams returned by `aio.open` and fsspec's `open_async`
+share the same implementation and cancellation contract:
+
+| Operation | What cancellation means |
+| --- | --- |
+| Waiting for the cursor lock | No new request is submitted. |
+| Opening | Wait for completion, then close a successfully opened handle. |
+| Reading or writing | Finish the current native request before releasing the handle. Earlier chunks may already have advanced the cursor; writes are not rolled back. |
+| Closing or leaving `async with` | Complete cleanup even if cancellation is requested again. |
+| Cached fsspec reads | Retain the cache reference until native completion; vector batches also drain before an error is propagated. |
+
+`asyncio.wait_for` cancels the Python task. It cannot abort an XrdCl request,
+so cleanup may outlast the asyncio deadline. A positive native `timeout`
+bounds individual network requests, not a whole multi-request transfer or
+its cleanup. `timeout=0` uses XrdCl's configured default.
+
+The low-level `aio.request` and `aio.File` APIs remain available for callers
+which manage native request ownership themselves. Their cancellation stops
+waiting immediately; arguments are retained until the callback arrives, but
+callers must not close or reuse a handle with outstanding requests. Prefer
+`aio.open` for automatic ownership and cleanup.
+
 The filesystem also provides awaitable Python-style helpers. Previously each
 caller had to inspect stat flags, listing responses, and native errors:
 
