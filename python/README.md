@@ -159,10 +159,12 @@ The binary modes `rb`, `wb`, `xb`, `ab`, and their `+` variants are supported.
 and `close()` are awaitable; `tell()` and `closed` report local state. You may
 also use `file = await aio.open(url)` and later `await file.aclose()`.
 `read()` without a size reads to EOF in bounded native requests and assembles
-the result in memory. Use sized reads or line iteration for large files.
+the result in memory. Use `iter_chunks(size)` or line iteration for large files.
 
-One stream serializes operations on its shared cursor. Use independent streams
-for concurrent reads at independent positions. Cancelling a stream operation
+One stream serializes operations on its shared cursor. Use `read_at(offset,
+size)` for concurrent reads at independent positions on the same handle; these
+leave the cursor and any read-ahead buffer unchanged. Closing waits for all
+positioned reads. Concurrent reads and writes do not provide snapshot isolation. Cancelling a stream operation
 waits for the current native request to complete before releasing its lock;
 cancelling an open closes any handle obtained by the pending request. Context
 exit and `close()` also finish cleanup when cancelled. This prevents closing a
@@ -171,6 +173,48 @@ back writes, and may advance the cursor. Set `timeout` to bound native waits.
 Append obtains the current EOF before writing; concurrent writers on separate
 handles do not have an atomic append guarantee. These stream interfaces use
 Python 3.6-compatible asyncio APIs.
+
+#### Concurrent ranges and bounded-memory iteration
+
+Previously, concurrent ranges required manually managing the lifetime of a
+low-level `aio.File`, supplying offsets to every read, and ensuring pending
+callbacks completed before close. The stream now owns that lifecycle:
+
+```python
+import asyncio
+from XRootD.client import aio
+
+async def read_ranges(url):
+    async with aio.open(url, timeout=10) as file:
+        header = await file.read(4)
+        first, second = await asyncio.gather(
+            file.read_at(1024, 65536),
+            file.read_at(1024 * 1024, 65536),
+        )
+        assert file.tell() == 4
+        return header, first, second
+```
+
+For sequential processing, blocks are read only as the consumer requests them:
+
+```python
+async def process_file(url):
+    async with aio.open(url, timeout=10) as file:
+        async for block in file.iter_chunks(1024 * 1024):
+            await consume(block)
+```
+
+Each block is at most the requested size, and the last block may be shorter.
+Breaking out of iteration submits no further reads; the enclosing `async with`
+closes the stream. `read_at` assembles its requested range in memory, so use
+bounded ranges and limit the number of concurrent tasks for large workloads.
+These methods are also available on fsspec's `open_async` files.
+
+For a complete command-line example, including timeout handling and an
+optional Python 3.11+ `TaskGroup`, see
+[`examples/async_streams/read.py`](examples/async_streams/read.py). It uses an explicit event
+loop on Python 3.6 and `asyncio.run` on Python 3.7+. Public async stream methods
+carry type annotations, and the package includes a `py.typed` marker.
 
 #### Cancellation and resource ownership
 
@@ -189,6 +233,9 @@ share the same implementation and cancellation contract:
 so cleanup may outlast the asyncio deadline. A positive native `timeout`
 bounds individual network requests, not a whole multi-request transfer or
 its cleanup. `timeout=0` uses XrdCl's configured default.
+Python 3.6's `wait_for` returns before the cancelled task has finished; keep
+the task and await its cleanup before shutting down the loop, as the complete
+example does. Python 3.7+ waits for task cancellation to finish.
 
 The low-level `aio.request` and `aio.File` APIs remain available for callers
 which manage native request ownership themselves. Their cancellation stops

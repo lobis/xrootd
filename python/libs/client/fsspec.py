@@ -697,7 +697,7 @@ class XRootDFileSystem(AsyncFileSystem):
 
     checksum = sync_wrapper(_checksum)
 
-    async def open_async(self, path, mode='rb', **kwargs):
+    async def open_async(self, path, mode='rb', **kwargs) -> AsyncXRootDFile:
         _file_mode(mode)
         return await _open_stream(AsyncXRootDFile(self, path, mode))
 

@@ -323,14 +323,19 @@ def test_wait_for_drains_native_read_before_timeout(monkeypatch, open_stream):
         wrapper = aio.File(native=native)
         monkeypatch.setattr(aio, 'File', lambda: wrapper)
         async with await open_stream('root://example//data') as file:
-            task = asyncio.ensure_future(asyncio.wait_for(file.read(4), 0.01))
+            read = asyncio.ensure_future(file.read(4))
+            task = asyncio.ensure_future(asyncio.wait_for(read, 0.01))
             await asyncio.wait_for(native.started.wait(), 2)
             await asyncio.sleep(0.03)
-            assert not task.done()
+            assert not read.done()
+            if sys.version_info >= (3, 7):
+                assert not task.done()
             assert native.opened
             native.release()
             with pytest.raises(asyncio.TimeoutError):
                 await asyncio.wait_for(task, 2)
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(read, 2)
             assert file.tell() == 0
             # The cancelled request filled the buffer without delivering it.
             assert await file.read(4) == b'data'
@@ -353,5 +358,151 @@ def test_cancelled_write_advances_cursor(monkeypatch, open_stream):
             with pytest.raises(asyncio.CancelledError):
                 await asyncio.wait_for(task, 2)
             assert file.tell() == 4
+
+    run_async(run())
+
+
+def test_positioned_reads_and_chunks(open_stream, monkeypatch):
+    path = SERVER_URL + '/tmp/stream-positioned-' + uuid.uuid4().hex
+
+    async def run():
+        data = b'first\nsecond\nlast'
+        try:
+            with client.open(path, 'wb') as file:
+                file.write(data)
+            async with await open_stream(path) as file:
+                assert await file.readline() == b'first\n'
+                position = file.tell()
+                results = await asyncio.gather(
+                    file.read_at(0, 5), file.read_at(6, 6),
+                    file.read_at(len(data) - 2, 20), file.read_at(100, 3))
+                assert results == [b'first', b'second', b'st', b'']
+                assert file.tell() == position
+                assert await file.readline() == b'second\n'
+                await file.seek(0)
+                # Force native chunk splitting as well as public iteration.
+                from XRootD.client import asyncstream
+                monkeypatch.setattr(asyncstream, '_CHUNK_SIZE', 3)
+                assert await file.read_at(0, len(data)) == data
+                blocks = [part async for part in file.iter_chunks(5)]
+                assert blocks == [data[i:i + 5]
+                                  for i in range(0, len(data), 5)]
+                assert file.tell() == len(data)
+                assert await file.read_at(0, 0) == b''
+                for offset, size in [(-1, 2), (0, -1)]:
+                    with pytest.raises(ValueError):
+                        await file.read_at(offset, size)
+                with pytest.raises(TypeError):
+                    await file.read_at(0.5, 2)
+                for size in [0, -1]:
+                    with pytest.raises(ValueError):
+                        await file.iter_chunks(size).__anext__()
+            with pytest.raises(ValueError, match='closed'):
+                await file.read_at(0, 1)
+        finally:
+            await aio.FileSystem(SERVER_URL).rm(client.URL(path).path)
+
+    run_async(run())
+
+
+def test_positioned_reads_overlap_and_close_drains(monkeypatch, open_stream):
+    async def run():
+        class Native(DelayedNative):
+            def __init__(self):
+                super().__init__('read')
+                self.pending = {}
+                self.both_started = asyncio.Event()
+
+            def read(self, offset, *args, **kwargs):
+                status = super().read(offset, *args, **kwargs)
+                self.pending[offset] = self.release
+                if len(self.pending) == 2:
+                    self.both_started.set()
+                return status
+
+        native = Native()
+        wrapper = aio.File(native=native)
+        monkeypatch.setattr(aio, 'File', lambda: wrapper)
+        file = await open_stream('root://example//data')
+        first = asyncio.ensure_future(file.read_at(0, 4))
+        second = asyncio.ensure_future(file.read_at(4, 4))
+        await asyncio.wait_for(native.both_started.wait(), 2)
+        assert file.tell() == 0
+        first.cancel()
+        await asyncio.sleep(0)
+        first.cancel()
+        close = asyncio.ensure_future(file.close())
+        await asyncio.sleep(0)
+        assert not first.done()
+        assert 'close-submitted' not in native.events
+        native.pending[0]()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(first, 2)
+        assert not close.done()
+        native.pending[4]()
+        assert await asyncio.wait_for(second, 2) == b'data'
+        await asyncio.wait_for(close, 2)
+        assert file.closed
+        assert native.events.count('close-completed') == 1
+
+    run_async(run())
+
+
+def test_chunk_iteration_does_not_prefetch(monkeypatch, open_stream):
+    async def run():
+        native = DelayedNative(None)
+        wrapper = aio.File(native=native)
+        monkeypatch.setattr(aio, 'File', lambda: wrapper)
+        async with await open_stream('root://example//data') as file:
+            chunks = file.iter_chunks(4)
+            assert await chunks.__anext__() == b'data'
+            await asyncio.sleep(0)
+            assert native.events.count('read-submitted') == 1
+            await chunks.aclose()
+            assert not file.closed
+            assert file.tell() == 4
+        assert not native.opened
+
+    run_async(run())
+
+
+@pytest.mark.parametrize('task_group', [False, True])
+def test_async_read_example(task_group, capsys):
+    import hashlib
+    import importlib.util
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    if task_group and sys.version_info < (3, 11):
+        pytest.skip('TaskGroup requires Python 3.11')
+    source = (Path(__file__).resolve().parents[1] / 'examples' /
+              'async_streams' / 'read.py')
+    spec = importlib.util.spec_from_file_location(
+        'async_read_example', str(source))
+    example = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(example)
+    path = SERVER_URL + '/tmp/stream-example-' + uuid.uuid4().hex
+    data = b'first\nsecond\nlast'
+
+    async def run():
+        try:
+            with client.open(path, 'wb') as file:
+                file.write(data)
+            args = SimpleNamespace(url=path, timeout=10, deadline=30,
+                                   offset=[0, 6], length=5, chunk_size=3,
+                                   task_group=task_group, stream=True)
+            assert await example.main(args) == 0
+            output = capsys.readouterr().out
+            assert 'Sequential cursor: 4' in output
+            assert hashlib.sha256(data).hexdigest() in output
+
+            async def native_timeout(args):
+                raise TimeoutError('native request expired')
+
+            example.inspect_file = native_timeout
+            assert await example.main(args) == 1
+            assert 'native request expired' in capsys.readouterr().err
+        finally:
+            await aio.FileSystem(SERVER_URL).rm(client.URL(path).path)
 
     run_async(run())

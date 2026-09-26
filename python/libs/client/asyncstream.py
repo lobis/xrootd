@@ -6,6 +6,7 @@
 import asyncio
 import io
 import operator
+from typing import Any, AsyncIterator, Generator, Optional
 
 from XRootD.client import aio
 from XRootD.client.flags import OpenFlags
@@ -63,7 +64,7 @@ class AsyncRemoteFile:
     atomic append across independent clients.
     """
 
-    def __init__(self, url, mode, timeout):
+    def __init__(self, url: str, mode: str, timeout: int):
         self._flags, self._readable, self._writable = _mode_flags(mode)
         if 'b' not in mode:
             raise ValueError('async streams currently require binary mode')
@@ -75,9 +76,10 @@ class AsyncRemoteFile:
         self._closed = True
         self._position = 0
         self._buffer = b''
+        self._positioned_reads = set()
 
     @property
-    def closed(self):
+    def closed(self) -> bool:
         return self._closed
 
     def _check(self):
@@ -114,23 +116,23 @@ class AsyncRemoteFile:
         return (await self._call(self._file.stat(
             force=True, timeout=self.timeout))).size
 
-    def readable(self):
+    def readable(self) -> bool:
         self._check()
         return self._readable
 
-    def writable(self):
+    def writable(self) -> bool:
         self._check()
         return self._writable
 
-    def seekable(self):
+    def seekable(self) -> bool:
         self._check()
         return True
 
-    def tell(self):
+    def tell(self) -> int:
         self._check()
         return self._position
 
-    async def seek(self, offset, whence=io.SEEK_SET):
+    async def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
         offset, whence = operator.index(offset), operator.index(whence)
         async with self._lock:
             self._check()
@@ -185,17 +187,66 @@ class AsyncRemoteFile:
                 remaining -= count
         return b''.join(parts)
 
-    async def read(self, size=-1):
+    async def read(self, size: Optional[int] = -1) -> bytes:
         size = -1 if size is None else operator.index(size)
         async with self._lock:
             return await self._read(size)
 
-    async def readline(self, size=-1):
+    async def _read_at(self, offset, size):
+        parts = []
+        while size:
+            data = await _finish(self._call(self._file.read(
+                offset, min(size, _CHUNK_SIZE), self.timeout)))
+            if not data:
+                break
+            parts.append(data)
+            offset += len(data)
+            size -= len(data)
+        return b''.join(parts)
+
+    async def read_at(self, offset: int, size: int) -> bytes:
+        """Read up to size bytes without changing the cursor or read buffer.
+
+        Positioned reads on one handle can run concurrently. Close waits for
+        them, including cancelled requests. Concurrent writes may affect the
+        data returned; this method does not provide snapshot isolation.
+        """
+        offset, size = operator.index(offset), operator.index(size)
+        if offset < 0 or size < 0:
+            raise ValueError('read_at requires nonnegative offset and size')
+        async with self._lock:
+            self._check()
+            if not self._readable:
+                raise io.UnsupportedOperation('file is not readable')
+            task = asyncio.ensure_future(self._read_at(offset, size))
+            self._positioned_reads.add(task)
+        try:
+            return await task
+        finally:
+            self._positioned_reads.discard(task)
+
+    async def iter_chunks(
+            self, size: int = _CHUNK_SIZE) -> AsyncIterator[bytes]:
+        """Yield sequential blocks of at most size bytes until EOF.
+
+        Reads are demand-driven: stopping iteration submits no further I/O.
+        Use the stream's async context manager to close it on an early exit.
+        """
+        size = operator.index(size)
+        if size <= 0:
+            raise ValueError('chunk size must be positive')
+        while True:
+            block = await self.read(size)
+            if not block:
+                break
+            yield block
+
+    async def readline(self, size: Optional[int] = -1) -> bytes:
         size = -1 if size is None else operator.index(size)
         async with self._lock:
             return await self._read(size, line=True)
 
-    async def readinto(self, buffer):
+    async def readinto(self, buffer: Any) -> int:
         target = memoryview(buffer).cast('B')
         if target.readonly:
             raise TypeError('readinto() requires a writable buffer')
@@ -210,7 +261,7 @@ class AsyncRemoteFile:
         self._position += count
         return count
 
-    async def write(self, data):
+    async def write(self, data: Any) -> int:
         # Own a stable copy before yielding, including mutable buffer inputs.
         data = memoryview(data).tobytes()
         async with self._lock:
@@ -231,7 +282,7 @@ class AsyncRemoteFile:
         self._buffer = b''
         return size
 
-    async def truncate(self, size=None):
+    async def truncate(self, size: Optional[int] = None) -> int:
         async with self._lock:
             self._check()
             if not self._writable:
@@ -241,7 +292,7 @@ class AsyncRemoteFile:
                 raise ValueError('negative truncate size')
             return await _finish(self._truncate(size))
 
-    async def flush(self):
+    async def flush(self) -> None:
         async with self._lock:
             self._check()
             if self._writable:
@@ -259,25 +310,28 @@ class AsyncRemoteFile:
     async def _close_locked(self):
         async with self._lock:
             if not self.closed:
+                if self._positioned_reads:
+                    await asyncio.gather(*self._positioned_reads,
+                                         return_exceptions=True)
                 await self._close()
 
-    async def close(self):
+    async def close(self) -> None:
         await _finish(self._close_locked())
 
     aclose = close
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> "AsyncRemoteFile":
         self._check()
         return self
 
     async def __aexit__(self, exc_type, exc_value, traceback):
         await self.close()
 
-    def __aiter__(self):
+    def __aiter__(self) -> AsyncIterator[bytes]:
         self._check()
         return self
 
-    async def __anext__(self):
+    async def __anext__(self) -> bytes:
         line = await self.readline()
         if not line:
             raise StopAsyncIteration
@@ -285,12 +339,12 @@ class AsyncRemoteFile:
 
 
 class _OpenContext:
-    def __init__(self, url, mode, timeout):
+    def __init__(self, url: str, mode: str, timeout: int):
         self._args = url, mode, timeout
         self._used = False
         self._stream = None
 
-    async def _open(self):
+    async def _open(self) -> AsyncRemoteFile:
         if self._used:
             raise RuntimeError('an aio.open context can only be used once')
         self._used = True
@@ -299,10 +353,10 @@ class _OpenContext:
         self._stream = stream
         return stream
 
-    def __await__(self):
+    def __await__(self) -> Generator[Any, None, AsyncRemoteFile]:
         return self._open().__await__()
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> "AsyncRemoteFile":
         return await self._open()
 
     async def __aexit__(self, exc_type, exc_value, traceback):

@@ -10,6 +10,10 @@ not run synchronous network calls in an executor.
 
 import asyncio
 import errno
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from XRootD.client.asyncstream import _OpenContext
 
 from XRootD import client
 from XRootD.client.flags import AccessMode, DirListFlags, MkDirFlags, OpenFlags
@@ -224,7 +228,7 @@ class FileSystem:
                 raise
 
 
-def open(url, mode='rb', timeout=0):
+def open(url: str, mode: str = 'rb', timeout: int = 0) -> '_OpenContext':
     """Open a binary stream with ``async with aio.open(url) as file``.
 
     The returned context can also be awaited; the caller then owns the
