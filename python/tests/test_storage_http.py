@@ -182,6 +182,10 @@ with AuthContext.bearer(token='transfer') as auth, StorageClient(auth=auth) as c
     client.get(sys.argv[1] + '/redirect', sys.argv[2], force=True)
     client.put(sys.argv[2], sys.argv[1] + '/upload', force=True,
                create_parents=False)
+    query = '?signature=opaque+value==&empty=&repeat=one&repeat=two&bare&escaped=%2f%2F'
+    client.put(sys.argv[2], sys.argv[1] + '/upload' + query, force=True,
+               create_parents=False)
+    client.get(sys.argv[1] + '/file' + query, sys.argv[2], force=True)
 print(json.dumps(True))
 """
   result = subprocess.run([sys.executable, '-c', code, endpoint, str(target)],
@@ -193,3 +197,6 @@ print(json.dumps(True))
   assert transfers
   assert all(r[2] == 'Bearer transfer' for r in transfers)
   assert all('xrdcl.' not in r[1] for r in transfers)
+  query = '?signature=opaque+value==&empty=&repeat=one&repeat=two&bare&escaped=%2f%2F'
+  assert any(r[0] == 'PUT' and r[1] == '/upload' + query for r in transfers)
+  assert any(r[0] == 'GET' and r[1] == '/file' + query for r in transfers)
