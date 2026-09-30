@@ -312,13 +312,13 @@ async with await fs.open_async('/path/to/file', 'rb') as file:
 Remote open, stat, read, write, list, and namespace operations submit native
 XrdCl requests with callbacks. Completion moves from an XrdCl thread to the
 asyncio loop with `call_soon_threadsafe`; the loop does not wait in a worker
-thread for remote I/O. Local files used by fsspec upload/download run through
-an executor. The ordinary `client.open()` and fsspec `fs.open()` methods
+thread for remote I/O. Bulk copies, including fsspec upload/download, run through the native
+CopyProcess pipeline on a C++ worker; file data does not pass through Python. The ordinary `client.open()` and fsspec `fs.open()` methods
 are synchronous and should not be used directly inside an event loop. Python
 argument handling, request submission, and result handling still run on the
 calling thread, so this does not promise zero event-loop latency.
 
-The fsspec adapter now batches scattered ranges through XRootD vector reads,
+The fsspec adapter now batches scattered ranges through native ReadRanges,
 reuses bounded read handles, and can locate an alternate source if an open fails.
 It also supports common metadata, `touch`, `chmod`, checksum queries, append,
 and in-place updates. Cached idle read handles are closed after their TTL, and
@@ -368,6 +368,59 @@ fsspec.register_implementation('root', XRootDFileSystem, clobber=True)
 This avoids replacing `fsspec-xrootd` for other applications merely because
 XRootD is installed. Cancellation of an already submitted native request
 still does not abort the XrdCl operation.
+
+## Native buffers, range batching and copies
+
+The classic callback and status-tuple interfaces also expose `readinto()`,
+`read_ranges()`, and `drain()`. The optional awaitable facade provides the same
+operations:
+
+```python
+async with await aio.File().open(url, OpenFlags.READ) as file:
+    target = bytearray(1024 * 1024)
+    count = await file.readinto(target, offset=0)
+    parts = await file.read_ranges([(0, 1024), (4096, 3 * 1024 * 1024)],
+                                   parallel=4)
+
+await aio.copy('/tmp/source', url, force=True, parallelchunks=4)
+await aio.copy(url, '/tmp/download', force=True)
+# Remote-to-remote third-party copy is explicitly selectable.
+await aio.copy(source_url, target_url, thirdparty='first')
+```
+
+`read_ranges()` returns one `bytes` object per input range, preserving order,
+overlaps, and duplicates. Each range must be within EOF; fsspec normalizes and
+clamps its start/end arguments first. XrdCl queries the current data server's
+vector limits, caches valid replies for 60 seconds, and uses conservative
+protocol defaults if discovery fails. It splits ranges and fills their final
+buffers directly, with bounded concurrent requests and one final callback.
+A failure stops further submissions and drains requests already submitted.
+A nonzero timeout covers discovery and every batch together. Range buffers
+are allocated for the requested result size; this is not a streaming API.
+
+The extension owns files, callbacks, and buffers until native completion,
+including submission failures. `readinto()` pins a writable contiguous buffer
+and avoids an intermediate bytes allocation. Immutable write inputs are
+retained directly; mutable inputs are snapshotted. `buffer_offset` selects a
+slice of an immutable write buffer without allocating Python slice objects.
+Sequential streams retain their cursor lock and snapshot mutable input before
+waiting for that lock.
+
+Cancelling a low-level `aio.File` request stops waiting, while native ownership
+continues. Stop submitting new requests and `await file.drain()` before reusing
+a borrowed readinto buffer or closing the file. `aio.File.close()` drains
+submitted operations first. Stream methods drain the current request before
+propagating cancellation, so their buffers and cursor remain safe to reuse.
+
+`CopyProcess.run_async(callback, handler=None)` prepares and runs on a managed
+native worker. `cancel()` requests cooperative cancellation; completion remains
+the ownership boundary. `aio.copy()` requests cancellation and drains the
+worker before re-raising `CancelledError`. Native progress is throttled to at
+most one update per 50 ms, plus final progress; awaitable progress callbacks
+run on the caller's event loop. fsspec callbacks may implement absolute updates
+or relative updates. Python finalization cancels and joins copy workers before
+stopping XrdCl. Active processes reject job/configuration mutations. The new
+Python extension requires the matching XrdCl library with `File::ReadRanges`.
 
 ## Testing Python contracts and coverage
 

@@ -8,12 +8,14 @@ on:
       - setup.py
       - pyproject.toml
       - 'python/**'
+      - 'src/XrdCl/**'
       - .github/workflows/python.yml
   pull_request:
     paths:
       - setup.py
       - pyproject.toml
       - 'python/**'
+      - 'src/XrdCl/**'
   workflow_dispatch:
   release:
     types:
@@ -56,9 +58,12 @@ jobs:
     - name: Build server and bindings from this revision
       run: |
         cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
-          -DENABLE_PYTHON=ON -DENABLE_TESTS=OFF -DENABLE_HTTP=OFF \
+          -DENABLE_PYTHON=ON -DENABLE_TESTS=ON -DENABLE_SERVER_TESTS=OFF \
+          -DENABLE_HTTP=OFF \
           -DPython_EXECUTABLE="$(command -v python)"
         cmake --build build --parallel 2
+    - name: Test native range batching and lifecycle
+      run: ctest --test-dir build --output-on-failure -R 'XrdCl::ReadRangesTest'
     - name: Test Python contracts and enforce branch coverage
       env:
         PYTHONPATH: ${{ github.workspace }}/build/python/site-packages

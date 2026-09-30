@@ -281,8 +281,7 @@ def test_metadata_for_older_servers(flags, kind, permissions):
     assert stat.S_IMODE(result['mode']) == 0o640
 
 
-@pytest.mark.parametrize('malformed', ['count', 'offset', 'size'])
-def test_invalid_vector_responses_release_handles(malformed):
+def test_native_range_errors_release_handles():
     async def run():
         closed = []
 
@@ -290,13 +289,9 @@ def test_invalid_vector_responses_release_handles(malformed):
             async def stat(self, force):
                 return SimpleNamespace(size=4)
 
-            async def vector_read(self, chunks, timeout):
-                if malformed == 'count':
-                    return []
-                offset = 1 if malformed == 'offset' else 0
-                return [SimpleNamespace(offset=offset,
-                                        buffer=b'x' if malformed == 'size'
-                                        else b'data')]
+            async def read_ranges(self, chunks, timeout, parallel):
+                assert chunks == [(0, 4)]
+                raise OSError('Incomplete range read')
 
             async def close(self, timeout):
                 closed.append(True)
@@ -304,16 +299,12 @@ def test_invalid_vector_responses_release_handles(malformed):
         async def open_file(url, timeout):
             return File()
 
-        async def limits(file):
-            return 1, 4
-
         fs = XRootDFileSystem(hostid='example', asynchronous=True,
                               skip_instance_cache=True,
                               filehandle_cache_size=0, filehandle_cache_ttl=0)
         fs._read_handles.open_file = open_file
-        fs._vector_limits = limits
         try:
-            with pytest.raises(OSError, match='wrong chunk count|incomplete'):
+            with pytest.raises(OSError, match='Incomplete'):
                 await fs._vector_read_ranges('/data', [(0, 4)])
             assert closed == [True]
         finally:
@@ -439,79 +430,32 @@ def test_cache_prune_error_does_not_leak_a_lease():
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('stage', ['open-get', 'open-put', 'read', 'write'])
-def test_cancelled_local_transfer_drains_thread_and_closes(monkeypatch, stage):
-    import threading
-    from XRootD.client import fsspec as module
-
+@pytest.mark.parametrize('upload', [False, True])
+def test_native_transfer_dispatch_and_invalidation(monkeypatch, upload):
     async def run():
-        started = asyncio.Event()
-        release = threading.Event()
-        loop = asyncio.get_running_loop()
+        started, release = asyncio.Event(), asyncio.Event()
         events = []
 
-        def pause():
-            loop.call_soon_threadsafe(started.set)
-            assert release.wait(3)
+        async def copy(*args, **kwargs):
+            started.set()
+            await release.wait()
             events.append('completed')
 
-        class Local:
-            def read(self, size):
-                if stage == 'read':
-                    pause()
-                return b''
-
-            def write(self, data):
-                if stage == 'write':
-                    pause()
-
-            def close(self):
-                events.append('local-close')
-
-        def open_local(*args):
-            if stage.startswith('open'):
-                pause()
-            return Local()
-
-        class Remote:
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *args):
-                events.append('remote-close')
-
-            async def read(self, size):
-                return b'data'
-
-            async def write(self, data):
-                pass
-
-        async def open_remote(*args):
-            return Remote()
-
-        monkeypatch.setattr(module, 'open', open_local, raising=False)
+        # aio.copy owns cancellation/draining; test the adapter's dispatch and
+        # the real native worker lifecycle separately in test_native_io.py.
+        monkeypatch.setattr(aio, 'copy', copy)
         fs = XRootDFileSystem(hostid='example', asynchronous=True,
                               skip_instance_cache=True)
-        fs.open_async = open_remote
-        upload = stage in ('open-put', 'read')
         transfer = fs._put_file('local', '/data') if upload else \
             fs._get_file('/data', 'local')
         task = asyncio.create_task(transfer)
         try:
             await asyncio.wait_for(started.wait(), 2)
-            task.cancel()
-            await asyncio.sleep(0)
-            task.cancel()
-            await asyncio.sleep(0)
-            assert not task.done()
-            assert 'local-close' not in events
-        finally:
             release.set()
-            await asyncio.gather(task, return_exceptions=True)
+            await task
+            assert events == ['completed']
+        finally:
             await fs.close_async()
-        assert task.cancelled()
-        assert events.index('completed') < events.index('local-close')
-        assert events.count('local-close') == 1
 
     asyncio.run(run())
 
@@ -542,35 +486,6 @@ def test_range_failure_waits_for_other_files_to_finish():
             release.set()
         with pytest.raises(OSError, match='failed range'):
             await task
-        await fs.close_async()
-
-    asyncio.run(run())
-
-
-@pytest.mark.parametrize('reply', [b'0 4', '4 0', b'garbage', b'\xff', '8 16'])
-def test_vector_limits_validate_and_cache_server_reply(monkeypatch, reply):
-    async def run():
-        calls = []
-
-        class Server:
-            def __init__(self, endpoint):
-                pass
-
-            async def query(self, *args):
-                calls.append(args)
-                return reply
-
-        fs = XRootDFileSystem(hostid='example', asynchronous=True,
-                              skip_instance_cache=True)
-        monkeypatch.setattr(aio, 'FileSystem', Server)
-        file = SimpleNamespace(native=SimpleNamespace(
-            get_property=lambda key: 'root://server:1094/'))
-        expected = (8, 16) if reply == '8 16' else (1024, 2097136)
-        assert await fs._vector_limits(file) == expected
-        assert await fs._vector_limits(file) == expected
-        assert len(calls) == 1
-        file.native.get_property = lambda key: ''
-        assert await fs._vector_limits(file) == (1024, 2097136)
         await fs.close_async()
 
     asyncio.run(run())

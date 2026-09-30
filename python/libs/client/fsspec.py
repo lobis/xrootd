@@ -5,6 +5,7 @@
 
 from XRootD.client._asyncio import asyncio
 import io
+import os
 import posixpath
 import stat
 import time
@@ -27,30 +28,6 @@ from XRootD.client.stream import RemoteFile
 
 
 _CHUNK_SIZE = 4 * 1024 * 1024
-_DEFAULT_VECTOR_CHUNKS = 1024
-_DEFAULT_VECTOR_SIZE = 2097136
-
-
-async def _to_thread(function, *args):
-    """Run local file operations off the loop and drain on cancellation."""
-    return await _finish(asyncio.to_thread(function, *args))
-
-
-@asynccontextmanager
-async def _local_file(path, mode):
-    """Own the result of a threaded open through cancellation and cleanup."""
-    file = None
-
-    async def acquire():
-        nonlocal file
-        file = await _to_thread(open, path, mode)
-
-    try:
-        await _finish(acquire())
-        yield file
-    finally:
-        if file is not None:
-            await _finish(_to_thread(file.close))
 
 
 class _CachedHandle:
@@ -489,7 +466,6 @@ class XRootDFileSystem(AsyncFileSystem):
             self._open_read_file,
             max_items=kwargs.get('filehandle_cache_size', 256),
             ttl=kwargs.get('filehandle_cache_ttl', 30))
-        self._server_vector_limits = {}
         self._invalidation_tasks = set()
         self._invalidation_error = None
 
@@ -616,28 +592,6 @@ class XRootDFileSystem(AsyncFileSystem):
             error = task.exception()
             if error is not None and self._invalidation_error is None:
                 self._invalidation_error = error
-
-    async def _vector_limits(self, file):
-        server = file.native.get_property('DataServer')
-        if not server:
-            return _DEFAULT_VECTOR_CHUNKS, _DEFAULT_VECTOR_SIZE
-        url = client.URL(server)
-        endpoint = '%s://%s/' % (url.protocol, url.hostid)
-        if endpoint not in self._server_vector_limits:
-            fs = aio.FileSystem(endpoint)
-            try:
-                response = await fs.query(QueryCode.CONFIG,
-                                          'readv_iov_max readv_ior_max',
-                                          self.timeout)
-                if isinstance(response, bytes):
-                    response = response.decode('ascii')
-                chunks, size = (int(part) for part in response.split())
-                if chunks <= 0 or size <= 0:
-                    raise ValueError('invalid XRootD vector-read limits')
-            except (XRootDError, ValueError, UnicodeError):
-                chunks, size = _DEFAULT_VECTOR_CHUNKS, _DEFAULT_VECTOR_SIZE
-            self._server_vector_limits[endpoint] = chunks, size
-        return self._server_vector_limits[endpoint]
 
     @staticmethod
     def _get_kwargs_from_urls(url):
@@ -842,7 +796,6 @@ class XRootDFileSystem(AsyncFileSystem):
 
     async def _vector_read_ranges(self, path, ranges, batch_size=None):
         async with self._read_file(path) as file:
-            max_chunks, max_size = await self._vector_limits(file)
             size = (await _native(file.stat(force=True), path)).size
             normalized = []
             for start, end in ranges:
@@ -852,43 +805,14 @@ class XRootDFileSystem(AsyncFileSystem):
                     start = max(0, size + start)
                 if end < 0:
                     end = max(0, size + end)
-                normalized.append((min(start, size), min(end, size)))
-            requests = []
-            counts = []
-            for start, end in normalized:
-                if end <= start:
-                    counts.append(0)
-                    continue
-                count = 0
-                while start < end:
-                    length = min(end - start, max_size)
-                    requests.append((start, length))
-                    count += 1
-                    start += length
-                counts.append(count)
-            if not requests:
-                return [b'' for _ in ranges]
-
-            batches = [requests[i:i + max_chunks]
-                       for i in range(0, len(requests), max_chunks)]
-            responses = await _native(_run_coros_in_chunks(
-                [file.vector_read(batch, self.timeout) for batch in batches],
-                batch_size=batch_size or self.batch_size, nofiles=True,
-                return_exceptions=True), path)
-            for response in responses:
-                if isinstance(response, BaseException):
-                    _raise_fsspec_error(response, path)
-            chunks = [chunk for response in responses for chunk in response]
-            if len(chunks) != len(requests):
-                raise OSError('XRootD vector read returned the wrong chunk '
-                              'count')
-            for (offset, length), chunk in zip(requests, chunks):
-                if chunk.offset != offset or len(chunk.buffer) != length:
-                    raise OSError('XRootD vector read returned an incomplete '
-                                  'range')
-            pieces = iter(chunk.buffer for chunk in chunks)
-            return [b''.join(next(pieces) for _ in range(count))
-                    for count in counts]
+                start, end = min(start, size), min(end, size)
+                normalized.append((start, max(0, end - start)))
+            parallel = batch_size or self.batch_size or 4
+            # fsspec's -1 means unlimited; keep native requests bounded.
+            if parallel < 0:
+                parallel = 4
+            return await _native(file.read_ranges(
+                normalized, self.timeout, parallel=parallel), path)
 
     async def _cat_ranges(self, paths, starts, ends, max_gap=None,
                           batch_size=None, on_error='return', **kwargs):
@@ -937,39 +861,34 @@ class XRootDFileSystem(AsyncFileSystem):
         await self._invalidate_read_file(path)
         open_mode = 'xb' if mode == 'create' else 'wb'
         async with await self.open_async(path, open_mode) as file:
-            for offset in range(0, len(value), _CHUNK_SIZE):
-                await file.write(value[offset:offset + _CHUNK_SIZE])
+            await file.write(value)
         await self.invalidate_cache_async(self._parent(path))
+
+    async def _copy_native(self, source, target, callback=None, **options):
+        operation = aio.copy(source, target, callback=callback, **options)
+        return await _native(operation, target)
 
     async def _get_file(self, rpath, lpath, callback=None,
                         chunk_size=_CHUNK_SIZE, **kwargs):
         if chunk_size <= 0:
             raise ValueError('chunk_size must be positive')
-        async with await self.open_async(rpath) as remote:
-            async with _local_file(lpath, 'wb') as local:
-                while True:
-                    data = await remote.read(chunk_size)
-                    if not data:
-                        break
-                    await _to_thread(local.write, data)
-                    if callback is not None:
-                        callback.relative_update(len(data))
+        source = self.unstrip_protocol(self._path(rpath))
+        if hasattr(lpath, 'write'):
+            raise TypeError('native downloads require a local file path')
+        target = os.path.abspath(os.fspath(lpath))
+        await self._copy_native(source, target, callback, force=True,
+                                chunksize=chunk_size)
 
     async def _put_file(self, lpath, rpath, mode='overwrite',
                         callback=None, **kwargs):
         if mode not in ('create', 'overwrite'):
             raise ValueError('unsupported write mode: %s' % mode)
-        async with _local_file(lpath, 'rb') as local:
-            await self._invalidate_read_file(rpath)
-            open_mode = 'xb' if mode == 'create' else 'wb'
-            async with await self.open_async(rpath, open_mode) as remote:
-                while True:
-                    data = await _to_thread(local.read, _CHUNK_SIZE)
-                    if not data:
-                        break
-                    await remote.write(data)
-                    if callback is not None:
-                        callback.relative_update(len(data))
+        await self._invalidate_read_file(rpath)
+        source = os.path.abspath(os.fspath(lpath))
+        target = self.unstrip_protocol(self._path(rpath))
+        await self._copy_native(source, target, callback,
+                                force=mode == 'overwrite',
+                                coerce=mode == 'overwrite')
         await self.invalidate_cache_async(self._parent(rpath))
 
     async def _cp_file(self, path1, path2, **kwargs):
@@ -980,11 +899,8 @@ class XRootDFileSystem(AsyncFileSystem):
         if canonical(path1) == canonical(path2):
             raise ValueError('source and destination are the same file')
         await self._invalidate_read_file(path2)
-        async with await self.open_async(path1) as source:
-            async with await self.open_async(path2, 'wb') as target:
-                while True:
-                    data = await source.read(_CHUNK_SIZE)
-                    if not data:
-                        break
-                    await target.write(data)
+        source = self.unstrip_protocol(self._path(path1))
+        target = self.unstrip_protocol(self._path(path2))
+        await self._copy_native(source, target, force=True, coerce=True,
+                                thirdparty=kwargs.get('thirdparty', 'none'))
         await self.invalidate_cache_async(self._parent(path2))
