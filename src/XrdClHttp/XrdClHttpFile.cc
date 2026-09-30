@@ -323,7 +323,14 @@ File::Open(const std::string      &url,
     auto iter = pm.find("xrdclhttp.timeout");
     std::string timeout_string = (iter == pm.end()) ? "" : iter->second;
     m_header_timeout = ParseHeaderTimeout(timeout_string, m_logger);
-    pm["xrdclhttp.timeout"] = XrdClHttp::MarshalDuration(m_header_timeout);
+    // Do not append server parameters to a potentially signed query. The
+    // operation still uses the local header timeout calculated above.
+    const bool opaque_query = std::any_of(pm.begin(), pm.end(), [](const auto &param) {
+        return param.first.compare(0, 6, "xrdcl.") != 0 &&
+               param.first != "oss.asize" && param.first != "xrdclhttp.timeout";
+    });
+    if (!opaque_query || iter != pm.end())
+        pm["xrdclhttp.timeout"] = XrdClHttp::MarshalDuration(m_header_timeout);
     parsed_url.SetParams(pm);
     iter = pm.find("oss.asize");
     if (iter != pm.end()) {
@@ -338,7 +345,8 @@ File::Open(const std::string      &url,
         parsed_url.SetParams(pm);
     }
 
-    m_url = parsed_url.GetURL();
+    HttpClientConfig client_config;
+    m_url = ExtractHttpClientConfig(parsed_url.GetURL(), client_config, &m_client_query);
     m_last_url = "";
     m_url_current = "";
 
@@ -1076,7 +1084,8 @@ File::GetCurrentURL() const {
 
     auto iter = m_properties.find("XrdClHttpQueryParam");
     if (iter == m_properties.end()) {
-        return m_last_url.empty() ? m_url : m_last_url;
+        CalculateCurrentURL("");
+        return m_url_current;
     }
     CalculateCurrentURL(iter->second);
 
@@ -1110,6 +1119,10 @@ File::CalculateCurrentURL(const std::string &value) const {
             }
             m_url_current = last_url.substr(0, loc) + ss.str();
         }
+    }
+    if (!m_client_query.empty()) {
+        m_url_current += (m_url_current.find('?') == std::string::npos ? '?' : '&');
+        m_url_current += m_client_query;
     }
 }
 

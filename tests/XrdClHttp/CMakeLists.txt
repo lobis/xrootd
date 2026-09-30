@@ -3,13 +3,15 @@ find_package(CURL REQUIRED)
 include(GoogleTest)
 
 add_executable(xrdcl-http-unit-tests
+  ClientConfigTest.cc
   HeaderParserTest.cc
   ParseTimeoutTest.cc
   TapeTest.cc
+  WebDavParserTest.cc
 )
 
 target_link_libraries(xrdcl-http-unit-tests
-  XrdClHttpObj XrdCl CURL::libcurl GTest::gtest_main)
+  XrdClHttpObj XrdCl XrdXml CURL::libcurl GTest::gtest_main)
 target_include_directories(xrdcl-http-unit-tests
   PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../src")
 
@@ -17,10 +19,9 @@ gtest_discover_tests(xrdcl-http-unit-tests TEST_PREFIX XrdClHttp::
   PROPERTIES DISCOVERY_TIMEOUT 10)
 
 # XrdClHttp integration tests depend on scitokens fixture for authentication
-if(NOT BUILD_SCITOKENS)
+if(NOT ENABLE_SERVER_TESTS OR NOT BUILD_SCITOKENS)
   return()
 endif()
-
 find_program(OPENSSL_BIN openssl REQUIRED)
 
 # All tests that only depend on the pure XrdCl interfaces and
@@ -29,6 +30,7 @@ add_executable(xrdcl-test
   ChecksumTest.cc
   DeleteTest.cc
   MkcolTest.cc
+  MoveTest.cc
   ReadTest.cc
   WriteTest.cc
 )
@@ -36,11 +38,12 @@ add_executable(xrdcl-test
 # Tests depending on XrdClHttp linkage
 add_executable(xrdcl-http-test
   CopyTest.cc
+  OptionsCacheTest.cc
   VectorReadTest.cc
 )
 
 target_link_libraries(xrdcl-test XrdClHttpTransferTest GTest::gtest_main)
-target_link_libraries(xrdcl-http-test XrdClHttpObj XrdClHttpTransferTest GTest::gtest_main)
+target_link_libraries(xrdcl-http-test XrdClHttpObj XrdClHttpTransferTest XrdXml GTest::gtest_main)
 
 gtest_add_tests(TARGET xrdcl-test TEST_LIST CurlClOnlyTests)
 gtest_add_tests(TARGET xrdcl-http-test TEST_LIST CurlTests)

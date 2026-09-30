@@ -132,3 +132,40 @@ TEST(URLTest, InvalidURLs)
     EXPECT_FALSE(XrdCl::URL(url).IsValid()) << "URL " << url << " is not invalid" << std::endl;
 }
 
+TEST(URLTest, PreservesHttpQueriesThroughParameterUpdates)
+{
+  const std::string query = "?signature=opaque+value==&empty=&repeat=first&repeat=second&bare&escaped=%2f%2F";
+  for (const auto *scheme : {"http", "https", "dav", "davs"}) {
+    XrdCl::URL url(std::string(scheme) + "://localhost/file" + query);
+    EXPECT_EQ(url.GetParamsAsString(), query);
+    auto params = url.GetParams();
+    params["xrdcl.authctx"] = "context";
+    url.SetParams(params);
+    EXPECT_EQ(url.GetParamsAsString(), query + "&xrdcl.authctx=context");
+    EXPECT_EQ(url.GetPathWithFilteredParams(), "file" + query);
+    url.SetPath("other");
+    EXPECT_EQ(url.GetPathWithFilteredParams(), "other" + query);
+    params.erase("xrdcl.authctx");
+    url.SetParams(params);
+    EXPECT_EQ(url.GetParamsAsString(), query);
+    params["repeat"] = "replacement";
+    url.SetParams(params);
+    EXPECT_EQ(url.GetParamsAsString(),
+      "?signature=opaque+value==&empty=&repeat=replacement&bare&escaped=%2f%2F");
+    url.SetParams("other=1&empty=");
+    EXPECT_EQ(url.GetParamsAsString(), "?other=1&empty=");
+  }
+}
+
+TEST(URLTest, AuthenticationContextSeparatesChannels)
+{
+  XrdCl::URL first(
+    "root://localhost//data?xrd.wantprot=ztn&xrd.ztn=/tmp/token&xrdcl.authctx=first");
+  XrdCl::URL second(
+    "root://localhost//data?xrd.wantprot=ztn&xrd.ztn=/tmp/token&xrdcl.authctx=second");
+
+  EXPECT_NE(first.GetChannelId(), second.GetChannelId());
+  EXPECT_NE(first.GetChannelId().find("xrdcl.authctx=first"), std::string::npos);
+  EXPECT_EQ(first.GetPathWithFilteredParams(),
+            "/data?xrd.wantprot=ztn&xrd.ztn=/tmp/token");
+}
