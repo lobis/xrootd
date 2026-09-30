@@ -30,9 +30,17 @@
 #include "XrdCl/XrdClCopyProcess.hh"
 #include "XrdCl/XrdClXRootDResponses.hh"
 #include <deque>
+#include <atomic>
 
 namespace PyXRootD
 {
+  struct CopyAsyncState
+  {
+    std::atomic<bool> running{false};
+    std::atomic<bool> cancelled{false};
+  };
+  // Called with the GIL released, before stopping the native client threads.
+  void StopCopyWorkers();
   //----------------------------------------------------------------------------
   //! XrdCl::CopyProcess binding class
   //----------------------------------------------------------------------------
@@ -43,11 +51,14 @@ namespace PyXRootD
       static PyObject* AddJob(CopyProcess *self, PyObject *args, PyObject *kwds);
       static PyObject* Prepare(CopyProcess *self, PyObject *args, PyObject *kwds);
       static PyObject* Run(CopyProcess *self, PyObject *args, PyObject *kwds);
+      static PyObject* RunAsync(CopyProcess *self, PyObject *args, PyObject *kwds);
+      static PyObject* Cancel(CopyProcess *self, PyObject *args, PyObject *kwds);
     public:
       PyObject_HEAD
       XrdCl::CopyProcess              *process;
       std::deque<XrdCl::PropertyList> *results;
       int                              parallel;
+      CopyAsyncState                  *asyncState;
   };
 
   PyDoc_STRVAR(copyprocess_type_doc, "CopyProcess object (internal)");
@@ -60,6 +71,7 @@ namespace PyXRootD
     self->process  = new XrdCl::CopyProcess();
     self->results  = new std::deque<XrdCl::PropertyList>();
     self->parallel = 1;
+    self->asyncState = new CopyAsyncState();
     return 0;
   }
 
@@ -70,6 +82,7 @@ namespace PyXRootD
   {
     delete self->process;
     delete self->results;
+    delete self->asyncState;
     Py_TYPE(self)->tp_free( (PyObject*) self );
   }
 
@@ -86,6 +99,10 @@ namespace PyXRootD
        (PyCFunction) PyXRootD::CopyProcess::Prepare, METH_VARARGS | METH_KEYWORDS, NULL },
     { "run",
        (PyCFunction) PyXRootD::CopyProcess::Run,     METH_VARARGS | METH_KEYWORDS, NULL },
+    { "run_async",
+       (PyCFunction) PyXRootD::CopyProcess::RunAsync, METH_VARARGS | METH_KEYWORDS, NULL },
+    { "cancel",
+       (PyCFunction) PyXRootD::CopyProcess::Cancel, METH_VARARGS | METH_KEYWORDS, NULL },
 
     { NULL } /* Sentinel */
   };

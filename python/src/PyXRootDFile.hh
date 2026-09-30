@@ -34,6 +34,7 @@
 
 namespace PyXRootD
 {
+  struct FileIOState;
   //----------------------------------------------------------------------------
   //! XrdCl::File binding class
   //----------------------------------------------------------------------------
@@ -44,6 +45,9 @@ namespace PyXRootD
       static PyObject* Close( File *self, PyObject *args, PyObject *kwds );
       static PyObject* Stat( File *self, PyObject *args, PyObject *kwds );
       static PyObject* Read( File *self, PyObject *args, PyObject *kwds );
+      static PyObject* ReadInto( File *self, PyObject *args, PyObject *kwds );
+      static PyObject* ReadRanges( File *self, PyObject *args, PyObject *kwds );
+      static PyObject* Drain( File *self, PyObject *args, PyObject *kwds );
       static PyObject* ReadLine( File *self, PyObject *args, PyObject *kwds );
       static PyObject* ReadLines( File *self, PyObject *args, PyObject *kwds );
       static XrdCl::Buffer* ReadChunk( File *self, uint64_t offset, uint32_t size );
@@ -67,6 +71,7 @@ namespace PyXRootD
       PyObject_HEAD
       XrdCl::File                *file;
       uint64_t                    currentOffset;
+      FileIOState                *io;
   };
 
   //----------------------------------------------------------------------------

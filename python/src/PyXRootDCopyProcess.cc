@@ -33,14 +33,74 @@
 #include <XrdCl/XrdClConstants.hh>
 
 #include <memory>
+#include <thread>
+#include <mutex>
+#include <chrono>
+#include <functional>
 
 namespace PyXRootD
 {
+  namespace
+  {
+    struct Worker
+    {
+      std::thread thread;
+      CopyAsyncState *state;
+      std::atomic<bool> finished{false};
+    };
+    std::mutex workersMutex;
+    std::vector<std::shared_ptr<Worker>> workers;
+    bool stopping = false;
+
+    void LaunchWorker( CopyAsyncState *state,
+                       std::function<void(std::shared_ptr<Worker>)> run )
+    {
+      std::lock_guard<std::mutex> lock( workersMutex );
+      if( stopping ) throw std::runtime_error( "XRootD is shutting down" );
+      // Reap completed workers during submission so long-lived clients do not
+      // retain one thread handle for every completed transfer.
+      for( auto it = workers.begin(); it != workers.end(); )
+      {
+        if( (*it)->finished.load() )
+        {
+          (*it)->thread.join();
+          it = workers.erase( it );
+        }
+        else ++it;
+      }
+      auto worker = std::make_shared<Worker>();
+      worker->state = state;
+      workers.push_back( worker );
+      try { worker->thread = std::thread( [worker, run]() { run( worker ); } ); }
+      catch( ... ) { workers.pop_back(); throw; }
+    }
+  }
+
+  void StopCopyWorkers()
+  {
+    std::vector<std::shared_ptr<Worker>> pending;
+    {
+      std::lock_guard<std::mutex> lock( workersMutex );
+      stopping = true;
+      pending.swap( workers );
+      for( auto worker : pending )
+        if( worker->state ) worker->state->cancelled.store( true );
+    }
+    for( auto worker : pending ) worker->thread.join();
+  }
+
+  static bool CopyIdle( CopyProcess *self )
+  {
+    if( !self->asyncState->running.load() ) return true;
+    PyErr_SetString( PyExc_RuntimeError, "copy process is already running" );
+    return false;
+  }
   //----------------------------------------------------------------------------
   // Set the number of parallel jobs
   //----------------------------------------------------------------------------
   PyObject* CopyProcess::Parallel( CopyProcess *self, PyObject *args, PyObject *kwds )
   {
+    if( !CopyIdle( self ) ) return nullptr;
     static const char *kwlist[]
       = { "parallel", NULL };
 
@@ -59,6 +119,7 @@ namespace PyXRootD
   //----------------------------------------------------------------------------
   PyObject* CopyProcess::AddJob( CopyProcess *self, PyObject *args, PyObject *kwds )
   {
+    if( !CopyIdle( self ) ) return nullptr;
     //--------------------------------------------------------------------------
     // Initialize default parameters
     //--------------------------------------------------------------------------
@@ -167,6 +228,7 @@ namespace PyXRootD
   //----------------------------------------------------------------------------
   PyObject* CopyProcess::Prepare( CopyProcess *self, PyObject *args, PyObject *kwds )
   {
+    if( !CopyIdle( self ) ) return nullptr;
     // add a config job that sets the number of parallel copy jobs
     XrdCl::PropertyList processConfig;
     processConfig.Set( "jobType", "configuration" );
@@ -184,6 +246,7 @@ namespace PyXRootD
   //----------------------------------------------------------------------------
   PyObject* CopyProcess::Run( CopyProcess *self, PyObject *args, PyObject *kwds )
   {
+    if( !CopyIdle( self ) ) return nullptr;
     (void) CopyProcessType;   // Suppress unused variable warning
     static const char          *kwlist[]   = { "handler", NULL };
     PyObject                   *pyhandler  = 0;
@@ -207,5 +270,104 @@ namespace PyXRootD
     PyTuple_SetItem(tuple, 1, ConvertType(self->results));
 
     return tuple;
+  }
+
+  PyObject* CopyProcess::Cancel( CopyProcess *self, PyObject *, PyObject * )
+  {
+    self->asyncState->cancelled.store( true );
+    Py_RETURN_NONE;
+  }
+
+  PyObject* CopyProcess::RunAsync( CopyProcess *self, PyObject *args, PyObject *kwds )
+  {
+    static const char *keys[] = { "callback", "handler", nullptr };
+    PyObject *callback = nullptr, *progress = Py_None;
+    if( !PyArg_ParseTupleAndKeywords( args, kwds, "O|O:run_async", (char **)keys,
+                                     &callback, &progress ) ) return nullptr;
+    if( !PyCallable_Check( callback ) )
+    {
+      PyErr_SetString( PyExc_TypeError, "callback must be callable" );
+      return nullptr;
+    }
+    bool idle = false;
+    if( !self->asyncState->running.compare_exchange_strong( idle, true ) )
+    { CopyIdle( self ); return nullptr; }
+    self->asyncState->cancelled.store( false );
+    Py_INCREF( self );
+    Py_INCREF( callback );
+    Py_INCREF( progress );
+    try
+    {
+      LaunchWorker( self->asyncState, [self, callback, progress]( std::shared_ptr<Worker> worker )
+      {
+        class Handler : public CopyProgressHandler
+        {
+          public:
+            Handler( PyObject *progress, CopyAsyncState *state ):
+              CopyProgressHandler( progress == Py_None ? nullptr : progress ), state( state ) {}
+            bool ShouldCancel( uint32_t job ) override
+            { return state->cancelled.load() || CopyProgressHandler::ShouldCancel( job ); }
+            void JobProgress( uint32_t job, uint64_t done, uint64_t total ) override
+            {
+              std::lock_guard<std::mutex> lock( mutex );
+              auto now = std::chrono::steady_clock::now();
+              if( done == total || now - last >= std::chrono::milliseconds( 50 ) )
+              {
+                last = now;
+                CopyProgressHandler::JobProgress( job, done, total );
+              }
+            }
+            CopyAsyncState *state;
+            std::mutex mutex;
+            std::chrono::steady_clock::time_point last;
+        } handler( progress, self->asyncState );
+        XrdCl::XRootDStatus status;
+        try
+        {
+          XrdCl::PropertyList config;
+          config.Set( "jobType", "configuration" );
+          config.Set( "parallel", self->parallel );
+          status = self->process->AddJob( config, nullptr );
+          if( status.IsOK() ) status = self->process->Prepare();
+          if( status.IsOK() && self->asyncState->cancelled.load() )
+            status = XrdCl::XRootDStatus( XrdCl::stError, XrdCl::errOperationInterrupted );
+          if( status.IsOK() ) status = self->process->Run( &handler );
+        }
+        catch( const std::exception &error )
+        { status = XrdCl::XRootDStatus( XrdCl::stError, XrdCl::errInternal, 0, error.what() ); }
+        // The worker owns process, progress and callback until completion.
+        // Awaitable callers drain it before shutting down their event loop.
+        auto gil = PyGILState_Ensure();
+        PyObject *pystatus = ConvertType( &status );
+        PyObject *results = ConvertType( self->results );
+        self->asyncState->running.store( false );
+        PyObject *called = pystatus && results ? PyObject_CallFunctionObjArgs(
+          callback, pystatus, results, nullptr ) : nullptr;
+        if( !called ) PyErr_WriteUnraisable( callback );
+        Py_XDECREF( called );
+        Py_XDECREF( pystatus );
+        Py_XDECREF( results );
+        Py_DECREF( callback );
+        Py_DECREF( progress );
+        {
+          std::lock_guard<std::mutex> lock( workersMutex );
+          worker->state = nullptr;
+        }
+        Py_DECREF( self );
+        PyGILState_Release( gil );
+        worker->finished.store( true );
+      } );
+    }
+    catch( const std::exception &error )
+    {
+      self->asyncState->running.store( false );
+      Py_DECREF( callback );
+      Py_DECREF( progress );
+      Py_DECREF( self );
+      PyErr_SetString( PyExc_RuntimeError, error.what() );
+      return nullptr;
+    }
+    XrdCl::XRootDStatus status;
+    return ConvertType( &status );
   }
 }
