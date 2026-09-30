@@ -33,6 +33,7 @@ add_library(XrdCl SHARED
   XrdClXRootDResponses.cc        XrdClXRootDResponses.hh
                                  XrdClRequestSync.hh
   XrdClFile.cc                   XrdClFile.hh
+  XrdClReadRanges.cc
   XrdClFileStateHandler.cc       XrdClFileStateHandler.hh
   XrdClCopyProcess.cc            XrdClCopyProcess.hh
   XrdClClassicCopyJob.cc         XrdClClassicCopyJob.hh
