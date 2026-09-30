@@ -19,7 +19,8 @@ from env import SERVER_PORT, SERVER_URL, release_reserved_port  # noqa: E402
 
 collect_ignore = []
 if sys.version_info < (3, 11):
-    collect_ignore = ['test_native_io.py', 'test_aio.py',
+    collect_ignore = ['test_native_io.py', 'test_native_copy.py',
+                      'test_aio.py',
                       'test_aio_helpers.py',
                       'test_asyncstream.py', 'test_fsspec.py',
                       'test_fsspec_contracts.py']
@@ -29,7 +30,8 @@ CONFIG = Path(__file__).resolve().parent / 'xrootd.cfg'
 # The remaining test modules do not talk to a server, so there is no point in
 # starting one for them.
 
-NEEDS_SERVER = {'test_native_io.py', 'test_aio.py', 'test_aio_helpers.py',
+NEEDS_SERVER = {'test_native_copy.py', 'test_native_io.py', 'test_aio.py',
+                'test_aio_helpers.py',
                 'test_asyncstream.py',
                 'test_copy.py',
                 'test_file.py',

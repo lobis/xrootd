@@ -78,6 +78,20 @@ class CopyProcess(object):
     raise_as_oserror(status, target)
     return result
 
+  def run_async(self, callback, handler=None):
+    """Prepare and run on a native worker, notifying one final completion.
+
+    Mutating or running this process again while it is active raises. Use
+    cancel() to request cooperative cancellation, then wait for completion.
+    """
+    from XRootD.client.utils import CallbackWrapper
+    return XRootDStatus(self.__process.run_async(
+        CallbackWrapper(callback, None), ProgressHandlerWrapper(handler)))
+
+  def cancel(self):
+    """Request cooperative cancellation of the active native copy."""
+    self.__process.cancel()
+
   def parallel(self, parallel):
     """ Add a config job to the copy process in order to set the number of
         parallel copy jobs.
@@ -162,11 +176,13 @@ class CopyProcess(object):
     :param     rtrplc: the retry polic (force or continue)
     :type      rtrplc: string
     """
-    self.__process.add_job(source, target, sourcelimit, force, posc,
-                           coerce, mkdir, thirdparty, checksummode, checksumtype,
-                           checksumpreset, dynamicsource, chunksize, parallelchunks, inittimeout,
-                           tpctimeout, rmBadCksum, cptimeout, retry, xrateThreshold,
-                           xrate, cont, rtrplc )
+    status = self.__process.add_job(
+        source, target, sourcelimit, force, posc, coerce, mkdir, thirdparty,
+        checksummode, checksumtype, checksumpreset, dynamicsource, chunksize,
+        parallelchunks, inittimeout, tpctimeout, rmBadCksum, cptimeout,
+        xrateThreshold, xrate, retry, cont, rtrplc)
+
+    return XRootDStatus(status)
 
   def prepare(self):
     """Prepare the copy jobs. **Must be called before** ``run()``."""

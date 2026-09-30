@@ -258,3 +258,71 @@ def open(url: str, mode: str = 'rb', timeout: int = 0) -> '_OpenContext':
     from XRootD.client.asyncstream import _OpenContext
     return _OpenContext(url, mode, timeout)
 
+
+async def copy(source, target, *, callback=None, **options):
+    """Copy through XrdCl's native pipeline without Python chunk transfers.
+
+    Cancellation requests cooperative native cancellation and waits for
+    completion before releasing the process. Progress callbacks run on the
+    caller's event loop. Copy options are those of CopyProcess.add_job.
+    """
+    from XRootD.client.utils import CopyProgressHandler
+
+    loop = asyncio.get_running_loop()
+
+    class Progress(CopyProgressHandler):
+        def begin(self, job, total, source, target):
+            pass
+
+        def update(self, job, processed, total):
+            if callback is not None:
+                loop.call_soon_threadsafe(report, processed, total)
+
+        def end(self, job, results):
+            pass
+
+        def should_cancel(self, job):
+            return False
+
+    reported = 0
+    progress_error = None
+
+    def report(processed, total):
+        nonlocal reported, progress_error
+        if progress_error is not None:
+            return
+        try:
+            if hasattr(callback, 'set_size'):
+                callback.set_size(total)
+            if hasattr(callback, 'absolute_update'):
+                callback.absolute_update(processed)
+            else:
+                callback.relative_update(processed - reported)
+            reported = processed
+        except BaseException as error:
+            progress_error = error
+            process.cancel()
+
+    process = client.CopyProcess()
+    raise_on_error(process.add_job(source, target, **options))
+    task = asyncio.create_task(request(process.run_async, handler=Progress()))
+    try:
+        results = await asyncio.shield(task)
+    except asyncio.CancelledError as cancelled:
+        process.cancel()
+        from XRootD.client.asyncstream import _finish
+        try:
+            await _finish(task)
+        except BaseException:
+            pass
+        raise cancelled
+    except Exception:
+        if progress_error is not None:
+            raise progress_error
+        raise
+    if progress_error is not None:
+        raise progress_error
+    for result in results:
+        if 'status' in result:
+            raise_as_oserror(result['status'], target)
+    return results[0] if results else {}
