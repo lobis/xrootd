@@ -98,6 +98,7 @@ set(PYXROOTD_SOURCES
   libs/client/_asyncio.py
   libs/client/_version.py
   libs/client/aio.py
+  libs/client/auth.py
   libs/client/asyncstream.py
   libs/client/copyprocess.py
   libs/client/env.py
@@ -109,6 +110,7 @@ set(PYXROOTD_SOURCES
   libs/client/glob_funcs.py
   libs/client/py.typed
   libs/client/responses.py
+  libs/client/storage.py
   libs/client/stream.py
   libs/client/url.py
   libs/client/utils.py
