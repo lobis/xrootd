@@ -246,24 +246,44 @@ class AsyncRemoteFile:
         async with self._lock:
             return await self._read(size, line=True)
 
+    async def _readinto_chunk(self, target):
+        count = await self._call(self._file.readinto(
+            target, self._position, self.timeout))
+        self._position += count
+        return count
+
     async def readinto(self, buffer: Any) -> int:
         target = memoryview(buffer).cast('B')
         if target.readonly:
             raise TypeError('readinto() requires a writable buffer')
         async with self._lock:
-            data = await self._read(len(target))
-            target[:len(data)] = data
-            return len(data)
+            self._check()
+            if not self._readable:
+                raise io.UnsupportedOperation('file is not readable')
+            count = min(len(target), len(self._buffer))
+            target[:count] = self._buffer[:count]
+            self._buffer = self._buffer[count:]
+            self._position += count
+            while count < len(target):
+                end = min(len(target), count + _CHUNK_SIZE)
+                read = await _finish(self._readinto_chunk(target[count:end]))
+                if not read:
+                    break
+                count += read
+            return count
 
-    async def _write_chunk(self, data):
+    async def _write_chunk(self, data, start, size):
         count = await self._call(self._file.write(
-            data, self._position, self.timeout))
+            data, self._position, self.timeout,
+            buffer_offset=start, size=size))
         self._position += count
         return count
 
     async def write(self, data: Any) -> int:
-        # Own a stable copy before yielding, including mutable buffer inputs.
-        data = memoryview(data).tobytes()
+        # Immutable inputs can be retained directly; mutable inputs retain the
+        # stream's snapshot-at-call semantics before the first await.
+        if not isinstance(data, bytes):
+            data = memoryview(data).tobytes()
         async with self._lock:
             self._check()
             if not self._writable:
@@ -273,8 +293,8 @@ class AsyncRemoteFile:
                 self._position = await _finish(self._size())
             count = 0
             while count < len(data):
-                count += await _finish(self._write_chunk(
-                    data[count:count + _CHUNK_SIZE]))
+                size = min(len(data) - count, _CHUNK_SIZE)
+                count += await _finish(self._write_chunk(data, count, size))
             return count
 
     async def _truncate(self, size):

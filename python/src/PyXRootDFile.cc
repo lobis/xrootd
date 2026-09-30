@@ -30,9 +30,199 @@
 
 #include "XrdCl/XrdClFile.hh"
 #include "XrdCl/XrdClFileSystem.hh"
+#include <limits>
+#include <mutex>
+#include <vector>
 
 namespace PyXRootD
 {
+  struct FileIOState
+  {
+    std::mutex mutex;
+    size_t pending = 0;
+    std::vector<PyObject *> waiters;
+  };
+
+  // Own the file and its buffers in the extension, independently of the
+  // Python callback's closure. In particular, cancellation cannot unpin a
+  // readinto target or destroy a file still used by a native request.
+  class OwnedIO : public XrdCl::ResponseHandler
+  {
+    public:
+      enum Kind { Read, ReadInto, Write, Ranges, Vector };
+      OwnedIO( File *file, PyObject *callback, Kind kind, PyObject *data ):
+        file( file ), callback( callback ), kind( kind ), data( data )
+      {
+        Py_INCREF( file );
+        Py_XINCREF( callback );
+        Py_XINCREF( data );
+        std::lock_guard<std::mutex> lock( file->io->mutex );
+        ++file->io->pending;
+      }
+      ~OwnedIO()
+      {
+        if( view.obj ) PyBuffer_Release( &view );
+        Py_XDECREF( data );
+        Py_XDECREF( callback );
+        std::vector<PyObject *> waiters;
+        {
+          std::lock_guard<std::mutex> lock( file->io->mutex );
+          if( !--file->io->pending ) waiters.swap( file->io->waiters );
+        }
+        for( auto waiter : waiters )
+        {
+          XrdCl::XRootDStatus status;
+          PyObject *pystatus = ConvertType( &status );
+          PyObject *result = pystatus ? PyObject_CallFunctionObjArgs(
+            waiter, pystatus, Py_None, nullptr ) : nullptr;
+          if( !result ) PyErr_WriteUnraisable( waiter );
+          Py_XDECREF( result );
+          Py_XDECREF( pystatus );
+          Py_DECREF( waiter );
+          Py_DECREF( file ); // Reference retained by Drain.
+        }
+        Py_DECREF( file );
+      }
+
+      PyObject *Result( XrdCl::AnyObject *response )
+      {
+        if( kind == Write ) { Py_RETURN_NONE; }
+        if( kind == Ranges ) { Py_INCREF( data ); return data; }
+        if( kind == Vector )
+        {
+          XrdCl::VectorReadInfo *info = nullptr;
+          if( response ) response->Get( info );
+          if( !info ) { Py_RETURN_NONE; }
+          const auto &chunks = info->GetChunks();
+          PyObject *list = PyList_New( chunks.size() );
+          if( !list ) return nullptr;
+          for( size_t i = 0; i < chunks.size(); ++i )
+          {
+            if( i >= static_cast<size_t>( PyList_Size( data ) ) ||
+                chunks[i].length > PyBytes_Size( PyList_GET_ITEM( data, i ) ) )
+            {
+              Py_DECREF( list );
+              PyErr_SetString( PyExc_RuntimeError, "Invalid vector read response" );
+              return nullptr;
+            }
+            PyObject *buffer = PyList_GET_ITEM( data, i );
+            if( chunks[i].length != PyBytes_Size( buffer ) )
+              buffer = PyBytes_FromStringAndSize( PyBytes_AS_STRING( buffer ), chunks[i].length );
+            else Py_INCREF( buffer );
+            if( !buffer ) { Py_DECREF( list ); return nullptr; }
+            PyObject *item = Py_BuildValue( "{sKsIsN}", "offset", chunks[i].offset,
+                                           "length", chunks[i].length, "buffer", buffer );
+            if( !item ) { Py_DECREF( list ); return nullptr; }
+            PyList_SET_ITEM( list, i, item );
+          }
+          return Py_BuildValue( "{sIsN}", "size", info->GetSize(), "chunks", list );
+        }
+        XrdCl::ChunkInfo *chunk = nullptr;
+        if( response ) response->Get( chunk );
+        uint32_t count = chunk ? chunk->length : 0;
+        Py_ssize_t capacity = kind == ReadInto ? view.len : PyBytes_Size( data );
+        if( count > capacity )
+        {
+          PyErr_SetString( PyExc_RuntimeError, "Invalid read response" );
+          return nullptr;
+        }
+        if( kind == ReadInto ) return PyLong_FromUnsignedLong( count );
+        if( count == capacity ) { Py_INCREF( data ); return data; }
+        return PyBytes_FromStringAndSize( PyBytes_AS_STRING( data ), count );
+      }
+
+      void HandleResponse( XrdCl::XRootDStatus *status, XrdCl::AnyObject *response ) override
+      {
+        if( !Py_IsInitialized() ) return;
+        auto gil = PyGILState_Ensure();
+        if( status->IsOK() && status->code == XrdCl::suContinue )
+        {
+          delete status;
+          delete response;
+          PyGILState_Release( gil );
+          return;
+        }
+        PyObject *pystatus = ConvertType( status );
+        PyObject *result = status->IsOK() ? Result( response ) : nullptr;
+        if( !result && PyErr_Occurred() )
+        {
+          // Conversion failures must complete the waiter, not only print an
+          // exception on the native callback thread.
+          PyErr_Clear();
+          Py_XDECREF( pystatus );
+          XrdCl::XRootDStatus failed( XrdCl::stError, XrdCl::errInternal );
+          pystatus = ConvertType( &failed );
+        }
+        if( !result ) { result = Py_None; Py_INCREF( result ); }
+        PyObject *called = pystatus ? PyObject_CallFunctionObjArgs(
+          callback, pystatus, result, nullptr ) : nullptr;
+        if( !called ) PyErr_WriteUnraisable( callback );
+        Py_XDECREF( called );
+        Py_XDECREF( pystatus );
+        Py_DECREF( result );
+        delete status;
+        delete response;
+        delete this;
+        PyGILState_Release( gil );
+      }
+      File *file;
+      PyObject *callback;
+      Kind kind;
+      PyObject *data;
+      Py_buffer view = {};
+  };
+
+  static bool CheckCallback( PyObject *callback )
+  {
+    if( !callback || callback == Py_None || PyCallable_Check( callback ) ) return true;
+    PyErr_SetString( PyExc_TypeError, "callback must be callable" );
+    return false;
+  }
+
+  template<typename T> class FileResponseHandler : public AsyncResponseHandler<T>
+  {
+    public:
+      FileResponseHandler( File *file, PyObject *callback, PyObject *arguments ):
+        AsyncResponseHandler<T>( callback ),
+        lifetime( new OwnedIO( file, nullptr, OwnedIO::Write, arguments ) ) {}
+      ~FileResponseHandler() override { delete lifetime; }
+    private:
+      OwnedIO *lifetime;
+  };
+
+  template<typename T> static XrdCl::ResponseHandler *GetFileHandler(
+    File *file, PyObject *callback, PyObject *arguments )
+  {
+    if( !IsCallable( callback ) ) return nullptr;
+    return new FileResponseHandler<T>( file, callback, arguments );
+  }
+
+  static bool IONumbers( PyObject *pyoffset, PyObject *pysize, PyObject *pytimeout,
+                         unsigned long long &offset, unsigned int &size,
+                         unsigned short &timeout )
+  {
+    unsigned long long value = 0;
+    if( pyoffset && PyObjToUllong( pyoffset, &offset, "offset" ) ) return false;
+    if( pysize && PyObjToUint( pysize, &size, "size" ) ) return false;
+    if( pytimeout && PyObjToUllong( pytimeout, &value, "timeout" ) ) return false;
+    if( value > 65535 )
+    {
+      PyErr_SetString( PyExc_OverflowError, "timeout exceeds 16 bits" );
+      return false;
+    }
+    timeout = value;
+    return true;
+  }
+
+  static PyObject *IOResult( const XrdCl::XRootDStatus &status,
+                            PyObject *callback, PyObject *response = nullptr )
+  {
+    PyObject *pystatus = ConvertType( const_cast<XrdCl::XRootDStatus *>( &status ) );
+    if( !pystatus ) { Py_XDECREF( response ); return nullptr; }
+    if( callback && callback != Py_None ) return pystatus;
+    if( !response ) { response = Py_None; Py_INCREF( response ); }
+    return Py_BuildValue( "NN", pystatus, response );
+  }
 
   //----------------------------------------------------------------------------
   //! Set exception and return null if I/O op on closed file is attempted
@@ -50,6 +240,7 @@ namespace PyXRootD
   {
     self->file    = new XrdCl::File();
     self->currentOffset = 0;
+    self->io = new FileIOState();
     return 0;
   }
 
@@ -58,7 +249,10 @@ namespace PyXRootD
   //----------------------------------------------------------------------------
   static void File_dealloc( File *self )
   {
-    delete self->file;
+    // Destruction may close an open handle. Native callback workers must be
+    // able to acquire the GIL while that close drains.
+    async( delete self->file );
+    delete self->io;
     Py_TYPE(self)->tp_free( (PyObject*) self );
   }
 
@@ -131,6 +325,12 @@ namespace PyXRootD
        (PyCFunction) PyXRootD::File::Stat,                METH_VARARGS | METH_KEYWORDS, NULL },
     { "read",
        (PyCFunction) PyXRootD::File::Read,                METH_VARARGS | METH_KEYWORDS, NULL },
+    { "readinto",
+       (PyCFunction) PyXRootD::File::ReadInto, METH_VARARGS | METH_KEYWORDS, NULL },
+    { "read_ranges",
+       (PyCFunction) PyXRootD::File::ReadRanges, METH_VARARGS | METH_KEYWORDS, NULL },
+    { "drain",
+       (PyCFunction) PyXRootD::File::Drain, METH_VARARGS | METH_KEYWORDS, NULL },
     { "readline",
        (PyCFunction) PyXRootD::File::ReadLine,            METH_VARARGS | METH_KEYWORDS, NULL },
     { "readlines",
@@ -249,9 +449,10 @@ namespace PyXRootD
       return NULL;
 
     if ( callback && callback != Py_None ) {
-      XrdCl::ResponseHandler *handler = GetHandler<XrdCl::AnyObject>( callback );
+      XrdCl::ResponseHandler *handler = GetFileHandler<XrdCl::AnyObject>( self, callback, args );
       if ( !handler ) return NULL;
       async( status = self->file->Open( url, flags, mode, handler, timeout ) );
+      if( !status.IsOK() ) delete handler;
     }
 
     else {
@@ -280,9 +481,10 @@ namespace PyXRootD
         &timeout, &callback ) ) return NULL;
 
     if ( callback && callback != Py_None ) {
-      XrdCl::ResponseHandler *handler = GetHandler<XrdCl::AnyObject>( callback );
+      XrdCl::ResponseHandler *handler = GetFileHandler<XrdCl::AnyObject>( self, callback, args );
       if ( !handler ) return NULL;
       async( status = self->file->Close( handler, timeout ) );
+      if( !status.IsOK() ) delete handler;
     }
 
     else {
@@ -314,8 +516,9 @@ namespace PyXRootD
         &force, &timeout, &callback ) ) return NULL;
 
     if ( callback && callback != Py_None ) {
-      XrdCl::ResponseHandler *handler = GetHandler<XrdCl::StatInfo>( callback );
+      XrdCl::ResponseHandler *handler = GetFileHandler<XrdCl::StatInfo>( self, callback, args );
       async( status = self->file->Stat( force, handler, timeout ) );
+      if( !status.IsOK() ) delete handler;
     }
 
     else {
@@ -339,71 +542,127 @@ namespace PyXRootD
   //----------------------------------------------------------------------------
   PyObject* File::Read( File *self, PyObject *args, PyObject *kwds )
   {
-    static const char  *kwlist[] = { "offset", "size", "timeout", "callback",
-                                      NULL };
-    uint64_t            offset   = 0;
-    uint32_t            size     = 0;
-    time_t              timeout  = 0;
-    PyObject           *callback = NULL, *pystatus = NULL, *pyresponse = NULL;
-    PyObject           *py_offset = NULL, *py_size = NULL, *py_timeout = NULL;
-    char               *buffer   = 0;
-    XrdCl::XRootDStatus status;
-
-    if ( !self->file->IsOpen() ) return FileClosedError();
-
-    if ( !PyArg_ParseTupleAndKeywords( args, kwds, "|OOOO:read",
-        (char**) kwlist, &py_offset, &py_size, &py_timeout, &callback ) ) return NULL;
-
-    unsigned long long tmp_offset = 0;
-    unsigned int tmp_size = 0;
-    unsigned long long tmp_timeout = 0;
-
-    if ( py_offset && PyObjToUllong( py_offset, &tmp_offset, "offset" ) )
-      return NULL;
-
-    if ( py_size && PyObjToUint(py_size, &tmp_size, "size" ) )
-      return NULL;
-
-    if ( py_timeout && PyObjToUllong(py_timeout, &tmp_timeout, "timeout" ) )
-      return NULL;
-
-    offset = (uint64_t)tmp_offset;
-    size = (uint32_t)tmp_size;
-    timeout = (time_t)tmp_timeout;
-
-    if (!size) {
-      XrdCl::StatInfo *info = 0;
-      async( XrdCl::XRootDStatus status = self->file->Stat(true, info, timeout) );
-      size = info->GetSize();
-      if (info) delete info;
-    }
-
-    buffer = new char[size];
-
-    if ( callback && callback != Py_None ) {
-      XrdCl::ResponseHandler *handler = GetHandler<XrdCl::ChunkInfo>( callback );
-      if ( !handler ) {
-        delete[] buffer;
-        return NULL;
+    static const char *keys[] = { "offset", "size", "timeout", "callback", nullptr };
+    unsigned long long offset = 0;
+    unsigned int size = 0;
+    unsigned short timeout = 0;
+    PyObject *callback = nullptr, *pyoffset = nullptr, *pysize = nullptr, *pytimeout = nullptr;
+    if( !self->file->IsOpen() ) return FileClosedError();
+    if( !PyArg_ParseTupleAndKeywords( args, kwds, "|OOOO:read", (char **)keys,
+                                     &pyoffset, &pysize, &pytimeout, &callback ) ||
+        !IONumbers( pyoffset, pysize, pytimeout, offset, size, timeout ) ||
+        !CheckCallback( callback ) ) return nullptr;
+    if( !size )
+    {
+      XrdCl::StatInfo *info = nullptr;
+      XrdCl::XRootDStatus status;
+      async( status = self->file->Stat( true, info, timeout ) );
+      if( !status.IsOK() ) { delete info; return IOResult( status, callback ); }
+      uint64_t length = info->GetSize();
+      delete info;
+      if( length > std::numeric_limits<uint32_t>::max() )
+      {
+        PyErr_SetString( PyExc_OverflowError, "read size exceeds 32 bits" );
+        return nullptr;
       }
-      async( status = self->file->Read( offset, size, buffer, handler, timeout ) );
+      size = length;
     }
-
-    else {
-      uint32_t bytesRead = 0;
-      async( status = self->file->Read( offset, size, buffer, bytesRead, timeout ) );
-      pyresponse = PyBytes_FromStringAndSize( buffer, bytesRead );
-      delete[] buffer;
+    PyObject *data = PyBytes_FromStringAndSize( nullptr, size );
+    if( !data ) return nullptr;
+    auto owned = new OwnedIO( self, callback, OwnedIO::Read, data );
+    Py_DECREF( data );
+    XrdCl::XRootDStatus status;
+    if( callback && callback != Py_None )
+    {
+      async( status = self->file->Read( offset, size, PyBytes_AS_STRING( owned->data ), owned, timeout ) );
+      if( !status.IsOK() ) delete owned;
+      return IOResult( status, callback );
     }
-
-    pystatus = ConvertType<XrdCl::XRootDStatus>( &status );
-    PyObject *o = ( callback && callback != Py_None ) ?
-            Py_BuildValue( "O", pystatus ) :
-            Py_BuildValue( "OO", pystatus, pyresponse );
-    Py_DECREF( pystatus );
-    Py_XDECREF( pyresponse );
-    return o;
+    uint32_t count = 0;
+    async( status = self->file->Read( offset, size, PyBytes_AS_STRING( owned->data ), count, timeout ) );
+    XrdCl::AnyObject response;
+    response.Set( new XrdCl::ChunkInfo( offset, count, nullptr ) );
+    PyObject *result = status.IsOK() ? owned->Result( &response ) : nullptr;
+    delete owned;
+    if( PyErr_Occurred() ) return nullptr;
+    return IOResult( status, callback, result );
   }
+
+  PyObject* File::ReadInto( File *self, PyObject *args, PyObject *kwds )
+  {
+    static const char *keys[] = { "buffer", "offset", "timeout", "callback", nullptr };
+    PyObject *buffer = nullptr, *callback = nullptr;
+    unsigned long long offset = 0;
+    unsigned short timeout = 0;
+    if( !self->file->IsOpen() ) return FileClosedError();
+    PyObject *pyoffset = nullptr, *pytimeout = nullptr;
+    unsigned int unused = 0;
+    if( !PyArg_ParseTupleAndKeywords( args, kwds, "O|OOO:readinto", (char **)keys,
+                                     &buffer, &pyoffset, &pytimeout, &callback ) ||
+        !IONumbers( pyoffset, nullptr, pytimeout, offset, unused, timeout ) ||
+        !CheckCallback( callback ) ) return nullptr;
+    auto owned = new OwnedIO( self, callback, OwnedIO::ReadInto, nullptr );
+    if( PyObject_GetBuffer( buffer, &owned->view, PyBUF_WRITABLE | PyBUF_C_CONTIGUOUS ) )
+    { delete owned; return nullptr; }
+    if( owned->view.len > std::numeric_limits<uint32_t>::max() )
+    {
+      delete owned;
+      PyErr_SetString( PyExc_OverflowError, "readinto size exceeds 32 bits" );
+      return nullptr;
+    }
+    XrdCl::XRootDStatus status;
+    if( callback && callback != Py_None )
+    {
+      if( !owned->view.len ) owned->HandleResponse( new XrdCl::XRootDStatus(), nullptr );
+      else
+      {
+        async( status = self->file->Read( offset, owned->view.len, owned->view.buf, owned, timeout ) );
+        if( !status.IsOK() ) delete owned;
+      }
+      return IOResult( status, callback );
+    }
+    uint32_t count = 0;
+    if( owned->view.len )
+      async( status = self->file->Read( offset, owned->view.len, owned->view.buf, count, timeout ) );
+    delete owned;
+    return IOResult( status, callback, PyLong_FromUnsignedLong( count ) );
+  }
+
+  PyObject* File::Drain( File *self, PyObject *args, PyObject *kwds )
+  {
+    static const char *keys[] = { "callback", nullptr };
+    PyObject *callback = nullptr;
+    if( !PyArg_ParseTupleAndKeywords( args, kwds, "O:drain", (char **)keys, &callback ) ||
+        !CheckCallback( callback ) ) return nullptr;
+    if( callback == Py_None )
+    {
+      PyErr_SetString( PyExc_TypeError, "drain requires a callback" );
+      return nullptr;
+    }
+    bool pending;
+    {
+      std::lock_guard<std::mutex> lock( self->io->mutex );
+      pending = self->io->pending != 0;
+      if( pending )
+      {
+        Py_INCREF( callback );
+        Py_INCREF( self );
+        self->io->waiters.push_back( callback );
+      }
+    }
+    XrdCl::XRootDStatus status;
+    if( !pending )
+    {
+      PyObject *pystatus = ConvertType( &status );
+      if( !pystatus ) return nullptr;
+      PyObject *called = PyObject_CallFunctionObjArgs( callback, pystatus, Py_None, nullptr );
+      Py_DECREF( pystatus );
+      if( !called ) return nullptr;
+      Py_DECREF( called );
+    }
+    return IOResult( status, callback );
+  }
+
 
   //----------------------------------------------------------------------------
   // Read a data chunk at a given offset, until the first newline encountered
@@ -617,61 +876,59 @@ namespace PyXRootD
   //----------------------------------------------------------------------------
   PyObject* File::Write( File *self, PyObject *args, PyObject *kwds )
   {
-    static const char  *kwlist[] = { "buffer", "offset", "size", "timeout",
-                                     "callback", NULL };
-    const  char *buffer;
-    Py_ssize_t   buffsize;
-    uint64_t     offset   = 0;
-    uint32_t     size     = 0;
-    time_t       timeout  = 0;
-    PyObject    *callback = NULL, *pystatus = NULL;
-    PyObject    *py_offset = NULL, *py_size = NULL, *py_timeout = NULL;
+    static const char *keys[] = { "buffer", "offset", "size", "timeout", "callback", "buffer_offset", nullptr };
+    PyObject *buffer = nullptr, *callback = nullptr;
+    unsigned long long offset = 0;
+    unsigned int size = 0;
+    unsigned short timeout = 0;
+    if( !self->file->IsOpen() ) return FileClosedError();
+    PyObject *pyoffset = nullptr, *pysize = nullptr, *pytimeout = nullptr, *pystart = nullptr;
+    unsigned long long start = 0;
+    if( !PyArg_ParseTupleAndKeywords( args, kwds, "O|OOOOO:write", (char **)keys,
+                                     &buffer, &pyoffset, &pysize, &pytimeout, &callback, &pystart ) ||
+        !IONumbers( pyoffset, pysize, pytimeout, offset, size, timeout ) ||
+        (pystart && PyObjToUllong( pystart, &start, "buffer_offset" )) ||
+        !CheckCallback( callback ) ) return nullptr;
+    PyObject *data = nullptr;
+    if( PyBytes_Check( buffer ) ) { data = buffer; Py_INCREF( data ); }
+    else if( PyUnicode_Check( buffer ) )
+    {
+      data = PyUnicode_AsUTF8String( buffer );
+      if( !data ) return nullptr;
+    }
+    else
+    {
+      Py_buffer view = {};
+      if( PyObject_GetBuffer( buffer, &view, PyBUF_CONTIG_RO ) ) return nullptr;
+      data = PyBytes_FromStringAndSize( static_cast<char *>( view.buf ), view.len );
+      PyBuffer_Release( &view );
+      if( !data ) return nullptr;
+    }
+    Py_ssize_t length = PyBytes_Size( data );
+    if( start > static_cast<uint64_t>( length ) ||
+        (!size && length - start > std::numeric_limits<uint32_t>::max()) || size > length - start )
+    {
+      Py_DECREF( data );
+      PyErr_SetString( PyExc_ValueError, "write size exceeds buffer or 32 bits" );
+      return nullptr;
+    }
+    if( !size ) size = length - start;
+    auto owned = new OwnedIO( self, callback, OwnedIO::Write, data );
+    Py_DECREF( data );
     XrdCl::XRootDStatus status;
-
-    if ( !self->file->IsOpen() ) return FileClosedError();
-
-    if ( !PyArg_ParseTupleAndKeywords( args, kwds, "s#|OOOO:write",
-         (char**) kwlist, &buffer, &buffsize, &py_offset, &py_size,
-         &py_timeout, &callback ) ) return NULL;
-
-    unsigned long long tmp_offset = 0;
-    unsigned int tmp_size = 0;
-    unsigned long long tmp_timeout = 0;
-
-    if (py_offset && PyObjToUllong(py_offset, &tmp_offset, "offset"))
-      return NULL;
-
-    if (py_size && PyObjToUint(py_size, &tmp_size, "size"))
-      return NULL;
-
-    if (py_timeout && PyObjToUllong(py_timeout, &tmp_timeout, "timeout"))
-      return NULL;
-
-    offset = (uint64_t)tmp_offset;
-    size = (uint32_t)tmp_size;
-    timeout = (time_t)tmp_timeout;
-
-    if (!size) {
-      size = buffsize;
+    if( callback && callback != Py_None )
+    {
+      async( status = self->file->Write( offset, size, PyBytes_AS_STRING( owned->data ) + start, owned, timeout ) );
+      if( !status.IsOK() ) delete owned;
     }
-
-    if ( callback && callback != Py_None ) {
-      XrdCl::ResponseHandler *handler = GetHandler<XrdCl::AnyObject>( callback );
-      if ( !handler ) return NULL;
-      async( status = self->file->Write( offset, size, buffer, handler, timeout ) );
+    else
+    {
+      async( status = self->file->Write( offset, size, PyBytes_AS_STRING( owned->data ) + start, timeout ) );
+      delete owned;
     }
-
-    else {
-      async( status = self->file->Write( offset, size, buffer, timeout ) );
-    }
-
-    pystatus = ConvertType<XrdCl::XRootDStatus>( &status );
-    PyObject *o = ( callback && callback != Py_None ) ?
-            Py_BuildValue( "O", pystatus ) :
-            Py_BuildValue( "ON", pystatus, Py_BuildValue( "" ) );
-    Py_DECREF( pystatus );
-    return o;
+    return IOResult( status, callback );
   }
+
 
   //----------------------------------------------------------------------------
   //! Commit all pending disk writes
@@ -689,9 +946,10 @@ namespace PyXRootD
         &timeout, &callback ) ) return NULL;
 
     if ( callback && callback != Py_None ) {
-      XrdCl::ResponseHandler *handler = GetHandler<XrdCl::AnyObject>( callback );
+      XrdCl::ResponseHandler *handler = GetFileHandler<XrdCl::AnyObject>( self, callback, args );
       if ( !handler ) return NULL;
       async( status = self->file->Sync( handler, timeout ) );
+      if( !status.IsOK() ) delete handler;
     }
     else {
       async( status = self->file->Sync( timeout ) );
@@ -735,9 +993,10 @@ namespace PyXRootD
     timeout = (time_t)tmp_timeout;
 
     if ( callback && callback != Py_None ) {
-      XrdCl::ResponseHandler *handler = GetHandler<XrdCl::AnyObject>( callback );
+      XrdCl::ResponseHandler *handler = GetFileHandler<XrdCl::AnyObject>( self, callback, args );
       if ( !handler ) return NULL;
       async( status = self->file->Truncate( size, handler, timeout ) );
+      if( !status.IsOK() ) delete handler;
     }
 
     else {
@@ -755,93 +1014,98 @@ namespace PyXRootD
   //----------------------------------------------------------------------------
   //! Read scattered data chunks in one operation
   //----------------------------------------------------------------------------
+  static PyObject *ReadVectors( File *self, PyObject *args, PyObject *kwds, bool ranges )
+  {
+    static const char *rangeKeys[] = { "chunks", "timeout", "callback", "parallel", nullptr };
+    static const char *vectorKeys[] = { "chunks", "timeout", "callback", nullptr };
+    PyObject *input = nullptr, *callback = nullptr;
+    unsigned short timeout = 0, parallel = 4;
+    if( !self->file->IsOpen() ) return FileClosedError();
+    PyObject *pytimeout = nullptr, *pyparallel = nullptr;
+    unsigned long long unusedOffset = 0;
+    unsigned int unusedSize = 0, parallelValue = 4;
+    if( !PyArg_ParseTupleAndKeywords( args, kwds, ranges ? "O|OOO:read_ranges" : "O|OO:vector_read",
+          (char **)(ranges ? rangeKeys : vectorKeys), &input, &pytimeout, &callback, &pyparallel ) ||
+        !IONumbers( nullptr, nullptr, pytimeout, unusedOffset, unusedSize, timeout ) ||
+        (pyparallel && PyObjToUint( pyparallel, &parallelValue, "parallel" )) ||
+        !CheckCallback( callback ) ) return nullptr;
+    if( !parallelValue || parallelValue > 65535 )
+    {
+      PyErr_SetString( PyExc_ValueError, "parallel must be between 1 and 65535" );
+      return nullptr;
+    }
+    parallel = parallelValue;
+    if( !PyList_Check( input ) || !parallel )
+    {
+      PyErr_SetString( PyExc_TypeError, "chunks must be a list" );
+      return nullptr;
+    }
+    PyObject *data = PyList_New( PyList_Size( input ) );
+    if( !data ) return nullptr;
+    XrdCl::ChunkList chunks;
+    for( Py_ssize_t i = 0; i < PyList_Size( input ); ++i )
+    {
+      PyObject *item = PyList_GET_ITEM( input, i );
+      unsigned long long offset = 0, size = 0;
+      if( !PyTuple_Check( item ) || PyTuple_Size( item ) != 2 )
+      {
+        Py_DECREF( data );
+        PyErr_SetString( PyExc_TypeError, "chunks must contain (offset, size) tuples" );
+        return nullptr;
+      }
+      if( PyObjToUllong( PyTuple_GET_ITEM( item, 0 ), &offset, "offset" ) ||
+          PyObjToUllong( PyTuple_GET_ITEM( item, 1 ), &size, "size" ) )
+      { Py_DECREF( data ); return nullptr; }
+      if( offset > std::numeric_limits<uint64_t>::max() - size ||
+          size > static_cast<uint64_t>( PY_SSIZE_T_MAX ) ||
+          (!ranges && size > std::numeric_limits<uint32_t>::max()) )
+      {
+        Py_DECREF( data );
+        PyErr_SetString( PyExc_OverflowError, "range exceeds offset or buffer limits" );
+        return nullptr;
+      }
+      PyObject *buffer = PyBytes_FromStringAndSize( nullptr, size );
+      if( !buffer ) { Py_DECREF( data ); return nullptr; }
+      PyList_SET_ITEM( data, i, buffer );
+      uint64_t start = 0;
+      do
+      {
+        uint32_t length = std::min<uint64_t>( size - start, std::numeric_limits<uint32_t>::max() );
+        chunks.emplace_back( offset + start, length, PyBytes_AS_STRING( buffer ) + start );
+        start += length;
+      } while( start < size );
+    }
+    auto owned = new OwnedIO( self, callback, ranges ? OwnedIO::Ranges : OwnedIO::Vector, data );
+    Py_DECREF( data );
+    XrdCl::XRootDStatus status;
+    if( callback && callback != Py_None )
+    {
+      if( ranges ) { async( status = self->file->ReadRanges( chunks, owned, parallel, timeout ) ); }
+      else { async( status = self->file->VectorRead( chunks, nullptr, owned, timeout ) ); }
+      if( !status.IsOK() ) delete owned;
+      return IOResult( status, callback );
+    }
+    XrdCl::VectorReadInfo *info = nullptr;
+    if( ranges ) { async( status = self->file->ReadRanges( chunks, parallel, timeout ) ); }
+    else { async( status = self->file->VectorRead( chunks, nullptr, info, timeout ) ); }
+    XrdCl::AnyObject response;
+    if( info ) response.Set( info );
+    PyObject *result = status.IsOK() ? owned->Result( &response ) : nullptr;
+    delete owned;
+    if( PyErr_Occurred() ) return nullptr;
+    return IOResult( status, callback, result );
+  }
+
   PyObject* File::VectorRead( File *self, PyObject *args, PyObject *kwds )
   {
-    static const char  *kwlist[] = { "chunks", "timeout", "callback", NULL };
-    time_t              timeout  = 0;
-    uint64_t            offset   = 0;
-    uint32_t            length   = 0;
-    PyObject           *pychunks = NULL, *callback = NULL;
-    PyObject           *pyresponse = NULL, *pystatus = NULL, *py_timeout = NULL;
-    XrdCl::XRootDStatus status;
-    XrdCl::ChunkList    chunks;
-
-    if ( !self->file->IsOpen() ) return FileClosedError();
-
-    if ( !PyArg_ParseTupleAndKeywords( args, kwds, "O|OO:vector_read",
-         (char**) kwlist, &pychunks, &py_timeout, &callback ) ) return NULL;
-
-    unsigned long long tmp_timeout = 0;
-
-    if ( py_timeout && PyObjToUllong( py_timeout, &tmp_timeout, "timeout" ) )
-      return NULL;
-
-    timeout = (time_t)tmp_timeout;
-
-    if ( !PyList_Check( pychunks ) ) {
-      PyErr_SetString( PyExc_TypeError, "chunks parameter must be a list" );
-      return NULL;
-    }
-
-    struct chunkGuard {
-      chunkGuard(XrdCl::ChunkList &c) : c_(&c) { }
-      ~chunkGuard() {
-        if (c_)
-          std::for_each(c_->begin(), c_->end(), [](XrdCl::ChunkInfo &ci) { delete[] (char*)ci.buffer; });
-      }
-      void disarm() { c_ = nullptr; }
-
-       XrdCl::ChunkList *c_;
-    } cg(chunks);
-
-    for ( int i = 0; i < PyList_Size( pychunks ); ++i ) {
-      PyObject *chunk = PyList_GetItem( pychunks, i );
-
-      if ( !PyTuple_Check( chunk ) || ( PyTuple_Size( chunk ) != 2 ) ) {
-        PyErr_SetString( PyExc_TypeError, "vector_read() expects list of tuples"
-                                          " of length 2" );
-        return NULL;
-      }
-
-      // Check that offset and length values are valid
-      unsigned long long tmp_offset = 0;
-      unsigned int tmp_length = 0;
-
-      if ( PyObjToUllong( PyTuple_GetItem( chunk, 0 ), &tmp_offset, "offset" ) )
-        return NULL;
-
-      if ( PyObjToUint( PyTuple_GetItem( chunk, 1 ), &tmp_length, "length" ) )
-        return NULL;
-
-      offset = (uint64_t)tmp_offset;
-      length = (uint32_t)tmp_length;
-      char    *buffer = new char[length];
-      chunks.push_back( XrdCl::ChunkInfo( offset, length, buffer ) );
-    }
-
-    if ( callback && callback != Py_None ) {
-      XrdCl::ResponseHandler *handler
-          = GetHandler<XrdCl::VectorReadInfo>( callback );
-      if ( !handler ) return NULL;
-      cg.disarm(); // handler will call ConvertType and free chunk buffers
-      async( status = self->file->VectorRead( chunks, 0, handler, timeout ) );
-    }
-    else {
-      XrdCl::VectorReadInfo *info = 0;
-      async( status = self->file->VectorRead( chunks, 0, info, timeout ) );
-      cg.disarm(); // ConvertType will free chunk buffers
-      pyresponse = ConvertType<XrdCl::VectorReadInfo>( info );
-      delete info;
-    }
-
-    pystatus = ConvertType<XrdCl::XRootDStatus>( &status );
-    PyObject *o = ( callback && callback != Py_None ) ?
-            Py_BuildValue( "O", pystatus ) :
-            Py_BuildValue( "OO", pystatus, pyresponse );
-    Py_DECREF( pystatus );
-    Py_XDECREF( pyresponse );
-    return o;
+    return ReadVectors( self, args, kwds, false );
   }
+
+  PyObject* File::ReadRanges( File *self, PyObject *args, PyObject *kwds )
+  {
+    return ReadVectors( self, args, kwds, true );
+  }
+
 
   //----------------------------------------------------------------------------
   // Perform a custom operation on an open file
@@ -865,10 +1129,11 @@ namespace PyXRootD
 
     if ( callback && callback != Py_None )
     {
-      XrdCl::ResponseHandler *handler = GetHandler<XrdCl::Buffer>( callback );
+      XrdCl::ResponseHandler *handler = GetFileHandler<XrdCl::Buffer>( self, callback, args );
       if( !handler )
         return NULL;
       async( status = self->file->Fcntl( arg, handler, timeout ) );
+      if( !status.IsOK() ) delete handler;
     }
 
     else {
@@ -905,10 +1170,11 @@ namespace PyXRootD
 
     if ( callback && callback != Py_None )
     {
-      XrdCl::ResponseHandler *handler = GetHandler<XrdCl::Buffer>( callback );
+      XrdCl::ResponseHandler *handler = GetFileHandler<XrdCl::Buffer>( self, callback, args );
       if( !handler )
         return NULL;
       async( status = self->file->Visa( handler, timeout ) );
+      if( !status.IsOK() ) delete handler;
     }
 
     else {
@@ -1022,9 +1288,10 @@ namespace PyXRootD
     }
 
     if ( callback && callback != Py_None ) {
-      XrdCl::ResponseHandler *handler = GetHandler<std::vector<XrdCl::XAttrStatus>>( callback );
+      XrdCl::ResponseHandler *handler = GetFileHandler<std::vector<XrdCl::XAttrStatus>>( self, callback, args );
       if ( !handler ) return NULL;
       async( status = self->file->SetXAttr( attrs, handler, timeout ) );
+      if( !status.IsOK() ) delete handler;
     }
 
     else {
@@ -1081,9 +1348,10 @@ namespace PyXRootD
     }
 
     if ( callback && callback != Py_None ) {
-      XrdCl::ResponseHandler *handler = GetHandler<std::vector<XrdCl::XAttr>>( callback );
+      XrdCl::ResponseHandler *handler = GetFileHandler<std::vector<XrdCl::XAttr>>( self, callback, args );
       if ( !handler ) return NULL;
       async( status = self->file->GetXAttr( attrs, handler, timeout ) );
+      if( !status.IsOK() ) delete handler;
     }
 
     else {
@@ -1140,9 +1408,10 @@ namespace PyXRootD
     }
 
     if ( callback && callback != Py_None ) {
-      XrdCl::ResponseHandler *handler = GetHandler<std::vector<XrdCl::XAttrStatus>>( callback );
+      XrdCl::ResponseHandler *handler = GetFileHandler<std::vector<XrdCl::XAttrStatus>>( self, callback, args );
       if ( !handler ) return NULL;
       async( status = self->file->DelXAttr( attrs, handler, timeout ) );
+      if( !status.IsOK() ) delete handler;
     }
 
     else {
@@ -1179,9 +1448,10 @@ namespace PyXRootD
          (char**) kwlist, &timeout, &callback ) ) return NULL;
 
     if ( callback && callback != Py_None ) {
-      XrdCl::ResponseHandler *handler = GetHandler<std::vector<XrdCl::XAttr>>( callback );
+      XrdCl::ResponseHandler *handler = GetFileHandler<std::vector<XrdCl::XAttr>>( self, callback, args );
       if ( !handler ) return NULL;
       async( status = self->file->ListXAttr( handler, timeout ) );
+      if( !status.IsOK() ) delete handler;
     }
 
     else {
@@ -1231,9 +1501,10 @@ namespace PyXRootD
     File *fp = reinterpret_cast<File*>(tfile);
 
     if ( callback && callback != Py_None ) {
-      XrdCl::ResponseHandler *handler = GetHandler<XrdCl::AnyObject>( callback );
+      XrdCl::ResponseHandler *handler = GetFileHandler<XrdCl::AnyObject>( self, callback, args );
       if ( !handler ) return NULL;
       async( status = self->file->OpenUsingTemplate( *fp->file, url, flags, mode, handler, timeout ) );
+      if( !status.IsOK() ) delete handler;
     }
 
     else {
@@ -1335,11 +1606,12 @@ namespace PyXRootD
     }
 
     if ( callback && callback != Py_None ) {
-      XrdCl::ResponseHandler *handler = GetHandler<XrdCl::ChunkInfo>( callback );
+      XrdCl::ResponseHandler *handler = GetFileHandler<XrdCl::ChunkInfo>( self, callback, args );
       if ( !handler ) {
         return NULL;
       }
       async( status = self->file->Clone( locs, handler, timeout ) );
+      if( !status.IsOK() ) delete handler;
     }
     else {
       async( status = self->file->Clone( locs, timeout ) );

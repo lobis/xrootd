@@ -219,6 +219,12 @@ class DelayedNative:
     def sync(self, *args, **kwargs):
         return self.submit('sync', kwargs['callback'])
 
+    def drain(self, *args, **kwargs):
+        value = XRootDStatus({'ok': True, 'code': 0, 'errno': 0,
+                             'message': 'ok'})
+        kwargs['callback'](value, None, [])
+        return value
+
     def close(self, *args, **kwargs):
         return self.submit('close', kwargs['callback'])
 

@@ -156,6 +156,10 @@ def test_low_level_context_closes_only_open_files():
             def is_open(self):
                 return self.opened
 
+            def drain(self, callback):
+                callback(status(), None, [])
+                return status()
+
             def close(self, timeout, callback):
                 calls.append(timeout)
                 self.opened = False

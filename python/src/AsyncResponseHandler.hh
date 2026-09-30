@@ -48,7 +48,10 @@ namespace PyXRootD
       //------------------------------------------------------------------------
       //! Destructor
       //------------------------------------------------------------------------
-      virtual ~AsyncResponseHandler() {};
+      // The constructor receives the reference acquired by IsCallable.
+      // Release it on immediate rejection and conversion failure as well as
+      // normal completion. Destruction always takes place with the GIL held.
+      virtual ~AsyncResponseHandler() { Py_XDECREF( callback ); }
 
       //------------------------------------------------------------------------
       //! Handle the asynchronous response call
@@ -161,9 +164,10 @@ namespace PyXRootD
         if( finalrsp )
         {
           Py_XDECREF( this->callback );
+          this->callback = nullptr;
         }
 
-        PyGILState_Release( state );
+        PyGILState_STATE savedState = state;
 
         delete status;
         delete response;
@@ -172,6 +176,7 @@ namespace PyXRootD
         if( finalrsp )
           // Commit suicide...
           delete this;
+        PyGILState_Release( savedState );
       }
 
       //------------------------------------------------------------------------
@@ -252,9 +257,10 @@ namespace PyXRootD
         if( finalrsp )
         {
           Py_XDECREF( this->callback );
+          this->callback = nullptr;
         }
 
-        PyGILState_Release( state );
+        PyGILState_STATE savedState = state;
 
         delete status;
         delete response;
@@ -262,6 +268,7 @@ namespace PyXRootD
         if( finalrsp )
           // Commit suicide...
           delete this;
+        PyGILState_Release( savedState );
       }
 
       //------------------------------------------------------------------------
@@ -282,8 +289,9 @@ namespace PyXRootD
       void Exit()
       {
         PyErr_Print();
-        PyGILState_Release( state );
+        PyGILState_STATE savedState = state;
         delete this;
+        PyGILState_Release( savedState );
       }
 
     private:

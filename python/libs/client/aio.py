@@ -78,7 +78,12 @@ class File:
         await request(self.native.open, url, flags, mode, timeout)
         return self
 
+    async def drain(self):
+        """Wait for native requests, including cancelled low-level waiters."""
+        await request(self.native.drain)
+
     async def close(self, timeout=0):
+        await self.drain()
         await request(self.native.close, timeout)
 
     async def stat(self, force=False, timeout=0):
@@ -89,14 +94,26 @@ class File:
             raise ValueError('async reads require a bounded 32-bit size')
         return await request(self.native.read, offset, size, timeout)
 
-    async def write(self, data, offset=0, timeout=0):
-        # The native callback form receives a pointer to the input buffer.
-        # Own immutable bytes until completion, including after cancellation.
-        data = bytes(data)
-        if len(data) > 0xffffffff:
-            raise ValueError('async writes require a bounded 32-bit size')
-        await request(self.native.write, data, offset, len(data), timeout)
-        return len(data)
+    async def write(self, data, offset=0, timeout=0, *,
+                    buffer_offset=0, size=None):
+        # The extension owns immutable buffers and snapshots mutable inputs.
+        length = memoryview(data).nbytes
+        size = length - buffer_offset if size is None else size
+        if (buffer_offset < 0 or size < 0 or size > 0xffffffff or
+                buffer_offset + size > length):
+            raise ValueError('async writes require a bounded buffer slice')
+        if not size:
+            return 0
+        await request(self.native.write, data, offset, size, timeout,
+                      buffer_offset=buffer_offset)
+        return size
+
+    async def readinto(self, buffer, offset=0, timeout=0):
+        return await request(self.native.readinto, buffer, offset, timeout)
+
+    async def read_ranges(self, chunks, timeout=0, parallel=4):
+        return await request(self.native.read_ranges, chunks, timeout,
+                             parallel=parallel)
 
     async def vector_read(self, chunks, timeout=0):
         return await request(self.native.vector_read, chunks, timeout)
@@ -240,3 +257,4 @@ def open(url: str, mode: str = 'rb', timeout: int = 0) -> '_OpenContext':
     """
     from XRootD.client.asyncstream import _OpenContext
     return _OpenContext(url, mode, timeout)
+

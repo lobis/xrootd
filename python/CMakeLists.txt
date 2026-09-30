@@ -235,7 +235,7 @@ set(PYXROOTD_TESTS copy file filesystem filesystem_helpers glob stream threads
                   url version_policy)
 
 if(Python_VERSION VERSION_GREATER_EQUAL 3.11)
-  list(APPEND PYXROOTD_TESTS aio aio_helpers asyncstream)
+  list(APPEND PYXROOTD_TESTS aio aio_helpers asyncstream native_io)
 endif()
 
 # fsspec is an optional Python dependency. A module-level pytest skip with no
