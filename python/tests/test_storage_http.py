@@ -196,6 +196,7 @@ print(json.dumps(True))
   transfers = [r for r in requests if r[0] in ('GET', 'PUT')]
   assert transfers
   assert all(r[2] == 'Bearer transfer' for r in transfers)
+  assert all(r[2] == 'Bearer transfer' for r in requests if r[0] == 'OPTIONS')
   assert all('xrdcl.' not in r[1] for r in transfers)
   query = '?signature=opaque+value==&empty=&repeat=one&repeat=two&bare&escaped=%2f%2F'
   assert any(r[0] == 'PUT' and r[1] == '/upload' + query for r in transfers)
