@@ -334,8 +334,13 @@ XrdSecProtList *XrdSecPManager::ldPO(XrdOucErrInfo *eMsg,  // In
 //
    snprintf(poname, sizeof(poname), "libXrdSec%s.so", pid);
    i = (spath ? strlen(spath) : 0);
+#ifdef XROOTD_PYPI_PLUGIN_PATH
+   if (!i) {spath = XROOTD_PYPI_PLUGIN_PATH; sep = "/";}
+      else sep = (spath[i-1] == '/' ? "" : "/");
+#else
    if (!i) {spath = ""; sep = "";}
       else sep = (spath[i-1] == '/' ? "" : "/");
+#endif
    snprintf(libpath, sizeof(libpath), "%s%s%s", spath, sep, poname);
    libloc = libpath;
 
