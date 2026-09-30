@@ -1,3 +1,5 @@
+import errno
+
 import pytest
 
 from XRootD.client.responses import XRootDStatus, XRootDNotFoundError, \
@@ -5,7 +7,8 @@ from XRootD.client.responses import XRootDStatus, XRootDNotFoundError, \
   XRootDTimeoutError, XRootDChecksumError, XRootDOperationError, \
   XRootDAlreadyExistsError, XRootDQuotaError, XRootDTemporaryError, \
   XRootDUnsupportedError, \
-  ChecksumInfo, raise_on_error
+  ChecksumInfo, raise_on_error, raise_as_oserror, parse_checksum, \
+  checksum_query_path
 
 
 def status(code, ok=False, shellcode=0, message='error', errno=0):
@@ -87,3 +90,38 @@ def test_checksum_info():
 def test_checksum_info_rejects_invalid_response(response):
   with pytest.raises(ValueError, match='Invalid checksum response'):
     ChecksumInfo(response)
+
+
+@pytest.mark.parametrize('response', [b'\xff', b'adler32', b'',
+                                     b'adler32 01234567 trailing'])
+def test_checksum_parser_reports_protocol_errno(response):
+  with pytest.raises(OSError) as caught:
+    parse_checksum(response, 'ADLER32')
+  assert caught.value.errno == errno.EPROTO
+
+
+def test_checksum_parser_reports_algorithm_mismatch_errno():
+  with pytest.raises(OSError) as caught:
+    parse_checksum(b'adler32 01234567', 'MD5')
+  assert caught.value.errno == errno.EINPROGRESS
+  assert parse_checksum(b'adler32 01234567', 'ADLER32') == \
+    ('adler32', '01234567')
+
+
+def test_checksum_query_normalizes_algorithm_without_changing_other_params():
+  assert checksum_query_path('/file?x=a%2Fb&x=2&cks.type=MD5', 'ADLER32') == \
+    '/file?x=a%2Fb&x=2&cks.type=adler32'
+
+
+@pytest.mark.parametrize('code, expected', [
+  (XRootDStatus.errNotSupported, errno.ENOTSUP),
+  (XRootDStatus.errQueryNotSupported, errno.ENOTSUP),
+  (XRootDStatus.errNotImplemented, errno.ENOTSUP),
+  (XRootDStatus.errInvalidArgs, errno.EINVAL),
+])
+def test_query_failure_reports_os_errno(code, expected):
+  native = status(code)
+  with pytest.raises(OSError) as caught:
+    raise_as_oserror(native, '/file')
+  assert caught.value.errno == expected
+  assert caught.value.xrootd_status is native

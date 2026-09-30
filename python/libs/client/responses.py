@@ -313,6 +313,13 @@ def raise_as_oserror(status, path):
     result = PermissionError(errno.EACCES, status.message, path)
   elif isinstance(error, XRootDTimeoutError):
     result = TimeoutError(errno.ETIMEDOUT, status.message, path)
+  elif (status.code == status.errErrorResponse and status.errno == 3013) or \
+      status.code in (
+      status.errNotSupported, status.errQueryNotSupported,
+      status.errNotImplemented):
+    result = OSError(errno.ENOTSUP, status.message, path)
+  elif status.code == status.errInvalidArgs:
+    result = OSError(errno.EINVAL, status.message, path)
   else:
     result = OSError(errno.EIO, status.message, path)
   result.xrootd_status = status
@@ -326,12 +333,16 @@ def parse_checksum(response, algorithm=None):
   reject a different one rather than silently returning an unexpected digest.
   """
   if isinstance(response, bytes):
-    response = response.decode('ascii')
+    try:
+      response = response.decode('ascii')
+    except UnicodeDecodeError as error:
+      raise OSError(errno.EPROTO, 'Invalid XRootD checksum response') from error
   parts = response.strip('\x00').strip().split()
   if len(parts) != 2:
-    raise OSError('Invalid XRootD checksum response: %r' % response)
+    raise OSError(errno.EPROTO, 'Invalid XRootD checksum response')
   if algorithm is not None and parts[0].lower() != algorithm.lower():
-    raise OSError('Expected %s checksum, server returned %s' %
+    raise OSError(errno.EINPROGRESS,
+                  'Expected %s checksum, server returned %s' %
                   (algorithm, parts[0]))
   return parts[0], parts[1]
 
@@ -348,7 +359,7 @@ def checksum_query_path(path, algorithm=None):
     params = '&'.join(part for part in params.split('&')
                       if part.partition('=')[0] != 'cks.type')
   return base + '?' + (params + '&' if params else '') + \
-      'cks.type=' + algorithm
+      'cks.type=' + algorithm.lower()
 
 
 class TapeEndpoint(Struct):
