@@ -3,13 +3,15 @@ find_package(CURL REQUIRED)
 include(GoogleTest)
 
 add_executable(xrdcl-http-unit-tests
+  ClientConfigTest.cc
   HeaderParserTest.cc
   ParseTimeoutTest.cc
   TapeTest.cc
+  WebDavParserTest.cc
 )
 
 target_link_libraries(xrdcl-http-unit-tests
-  XrdClHttpObj XrdCl CURL::libcurl GTest::gtest_main)
+  XrdClHttpObj XrdCl XrdXml CURL::libcurl GTest::gtest_main)
 target_include_directories(xrdcl-http-unit-tests
   PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../src")
 
@@ -20,7 +22,6 @@ gtest_discover_tests(xrdcl-http-unit-tests TEST_PREFIX XrdClHttp::
 if(NOT BUILD_SCITOKENS)
   return()
 endif()
-
 find_program(OPENSSL_BIN openssl REQUIRED)
 
 # All tests that only depend on the pure XrdCl interfaces and
@@ -29,6 +30,7 @@ add_executable(xrdcl-test
   ChecksumTest.cc
   DeleteTest.cc
   MkcolTest.cc
+  MoveTest.cc
   ReadTest.cc
   WriteTest.cc
 )
@@ -38,7 +40,6 @@ add_executable(xrdcl-http-test
   CopyTest.cc
   OptionsCacheTest.cc
   VectorReadTest.cc
-  WebDavParserTest.cc
 )
 
 target_link_libraries(xrdcl-test XrdClHttpTransferTest GTest::gtest_main)
