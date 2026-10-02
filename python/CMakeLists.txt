@@ -194,6 +194,21 @@ if(INSTALL_PYTHON_BINDINGS)
       message(FATAL_ERROR \"Failed to install Python bindings\")
     endif()
   ")
+
+  # A prefix installation also installs wheel console scripts into bindir.
+  # Restore the normal CMake executables there: native installations should
+  # remain usable independently of the Python bindings and their interpreter.
+  if(PYXROOTD_COMMANDS)
+    install(TARGETS xrdfs xrdcp RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    if(TARGET xrdtoken)
+      install(TARGETS xrdtoken RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    endif()
+    install(CODE "
+      file(REMOVE \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/xrdcopy\")
+      file(CREATE_LINK xrdcp
+        \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/xrdcopy\" SYMBOLIC)
+    ")
+  endif()
 endif()
 
 if(NOT BUILD_TESTS OR NOT ENABLE_SERVER_TESTS)
