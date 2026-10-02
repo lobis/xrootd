@@ -2,6 +2,7 @@
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -10,8 +11,8 @@ from XRootD.client.flags import OpenFlags
 
 
 @pytest.fixture
-def opened_file(tmp_path):
-    path = tmp_path / 'lines'
+def opened_file(tmpdir):
+    path = Path(str(tmpdir)) / 'lines'
     path.write_bytes(b'first\nsecond\nlast')
     file = client.File()
     status, _ = file.open(path.as_uri(), OpenFlags.READ)
@@ -32,7 +33,9 @@ with client.File() as file:
     print(json.dumps(file.readlines(offset=int(sys.argv[2]), chunksize=2)))
 '''
     result = subprocess.run([sys.executable, '-c', script, path.as_uri(),
-                             str(offset)], capture_output=True, text=True,
+                             str(offset)], stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            universal_newlines=True,
                             timeout=10, check=True)
     expected = path.read_bytes()[offset:].decode().splitlines(True)
     assert json.loads(result.stdout) == expected
@@ -75,8 +78,8 @@ def test_readlines_closed_file():
 
 
 @pytest.mark.parametrize('method', ['readline', 'readlines'])
-def test_line_reads_preserve_native_read_errors(tmp_path, method):
-    path = tmp_path / 'write-only'
+def test_line_reads_preserve_native_read_errors(tmpdir, method):
+    path = Path(str(tmpdir)) / 'write-only'
     path.write_bytes(b'contents\n')
     with client.File() as file:
         assert file.open(path.as_uri(), OpenFlags.WRITE)[0].ok

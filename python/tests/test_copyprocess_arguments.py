@@ -1,5 +1,6 @@
 """Keep the Python adapter aligned with the native CopyProcess signature."""
 import importlib
+from pathlib import Path
 
 import pytest
 
@@ -25,9 +26,10 @@ def test_copy_job_rate_and_retry_arguments(
     assert jobs[0][:2] == ('file:///source', 'file:///target')
 
 
-def test_native_copy_with_rate_and_retry_settings(tmp_path):
-    source = tmp_path / 'source'
-    target = tmp_path / 'target'
+def test_native_copy_with_rate_and_retry_settings(tmpdir):
+    directory = Path(str(tmpdir))
+    source = directory / 'source'
+    target = directory / 'target'
     source.write_bytes(b'copy through the native extension')
     process = copyprocess.CopyProcess()
     process.add_job(source.as_uri(), target.as_uri(), retry=3,
