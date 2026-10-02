@@ -1,3 +1,7 @@
+if(NOT TARGET XrdClHttpObj)
+  return()
+endif()
+
 find_package(CURL REQUIRED)
 
 include(GoogleTest)
@@ -17,6 +21,19 @@ target_include_directories(xrdcl-http-unit-tests
 
 gtest_discover_tests(xrdcl-http-unit-tests TEST_PREFIX XrdClHttp::
   PROPERTIES DISCOVERY_TIMEOUT 10)
+
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND AND TARGET xrdcp AND TARGET xrdfs)
+  add_executable(xrdcl-http-upload-buffer UploadBufferDriver.cc)
+  target_link_libraries(xrdcl-http-upload-buffer PRIVATE XrdClHttpObj XrdCl)
+  target_include_directories(xrdcl-http-upload-buffer
+    PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../src")
+  add_test(NAME XrdClHttp::cli
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/cli.py"
+      "$<TARGET_FILE_DIR:xrdcp>" "$<TARGET_FILE:XrdClHttp-${PLUGIN_VERSION}>"
+      "$<TARGET_FILE:xrdcl-http-upload-buffer>")
+  set_tests_properties(XrdClHttp::cli PROPERTIES TIMEOUT 120)
+endif()
 
 # XrdClHttp integration tests depend on scitokens fixture for authentication
 if(NOT ENABLE_SERVER_TESTS OR NOT BUILD_SCITOKENS)

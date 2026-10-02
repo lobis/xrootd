@@ -39,7 +39,6 @@ CurlStatOp::OptionsDone()
     auto verbs = instance.Get(target.empty() ? m_url : target);
     if (verbs.IsSet(VerbsCache::HttpVerb::kPROPFIND)) {
         curl_easy_setopt(m_curl.get(), CURLOPT_CUSTOMREQUEST, "PROPFIND");
-        m_headers_list.emplace_back("Depth", "0");
         curl_easy_setopt(m_curl.get(), CURLOPT_NOBODY, 0L);
         m_is_propfind = true;
     } else {
@@ -65,7 +64,6 @@ CurlStatOp::Redirect(std::string &target)
 
     if (verbs.IsSet(VerbsCache::HttpVerb::kPROPFIND)) {
         curl_easy_setopt(m_curl.get(), CURLOPT_CUSTOMREQUEST, "PROPFIND");
-        m_headers_list.emplace_back("Depth", "0");
         curl_easy_setopt(m_curl.get(), CURLOPT_NOBODY, 0L);
         m_is_propfind = true;
     } else {
@@ -81,12 +79,13 @@ CurlStatOp::Setup(CURL *curl, CurlWorker &worker)
     if (!CurlOperation::Setup(curl, worker)) return false;
     curl_easy_setopt(m_curl.get(), CURLOPT_WRITEFUNCTION, CurlStatOp::WriteCallback);
     curl_easy_setopt(m_curl.get(), CURLOPT_WRITEDATA, this);
+    // FinishSetup serializes headers before OPTIONS completes.
+    m_headers_list.emplace_back("Depth", "0");
 
     auto &instance = VerbsCache::Instance();
     auto verbs = instance.Get(m_url);
     if (verbs.IsSet(VerbsCache::HttpVerb::kPROPFIND)) {
         curl_easy_setopt(m_curl.get(), CURLOPT_CUSTOMREQUEST, "PROPFIND");
-        m_headers_list.emplace_back("Depth", "0");
         curl_easy_setopt(m_curl.get(), CURLOPT_NOBODY, 0L);
         m_is_propfind = true;
     } else {
