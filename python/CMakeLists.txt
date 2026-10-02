@@ -226,7 +226,7 @@ list(APPEND ENVIRON "XROOTD=$<TARGET_FILE:xrootd>")
 list(APPEND ENVIRON "XRDFS=$<TARGET_FILE:xrdfs>")
 list(APPEND ENVIRON "PYTHONDONTWRITEBYTECODE=1")
 
-foreach(test copy file filesystem glob threads url)
+foreach(test copy copyprocess_arguments file filesystem glob threads url)
   add_test(NAME PyXRootD::${test}
     COMMAND ${Python_EXECUTABLE} -m pytest -p no:cacheprovider
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_${test}.py)
