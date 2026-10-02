@@ -34,6 +34,9 @@ add_subdirectory(XrdXrootdTests)
 
 add_subdirectory(XrdOssMirageTests)
 
+# Native HTTP client regressions use their own loopback servers.
+add_subdirectory(XrdClHttp)
+
 if(NOT ENABLE_SERVER_TESTS)
   return()
 endif()
@@ -45,7 +48,6 @@ add_subdirectory(scitokens)
 add_subdirectory(tls)
 
 add_subdirectory(XrdClHttpCommon)
-add_subdirectory(XrdClHttp)
 add_subdirectory(XrdClS3)
 
 add_subdirectory( XrdOssTests )
