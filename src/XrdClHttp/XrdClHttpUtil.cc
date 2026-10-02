@@ -42,6 +42,7 @@
 
 #include <fcntl.h>
 #include <fstream>
+#include <sys/stat.h>
 #ifdef __APPLE__
 #include <pthread.h>
 #else
@@ -783,6 +784,16 @@ XrdClHttp::ConfigureHandle(CURL *curl, bool verbose) {
         char *x509_ca_dir = getenv("X509_CERT_DIR");
         if (x509_ca_dir) {
             ca_dir = std::string(x509_ca_dir);
+        }
+    }
+    if (ca_dir.empty() && ca_file.empty()) {
+        // Grid CA packages install hashed certificates here. Preserve explicit
+        // trust settings and libcurl's normal CA bundle on other systems.
+        constexpr auto grid_ca_dir = "/etc/grid-security/certificates";
+        struct stat info;
+        if (stat(grid_ca_dir, &info) == 0 && S_ISDIR(info.st_mode)
+            && access(grid_ca_dir, R_OK | X_OK) == 0) {
+            ca_dir = grid_ca_dir;
         }
     }
     if (!ca_dir.empty()) {
