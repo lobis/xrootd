@@ -450,13 +450,15 @@ namespace PyXRootD
     if ( !size ) size = UINT_MAX;
     if ( size < chunksize ) chunksize = size;
 
-    uint64_t off_end = offset + size;
     std::unique_ptr<XrdCl::Buffer> chunk;
     std::unique_ptr<XrdCl::Buffer> line = std::make_unique<XrdCl::Buffer>();
 
-    while ( offset < off_end )
+    while ( line->GetSize() < size )
     {
-      chunk.reset( self->ReadChunk( self, offset, chunksize ) );
+      uint32_t remaining = size - line->GetSize();
+      chunk.reset( self->ReadChunk( self, offset,
+                                   std::min( chunksize, remaining ) ) );
+      if ( !chunk ) return NULL;
       offset += chunk->GetSize();
 
       // Reached end of file
@@ -515,8 +517,8 @@ namespace PyXRootD
 
     if ( !self->file->IsOpen() ) return FileClosedError();
 
-    if ( !PyArg_ParseTupleAndKeywords( args, kwds, "|kII:readlines",
-          (char**) kwlist, &offset, &size, &chunksize ) ) return NULL;
+    if ( !PyArg_ParseTupleAndKeywords( args, kwds, "|OOO:readlines",
+          (char**) kwlist, &py_offset, &py_size, &py_chunksize ) ) return NULL;
 
     unsigned long long tmp_offset = 0;
     unsigned int tmp_size = 0, tmp_chunksize = 0;
@@ -532,22 +534,45 @@ namespace PyXRootD
 
     offset = (uint64_t)tmp_offset;
     size = (uint32_t)tmp_size;
-    chunksize = (uint16_t)tmp_chunksize;
+    chunksize = (uint32_t)tmp_chunksize;
 
+    // Apply an explicit offset once. Subsequent reads advance the shared cursor.
+    if ( offset ) self->currentOffset = offset;
+
+    PyObject *line_args = Py_BuildValue( "(KII)", 0ULL, size, chunksize );
+    if ( !line_args ) return NULL;
     PyObject *lines = PyList_New( 0 );
-    PyObject *line  = NULL;
+    if ( !lines )
+    {
+      Py_DECREF( line_args );
+      return NULL;
+    }
 
     for (;;)
     {
-      line = self->ReadLine( self, args, kwds );
-
-      if ( !line || PyUnicode_GET_LENGTH( line ) == 0 )
+      PyObject *line = self->ReadLine( self, line_args, NULL );
+      if ( !line )
+      {
+        Py_DECREF( line_args );
+        Py_DECREF( lines );
+        return NULL;
+      }
+      if ( PyUnicode_GET_LENGTH( line ) == 0 )
+      {
+        Py_DECREF( line );
         break;
-
-      PyList_Append( lines, line );
+      }
+      int result = PyList_Append( lines, line );
       Py_DECREF( line );
+      if ( result < 0 )
+      {
+        Py_DECREF( line_args );
+        Py_DECREF( lines );
+        return NULL;
+      }
     }
 
+    Py_DECREF( line_args );
     return lines;
   }
 
@@ -563,6 +588,13 @@ namespace PyXRootD
 
     temp = new XrdCl::Buffer( size );
     status = self->file->Read( offset, size, temp->GetBuffer(), bytesRead );
+
+    if ( !status.IsOK() )
+    {
+      delete temp;
+      PyErr_SetString( PyExc_IOError, status.ToStr().c_str() );
+      return NULL;
+    }
 
     buffer = new XrdCl::Buffer( bytesRead );
     buffer->Append( temp->GetBuffer(), bytesRead );
