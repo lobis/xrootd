@@ -28,6 +28,16 @@ target_include_directories(xrdcl-http-copy-response-test
 gtest_discover_tests(xrdcl-http-copy-response-test TEST_PREFIX XrdClHttp::
   PROPERTIES DISCOVERY_TIMEOUT 10 TIMEOUT 20)
 
+# Per-file credentials coverage uses a disposable localhost HTTP server.
+find_package(Python3 QUIET COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+  add_test(NAME XrdClHttp::FileCredentials
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/FileCredentialsTest.py"
+      --xrdcp $<TARGET_FILE:xrdcp>
+      --plugin $<TARGET_FILE:XrdClHttp-${PLUGIN_VERSION}>)
+  set_tests_properties(XrdClHttp::FileCredentials PROPERTIES TIMEOUT 150)
+endif()
+
 # XrdClHttp integration tests depend on scitokens fixture for authentication
 if(NOT ENABLE_SERVER_TESTS OR NOT BUILD_SCITOKENS)
   return()
