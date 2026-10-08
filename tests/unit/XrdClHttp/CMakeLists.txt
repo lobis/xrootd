@@ -95,12 +95,14 @@ endif()
 
 add_executable(xrdcl-http-unit-tests
   HeaderParserTest.cc
+  OptionsCacheTest.cc
   ParseTimeoutTest.cc
   TapeTest.cc
+  WebDavParserTest.cc
 )
 
 target_link_libraries(xrdcl-http-unit-tests
-  XrdClHttpObj XrdCl CURL::libcurl GTest::gtest_main)
+  XrdClHttpObj XrdCl XrdXml CURL::libcurl GTest::gtest_main)
 target_include_directories(xrdcl-http-unit-tests
   PRIVATE "${PROJECT_SOURCE_DIR}/src")
 
