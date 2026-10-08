@@ -17,6 +17,7 @@ gtest_discover_tests(xrdcl-tests-unit
   PROPERTIES DISCOVERY_TIMEOUT 10)
 
 add_executable(xrdcl-unit-tests
+  XrdClDirListTest.cc
   XrdClEnv.cc
   XrdClURL.cc
   XrdClUtilsTest.cc
