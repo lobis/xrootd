@@ -34,18 +34,23 @@ add_subdirectory(XrdXrootdTests)
 
 add_subdirectory(XrdOssMirageTests)
 
+if(ENABLE_SERVER_TESTS)
+  # Define add_bats_test before HTTP tests register integration fixtures.
+  add_subdirectory(end-to-end)
+endif()
+
+# Native HTTP client regressions use their own loopback servers.
+add_subdirectory(XrdClHttp)
+
 if(NOT ENABLE_SERVER_TESTS)
   return()
 endif()
-
-add_subdirectory(end-to-end)
 
 add_subdirectory(krb5)
 add_subdirectory(scitokens)
 add_subdirectory(tls)
 
 add_subdirectory(XrdClHttpCommon)
-add_subdirectory(XrdClHttp)
 add_subdirectory(XrdClS3)
 
 add_subdirectory( XrdOssTests )
