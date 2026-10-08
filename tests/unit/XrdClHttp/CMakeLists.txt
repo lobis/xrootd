@@ -95,6 +95,7 @@ endif()
 
 add_executable(xrdcl-http-unit-tests
   ClientConfigTest.cc
+  CopyResponseTest.cc
   HeaderParserTest.cc
   OptionsCacheTest.cc
   ParseTimeoutTest.cc
