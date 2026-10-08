@@ -19,10 +19,11 @@ gtest_discover_tests(xrdcl-tests-unit
 add_executable(xrdcl-unit-tests
   XrdClDirListTest.cc
   XrdClEnv.cc
+  XrdClLocalFileHandlerTest.cc
+  XrdClProtocolRespTest.cc
+  XrdClReadRangesTest.cc
   XrdClURL.cc
   XrdClUtilsTest.cc
-  XrdClProtocolRespTest.cc
-  XrdClLocalFileHandlerTest.cc
   )
 
 target_link_libraries(xrdcl-unit-tests
