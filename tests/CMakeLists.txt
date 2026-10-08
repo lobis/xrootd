@@ -34,14 +34,17 @@ add_subdirectory(XrdXrootdTests)
 
 add_subdirectory(XrdOssMirageTests)
 
+if(ENABLE_SERVER_TESTS)
+  # Define add_bats_test before HTTP integration tests register tape fixtures.
+  add_subdirectory(end-to-end)
+endif()
+
 add_subdirectory(XrdClHttpCommon)
 add_subdirectory(XrdClHttp)
 
 if(NOT ENABLE_SERVER_TESTS)
   return()
 endif()
-
-add_subdirectory(end-to-end)
 
 add_subdirectory(krb5)
 add_subdirectory(scitokens)
