@@ -446,7 +446,8 @@ bool HeaderParser::Parse(const std::string &header_line)
         std::string_view val(header_value);
         while (!val.empty()) {
             auto found = val.find(',');
-            auto method = val.substr(0, found);
+            std::string method(val.substr(0, found));
+            XrdCl::Utils::Trim(method);
             if (method == "PROPFIND") {
                 auto new_verbs = static_cast<unsigned>(m_allow_verbs) | static_cast<unsigned>(VerbsCache::HttpVerb::kPROPFIND);
                 m_allow_verbs = static_cast<VerbsCache::HttpVerb>(new_verbs);
@@ -740,13 +741,12 @@ int DumpHeader(CURL *handle, curl_infotype type, char *data, size_t size, void *
 
 // Trim left and right side of a string_view for space characters
 std::string_view XrdClHttp::trim_view(const std::string_view &input_view) {
-    auto view = XrdClHttp::ltrim_view(input_view);
-    for (size_t idx = 0; idx < input_view.size(); idx++) {
-        if (!isspace(view[view.size() - 1 - idx])) {
-            return view.substr(0, view.size() - idx);
-        }
-    }
-    return "";
+    auto view = input_view;
+    while (!view.empty() && isspace(static_cast<unsigned char>(view.front())))
+        view.remove_prefix(1);
+    while (!view.empty() && isspace(static_cast<unsigned char>(view.back())))
+        view.remove_suffix(1);
+    return view;
 }
 
 // Trim the left side of a string_view for space
@@ -1327,13 +1327,10 @@ CurlWorker::Run() {
             // If the operation requires the result of the OPTIONS verb to function, then
             // we add that to the multi-handle instead, chaining the two calls together.
             if (op->RequiresOptions()) {
-                std::string modified_url;
                 std::shared_ptr<CurlOptionsOp> options_op(
                     new CurlOptionsOp(
                         curl, op,
-                        std::string(
-                            VerbsCache::GetUrlKey(op->GetUrl(), modified_url)
-                        ),
+                        op->GetUrl(),
                         m_logger, op->GetConnCalloutFunc()
                     )
                 );
@@ -1655,8 +1652,6 @@ CurlWorker::Run() {
                                     // operation can continue.  Inject a new CurlOptionsOp and chain it to the one
                                     // being processed.  Once the OPTIONS request is done, then we'll restart this
                                     // operation.
-                                    std::string modified_url;
-                                    target = VerbsCache::GetUrlKey(target, modified_url);
                                     options_op = new CurlOptionsOp(iter->first, op, target, m_logger, op->GetConnCalloutFunc());
                                     std::shared_ptr<CurlOperation> new_op(options_op);
                                     auto curl = queue.GetHandle();
