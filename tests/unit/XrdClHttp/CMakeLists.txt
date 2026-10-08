@@ -94,9 +94,11 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
 endif()
 
 add_executable(xrdcl-http-unit-tests
+  ClientConfigTest.cc
   HeaderParserTest.cc
   OptionsCacheTest.cc
   ParseTimeoutTest.cc
+  SpaceResponseTest.cc
   TapeTest.cc
   WebDavParserTest.cc
 )
