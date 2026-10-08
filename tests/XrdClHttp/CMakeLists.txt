@@ -20,6 +20,14 @@ target_include_directories(xrdcl-http-unit-tests
 gtest_discover_tests(xrdcl-http-unit-tests TEST_PREFIX XrdClHttp::
   PROPERTIES DISCOVERY_TIMEOUT 10)
 
+add_executable(xrdcl-http-copy-response-test CopyResponseTest.cc)
+target_link_libraries(xrdcl-http-copy-response-test
+  XrdClHttpObj XrdTestUtils XrdXml CURL::libcurl GTest::gtest_main)
+target_include_directories(xrdcl-http-copy-response-test
+  PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../src")
+gtest_discover_tests(xrdcl-http-copy-response-test TEST_PREFIX XrdClHttp::
+  PROPERTIES DISCOVERY_TIMEOUT 10 TIMEOUT 20)
+
 # XrdClHttp integration tests depend on scitokens fixture for authentication
 if(NOT ENABLE_SERVER_TESTS OR NOT BUILD_SCITOKENS)
   return()
