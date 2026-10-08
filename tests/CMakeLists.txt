@@ -10,6 +10,7 @@ add_subdirectory(unit)
 add_subdirectory(integration)
 
 add_subdirectory( XrdSsiTests )
+add_subdirectory(XrdOfsTests)
 
 if(NOT ENABLE_SERVER_TESTS)
   return()
