@@ -98,6 +98,7 @@ add_executable(xrdcl-http-unit-tests
   HeaderParserTest.cc
   OptionsCacheTest.cc
   ParseTimeoutTest.cc
+  RedirectTest.cc
   SpaceResponseTest.cc
   TapeTest.cc
   WebDavParserTest.cc
