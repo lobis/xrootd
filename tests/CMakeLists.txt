@@ -42,6 +42,8 @@ endif()
 add_subdirectory(XrdClHttpCommon)
 add_subdirectory(XrdClHttp)
 
+add_subdirectory(XrdOfsTests)
+
 if(NOT ENABLE_SERVER_TESTS)
   return()
 endif()
