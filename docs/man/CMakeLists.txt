@@ -5,6 +5,7 @@ endif()
 set(MAN1PAGES
   xrdcp.1
   xrdfs.1
+  xrdtoken.1
   xrdmapc.1
   xrootd-config.1
 )
@@ -50,10 +51,10 @@ install(DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/man1
 
 install(CODE
   "execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink xrdcp.1 xrdcopy.1
-     WORKING_DIRECTORY \$ENV{DESTDIR}/${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_MANDIR}/man1)")
+     WORKING_DIRECTORY \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_MANDIR}/man1\")")
 
 if( BUILD_VOMS )
   install(CODE
     "execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink libXrdVoms.1 libXrdSecgsiVOMS.1
-       WORKING_DIRECTORY \$ENV{DESTDIR}/${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_MANDIR}/man1)")
+       WORKING_DIRECTORY \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_MANDIR}/man1\")")
 endif()

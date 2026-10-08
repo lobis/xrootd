@@ -22,6 +22,7 @@
 #define XRDCLHTTP_CURLOPS_HH
 
 #include "XrdClHttpConnectionCallout.hh"
+#include "XrdClHttpCopyResponse.hh"
 #include "XrdClHttpHeaderCallout.hh"
 #include "XrdClHttpResponseInfo.hh"
 #include "XrdClHttpTape.hh"
@@ -57,6 +58,26 @@ class CurlWorker;
 class File;
 class ResponseInfo;
 
+// Authentication and TLS settings encoded in client-only URL parameters.
+// These parameters are removed before a request is sent to the server.
+struct HttpClientConfig {
+    std::string bearer_token_file;
+    std::string client_cert;
+    std::string client_key;
+    std::string ca_file;
+    std::string ca_dir;
+    bool scoped_auth{false};
+    bool no_auth{false};
+    bool no_verify{false};
+};
+
+// Extract XrdClHttp client-only parameters from a URL.  All unrelated query
+// parameters retain their original spelling and order, which is required for
+// signed URLs.  If client_query is provided, it receives the extracted,
+// still-encoded parameter fragments for propagation by FileSystem operations.
+std::string ExtractHttpClientConfig(const std::string &url,
+    HttpClientConfig &config, std::string *client_query = nullptr);
+
 class CurlOperation {
 public:
     using HeaderList = std::vector<std::pair<std::string, std::string>>;
@@ -87,6 +108,9 @@ public:
     virtual void ReleaseHandle();
 
     virtual void Success() = 0;
+
+    // Some protocols return actionable response bodies with an HTTP error.
+    virtual bool AcceptErrorStatus(int) const { return false; }
 
     // Returns the connection callout function for this operation
     CreateConnCalloutType GetConnCalloutFunc() const {return m_conn_callout;}
@@ -185,6 +209,10 @@ public:
 
     // Returns the URL used by the current request.
     const std::string &GetUrl() const {return m_request_url;}
+
+    // Return object-scoped settings for internal sub-operations such as the
+    // authenticated OPTIONS probe.
+    const HttpClientConfig &GetClientConfig() const {return m_client_config;}
 
     // Returns the response info for the operation
     std::unique_ptr<ResponseInfo> GetResponseInfo();
@@ -408,6 +436,7 @@ private:
 
 protected:
     void SetDone(bool has_failed) {m_done = true; m_has_failed.store(has_failed, std::memory_order_release);}
+    HttpClientConfig m_client_config;
     const std::string m_url;
     // Multi-step operations retain their immutable input URL in m_url while
     // advancing the URL used for each individual HTTP request here.
@@ -434,6 +463,7 @@ public:
         m_parent(op),
         m_parent_curl(curl)
     {
+        m_client_config = op->GetClientConfig();
         m_operation_expiry = GetHeaderExpiry();
     }
 
@@ -497,8 +527,6 @@ protected:
     void SuccessImpl(bool returnObj);
 
 private:
-    // Parse the properties element of a PROPFIND response.
-    std::pair<int64_t, bool> ParseProp(TiXmlElement *prop);
     // Callback for writing the response body to the internal buffer.
     static size_t WriteCallback(char *buffer, size_t size, size_t nitems, void *this_ptr);
 
@@ -610,6 +638,44 @@ private:
     bool m_response_info{false}; // Indicate whether to give extended information in the response.
 };
 
+// Operation issuing a WebDAV MOVE request to the remote server.
+class CurlMoveOp final : public CurlOperation {
+public:
+    CurlMoveOp(XrdCl::ResponseHandler *handler, const std::string &source,
+        const std::string &destination, struct timespec timeout,
+        XrdCl::Log *logger, CreateConnCalloutType callout,
+        HeaderCallout *header_callout);
+
+    void Fail(uint16_t errCode, uint32_t errNum, const std::string &msg) override;
+    bool Setup(CURL *curl, CurlWorker &) override;
+    void Success() override;
+    void ReleaseHandle() override;
+
+    HttpVerb GetVerb() const override {return HttpVerb::MOVE;}
+
+private:
+    std::string m_destination;
+};
+
+// RFC 4331 quota query, returned using the XRootD QueryCode::Space format.
+class CurlSpaceOp final : public CurlOperation {
+public:
+    CurlSpaceOp(XrdCl::ResponseHandler *handler, const std::string &url,
+        struct timespec timeout, XrdCl::Log *logger,
+        CreateConnCalloutType callout, HeaderCallout *header_callout);
+
+    bool Setup(CURL *curl, CurlWorker &) override;
+    void Success() override;
+    void ReleaseHandle() override;
+    HttpVerb GetVerb() const override {return HttpVerb::PROPFIND;}
+
+private:
+    static size_t WriteCallback(char *buffer, size_t size, size_t nitems,
+        void *this_ptr);
+    std::string m_response;
+    const std::string m_request;
+};
+
 //  Cache control query
 //
 class CurlQueryOp final : public CurlStatOp {
@@ -678,6 +744,55 @@ public:
         CreateConnCalloutType callout, HeaderCallout *header_callout);
 };
 
+// Perform a bounded HTTPS token request and extract one string from its JSON
+// response.  Token discovery uses GET while token issuance uses POST; keeping
+// both in the same operation ensures they share the redirect and response-body
+// safety rules.
+class CurlTokenOp final : public CurlOperation {
+public:
+    CurlTokenOp(XrdCl::ResponseHandler *handler,
+        std::shared_ptr<XrdCl::ResponseHandler> handler_owner,
+        const std::string &url, HttpVerb verb, HeaderList headers,
+        const std::string &request_body, const std::string &response_key,
+        struct timespec timeout, XrdCl::Log *log,
+        CreateConnCalloutType callout);
+
+    CurlTokenOp(XrdCl::ResponseHandler *handler,
+        std::shared_ptr<XrdCl::ResponseHandler> handler_owner,
+        const std::string &url, HttpVerb verb, HeaderList headers,
+        const std::string &request_body, const std::string &response_key,
+        std::chrono::steady_clock::time_point expiry, XrdCl::Log *log,
+        CreateConnCalloutType callout);
+
+    // Convenience constructor for the direct storage macaroon workflow.
+    CurlTokenOp(XrdCl::ResponseHandler *handler, const std::string &url,
+        const std::string &request_body, struct timespec timeout,
+        XrdCl::Log *log, CreateConnCalloutType callout);
+
+    virtual ~CurlTokenOp() {}
+
+    bool Setup(CURL *curl, CurlWorker &) override;
+    void Success() override;
+    void ReleaseHandle() override;
+    RedirectAction Redirect(std::string &target) override;
+    bool AcceptErrorStatus(int status) const override {
+        return m_response_key == "$poll" &&
+               (status == 400 || status == 403 || status == 428);
+    }
+
+    virtual HttpVerb GetVerb() const override {return m_verb;}
+
+private:
+    static size_t WriteCallback(char *buffer, size_t size, size_t nitems,
+                                void *this_ptr);
+    size_t Write(const char *buffer, size_t length);
+
+    std::shared_ptr<XrdCl::ResponseHandler> m_handler_owner;
+    HttpVerb m_verb;
+    std::string m_request_body;
+    std::string m_response_key;
+    std::string m_response;
+};
 class CurlReadOp : public CurlOperation {
 public:
     CurlReadOp(XrdCl::ResponseHandler *handler, std::shared_ptr<XrdCl::ResponseHandler> default_handler,
@@ -713,7 +828,6 @@ private:
     void DeliverResponse();
 
     static size_t WriteCallback(char *buffer, size_t size, size_t nitems, void *this_ptr);
-    size_t Write(char *buffer, size_t size);
 
     // Extra response data from curl that overflowed the last buffer
     //
@@ -734,6 +848,9 @@ private:
     std::shared_ptr<XrdCl::ResponseHandler> m_default_handler;
 
 protected:
+    // Invoke the body callback; protected to allow operation regression tests.
+    size_t Write(char *buffer, size_t size);
+
     std::pair<uint64_t, uint64_t> m_op;
     uint64_t m_written{0}; // Bytes written into the current client-provided buffer
     char *m_buffer{nullptr}; // Buffer passed by XrdCl; we do not own it.
@@ -835,8 +952,10 @@ public:
 
 class CurlListdirOp final : public CurlOperation {
 public:
-    CurlListdirOp(XrdCl::ResponseHandler *handler, const std::string &url, const std::string &host_addr, bool response_info,
-        struct timespec timeout, XrdCl::Log *logger, CreateConnCalloutType callout, HeaderCallout *header_callout);
+    CurlListdirOp(XrdCl::ResponseHandler *handler, const std::string &url,
+        const std::string &parent, const std::string &host_addr,
+        bool response_info, struct timespec timeout, XrdCl::Log *logger,
+        CreateConnCalloutType callout, HeaderCallout *header_callout);
 
     virtual ~CurlListdirOp() {}
 
@@ -854,12 +973,6 @@ private:
         int64_t m_size{-1};
         time_t m_lastmodified{-1};
     };
-    // Parses the properties element of a PROPFIND response into a DavEntry object
-    //
-    // - prop: The properties element to parse
-    // - Returns: A pair containing the DavEntry object and a boolean indicating success or not
-    bool ParseProp(DavEntry &entry, TiXmlElement *prop);
-
     // Indicate whether the operation should use the extended "response info" object in response
     const bool m_response_info{false};
 
@@ -874,6 +987,9 @@ private:
 
     // Response body from the PROPFIND request.
     std::string m_response;
+
+    // Path whose entries are returned by the PROPFIND request.
+    std::string m_parent;
 
     // Host address (hostname:port) of the data federation
     std::string m_host_addr;
@@ -902,6 +1018,7 @@ public:
     virtual ~CurlCopyOp() {}
 
     bool Setup(CURL *curl, CurlWorker &) override;
+    void Fail(uint16_t errCode, uint32_t errNum, const std::string &msg) override;
     void Success() override;
     void ReleaseHandle() override;
 
@@ -920,25 +1037,13 @@ private:
     // Callback for writing the response body to the internal buffer.
     static size_t WriteCallback(char *buffer, size_t size, size_t nitems, void *this_ptr);
 
-    // Handle a line of information in the control channel.
-    void HandleLine(std::string_view line);
-
-    // Returns true if the control channel has not gotten data recently enough.
-    bool ControlChannelTimeoutExpired() const;
-
-    // Buffer of current response line
-    std::string m_line_buffer;
+    CopyResponse m_response;
 
     // Handler notified when a performance marker is received; not owned.
     XrdCl::ProgressHandler *m_progress_handler{nullptr};
 
-    // The performance marker indication of bytes processed.
-    off_t m_bytemark{-1};
-
-    // Whether the COPY operation indicated a success status in the control channel:
+    // The terminal result remains available to the filesystem TPC wrapper.
     bool m_sent_success{false};
-
-    // Failure string sent back in the control channel:
     std::string m_failure;
 };
 
@@ -962,6 +1067,7 @@ public:
     void Fail(uint16_t errCode, uint32_t errNum, const std::string &msg) override;
     bool Setup(CURL *curl, CurlWorker &) override;
     void Success() override;
+    RedirectAction Redirect(std::string &target) override;
     void ReleaseHandle() override;
     bool ContinueHandle() override;
 
@@ -997,6 +1103,11 @@ private:
 
     // The buffer of data to upload (if the CurlPutOp owns the buffer).
     XrdCl::Buffer m_owned_buffer;
+
+    // Retain the first write until redirects settle. The caller may free its
+    // original buffer immediately after the write acknowledgement.
+    XrdCl::Buffer m_replay_buffer;
+    bool m_can_replay{true};
 
     // The non-owned view of the data to upload.
     // This may reference m_owned_buffer or an externally-owned `const char *`.

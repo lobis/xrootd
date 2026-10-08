@@ -74,6 +74,52 @@ TEST(HeaderParser, AcceptsAdlerDigestAlias)
     checksums, XrdClHttp::ChecksumType::kADLER32, 4);
 }
 
+TEST(HeaderParser, AcceptsBase64Crc32Digest)
+{
+  XrdClHttp::ChecksumInfo checksums;
+  XrdClHttp::HeaderParser::ParseDigest("crc32=AAECAw==", checksums);
+  ExpectSequentialChecksum(
+    checksums, XrdClHttp::ChecksumType::kCRC32, 4);
+}
+
+TEST(HeaderParser, PreservesShortHexCrc32WhenBase64IsAmbiguous)
+{
+  XrdClHttp::ChecksumInfo checksums;
+  XrdClHttp::HeaderParser::ParseDigest("crc32=AAAAAA", checksums);
+
+  ASSERT_TRUE(checksums.IsSet(XrdClHttp::ChecksumType::kCRC32));
+  const auto &value = checksums.Get(XrdClHttp::ChecksumType::kCRC32);
+  EXPECT_EQ(value[0], 0);
+  EXPECT_EQ(value[1], 0xaa);
+  EXPECT_EQ(value[2], 0xaa);
+  EXPECT_EQ(value[3], 0xaa);
+}
+
+TEST(HeaderParser, UsesPaddingToDisambiguateBase64Crc32)
+{
+  XrdClHttp::ChecksumInfo checksums;
+  XrdClHttp::HeaderParser::ParseDigest("crc32=AAAAAA==", checksums);
+
+  ASSERT_TRUE(checksums.IsSet(XrdClHttp::ChecksumType::kCRC32));
+  const auto &value = checksums.Get(XrdClHttp::ChecksumType::kCRC32);
+  EXPECT_EQ(value[0], 0);
+  EXPECT_EQ(value[1], 0);
+  EXPECT_EQ(value[2], 0);
+  EXPECT_EQ(value[3], 0);
+}
+
+TEST(HeaderParser, RejectsMalformedCrc32Digest)
+{
+  for(const auto *digest : {"crc32=", "crc32=0001020300", "crc32=AAEC?w==",
+                           "crc32=AAECAw", "crc32=AAECAw=", "crc32=AAECAw===",
+                           "crc32=AAECAwA="})
+  {
+    XrdClHttp::ChecksumInfo checksums;
+    XrdClHttp::HeaderParser::ParseDigest(digest, checksums);
+    EXPECT_FALSE(checksums.IsSet(XrdClHttp::ChecksumType::kCRC32)) << digest;
+  }
+}
+
 TEST(HeaderParser, BuildsChecksumNegotiationValues)
 {
   EXPECT_EQ(XrdClHttp::GetTypeFromString("adler"),
@@ -83,4 +129,49 @@ TEST(HeaderParser, BuildsChecksumNegotiationValues)
   EXPECT_EQ(XrdClHttp::HeaderParser::ChecksumTypeToDigestName(
               XrdClHttp::ChecksumType::kAll),
             "adler32,crc32,CRC32c,MD5,SHA,SHA-256");
+}
+
+TEST(HeaderParser, ParsesUnsatisfiedRangeWithoutChangingBodyLength)
+{
+  XrdClHttp::HeaderParser parser;
+  ASSERT_TRUE(parser.Parse("HTTP/1.1 416 Range Not Satisfiable\r\n"));
+  ASSERT_TRUE(parser.Parse("Content-Length: 12\r\n"));
+  ASSERT_TRUE(parser.Parse("Content-Range: bytes */32\r\n"));
+  ASSERT_TRUE(parser.GetUnsatisfiedRangeLength());
+  EXPECT_EQ(*parser.GetUnsatisfiedRangeLength(), 32);
+  EXPECT_EQ(parser.GetContentLength(), 12);
+}
+
+TEST(HeaderParser, RejectsInvalidUnsatisfiedRangeLengths)
+{
+  for (const auto &length : {"", "*", "-1", "+32", "32x", "32/64",
+                             "18446744073709551616"}) {
+    SCOPED_TRACE(length);
+    XrdClHttp::HeaderParser parser;
+    ASSERT_TRUE(parser.Parse("HTTP/1.1 416 Range Not Satisfiable\r\n"));
+    EXPECT_FALSE(parser.Parse(std::string("Content-Range: bytes */") + length + "\r\n"));
+    EXPECT_FALSE(parser.GetUnsatisfiedRangeLength());
+  }
+}
+
+TEST(HeaderParser, ClearsUnsatisfiedRangeLengthForNextResponse)
+{
+  XrdClHttp::HeaderParser parser;
+  ASSERT_TRUE(parser.Parse("HTTP/1.1 416 Range Not Satisfiable\r\n"));
+  ASSERT_TRUE(parser.Parse("Content-Range: bytes */0\r\n"));
+  ASSERT_TRUE(parser.GetUnsatisfiedRangeLength());
+  EXPECT_EQ(*parser.GetUnsatisfiedRangeLength(), 0);
+  ASSERT_TRUE(parser.Parse("\r\n"));
+  ASSERT_TRUE(parser.Parse("HTTP/1.1 416 Range Not Satisfiable\r\n"));
+  EXPECT_FALSE(parser.GetUnsatisfiedRangeLength());
+}
+
+TEST(HeaderParser, PreservesSatisfiedRangeParsing)
+{
+  XrdClHttp::HeaderParser parser;
+  ASSERT_TRUE(parser.Parse("HTTP/1.1 206 Partial Content\r\n"));
+  ASSERT_TRUE(parser.Parse("Content-Range: bytes 8-11/32\r\n"));
+  EXPECT_EQ(parser.GetOffset(), 8);
+  EXPECT_EQ(parser.GetContentLength(), 4);
+  EXPECT_FALSE(parser.GetUnsatisfiedRangeLength());
 }

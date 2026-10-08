@@ -42,6 +42,7 @@
 
 #include <fcntl.h>
 #include <fstream>
+#include <sys/stat.h>
 #ifdef __APPLE__
 #include <pthread.h>
 #else
@@ -53,6 +54,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <cctype>
+#include <charconv>
 #include <cstdlib>
 #include <sstream>
 #include <stdexcept>
@@ -253,7 +255,8 @@ std::pair<uint16_t, uint32_t> XrdClHttp::HTTPStatusConvert(unsigned status) {
         case 451: // Unavailable For Legal Reasons
             return std::make_pair(XrdCl::errErrorResponse, kXR_Impossible);
         case 500: // Internal Server Error
-            return std::make_pair(XrdCl::errErrorResponse, kXR_ServerError);
+            // This is a failed storage operation, not EFAULT (Bad address).
+            return std::make_pair(XrdCl::errErrorResponse, kXR_IOError);
         case 501: // Not Implemented
             return std::make_pair(XrdCl::errErrorResponse, kXR_Unsupported);
         case 502: // Bad Gateway
@@ -384,6 +387,7 @@ bool HeaderParser::Parse(const std::string &header_line)
 
     if (!m_recv_status_line) {
         m_recv_status_line = true;
+        m_unsatisfied_range_length.reset();
 
         std::stringstream ss(header_line);
         std::string item;
@@ -446,7 +450,8 @@ bool HeaderParser::Parse(const std::string &header_line)
         std::string_view val(header_value);
         while (!val.empty()) {
             auto found = val.find(',');
-            auto method = val.substr(0, found);
+            std::string method(val.substr(0, found));
+            XrdCl::Utils::Trim(method);
             if (method == "PROPFIND") {
                 auto new_verbs = static_cast<unsigned>(m_allow_verbs) | static_cast<unsigned>(VerbsCache::HttpVerb::kPROPFIND);
                 m_allow_verbs = static_cast<VerbsCache::HttpVerb>(new_verbs);
@@ -491,7 +496,19 @@ bool HeaderParser::Parse(const std::string &header_line)
         if (found == std::string::npos) {
             return false;
         }
+        m_unsatisfied_range_length.reset();
         auto incl_range = range_resp.substr(0, found);
+        if (incl_range == "*") {
+            auto complete_length = range_resp.substr(found + 1);
+            uint64_t length;
+            auto result = std::from_chars(complete_length.data(),
+                complete_length.data() + complete_length.size(), length);
+            if (result.ec != std::errc() || result.ptr != complete_length.data() + complete_length.size()) {
+                return false;
+            }
+            m_unsatisfied_range_length = length;
+            return true;
+        }
         found = incl_range.find("-");
         if (found == std::string::npos) {
             return false;
@@ -578,6 +595,13 @@ void HeaderParser::ParseDigest(const std::string &digest, XrdClHttp::ChecksumInf
         if (digest_lower == "adler" || digest_lower == "adler32") {
             setHex32(ChecksumType::kADLER32);
         } else if (digest_lower == "crc32") {
+            // Accept padded base64 alongside the existing hexadecimal form.
+            // Require "==" to distinguish a four-byte base64 checksum from
+            // short hexadecimal values, which may also be valid unpadded base64.
+            if (value.size() == 8 && value[6] == '=' && value[7] == '=') {
+                setBase64(ChecksumType::kCRC32);
+                continue;
+            }
             setHex32(ChecksumType::kCRC32);
         } else if (digest_lower == "md5") {
             setBase64(ChecksumType::kMD5);
@@ -740,13 +764,12 @@ int DumpHeader(CURL *handle, curl_infotype type, char *data, size_t size, void *
 
 // Trim left and right side of a string_view for space characters
 std::string_view XrdClHttp::trim_view(const std::string_view &input_view) {
-    auto view = XrdClHttp::ltrim_view(input_view);
-    for (size_t idx = 0; idx < input_view.size(); idx++) {
-        if (!isspace(view[view.size() - 1 - idx])) {
-            return view.substr(0, view.size() - idx);
-        }
-    }
-    return "";
+    auto view = input_view;
+    while (!view.empty() && isspace(static_cast<unsigned char>(view.front())))
+        view.remove_prefix(1);
+    while (!view.empty() && isspace(static_cast<unsigned char>(view.back())))
+        view.remove_suffix(1);
+    return view;
 }
 
 // Trim the left side of a string_view for space
@@ -759,14 +782,8 @@ std::string_view XrdClHttp::ltrim_view(const std::string_view &input_view) {
     return "";
 }
 
-void
-XrdClHttp::ConfigureHandle(CURL *curl, bool verbose) {
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "xrdcl-http/" XrdVERSION);
-    curl_easy_setopt(curl, CURLOPT_DEBUGFUNCTION, DumpHeader);
-    curl_easy_setopt(curl, CURLOPT_DEBUGDATA, XrdCl::DefaultEnv::GetLog());
-    if (verbose)
-        curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
-
+std::pair<std::string, std::string>
+XrdClHttp::DefaultCertificateAuthorities() {
     auto env = XrdCl::DefaultEnv::GetEnv();
     std::string ca_file;
     if (!env->GetString("HttpCertFile", ca_file) || ca_file.empty()) {
@@ -775,15 +792,37 @@ XrdClHttp::ConfigureHandle(CURL *curl, bool verbose) {
             ca_file = std::string(x509_ca_file);
         }
     }
-    if (!ca_file.empty()) {
-        curl_easy_setopt(curl, CURLOPT_CAINFO, ca_file.c_str());
-    }
     std::string ca_dir;
     if (!env->GetString("HttpCertDir", ca_dir) || ca_dir.empty()) {
         char *x509_ca_dir = getenv("X509_CERT_DIR");
         if (x509_ca_dir) {
             ca_dir = std::string(x509_ca_dir);
         }
+    }
+    if (ca_dir.empty() && ca_file.empty()) {
+        // Grid CA packages install hashed certificates here. Preserve explicit
+        // trust settings and libcurl's normal CA bundle on other systems.
+        constexpr auto grid_ca_dir = "/etc/grid-security/certificates";
+        struct stat info;
+        if (stat(grid_ca_dir, &info) == 0 && S_ISDIR(info.st_mode)
+            && access(grid_ca_dir, R_OK | X_OK) == 0) {
+            ca_dir = grid_ca_dir;
+        }
+    }
+    return {ca_file, ca_dir};
+}
+
+void
+XrdClHttp::ConfigureHandle(CURL *curl, bool verbose) {
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "xrdcl-http/" XrdVERSION);
+    curl_easy_setopt(curl, CURLOPT_DEBUGFUNCTION, DumpHeader);
+    curl_easy_setopt(curl, CURLOPT_DEBUGDATA, XrdCl::DefaultEnv::GetLog());
+    if (verbose)
+        curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
+
+    auto [ca_file, ca_dir] = DefaultCertificateAuthorities();
+    if (!ca_file.empty()) {
+        curl_easy_setopt(curl, CURLOPT_CAINFO, ca_file.c_str());
     }
     if (!ca_dir.empty()) {
         curl_easy_setopt(curl, CURLOPT_CAPATH, ca_dir.c_str());
@@ -920,6 +959,46 @@ HandlerQueue::Produce(std::shared_ptr<CurlOperation> handler)
     lk.unlock();
     m_consumer_cv.notify_one();
     m_ops_produced.fetch_add(1, std::memory_order_relaxed);
+}
+
+bool
+HandlerQueue::TryProduce(std::shared_ptr<CurlOperation> handler)
+{
+    const auto handler_expiry = handler->GetOperationExpiry();
+    std::unique_lock<std::mutex> lk{m_mutex};
+    if (m_shutdown || m_ops.size() >= m_max_pending_ops ||
+        std::chrono::steady_clock::now() > handler_expiry) {
+        m_ops_rejected.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+
+    try {
+        m_ops.push_back(std::move(handler));
+    } catch (...) {
+        m_ops_rejected.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+
+    char ready[] = "1";
+    while (true) {
+        auto result = write(m_write_fd, ready, 1);
+        if (result == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
+            if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                m_ops.pop_back();
+                m_ops_rejected.fetch_add(1, std::memory_order_relaxed);
+                return false;
+            }
+        }
+        break;
+    }
+
+    lk.unlock();
+    m_consumer_cv.notify_one();
+    m_ops_produced.fetch_add(1, std::memory_order_relaxed);
+    return true;
 }
 
 std::shared_ptr<CurlOperation>
@@ -1327,13 +1406,10 @@ CurlWorker::Run() {
             // If the operation requires the result of the OPTIONS verb to function, then
             // we add that to the multi-handle instead, chaining the two calls together.
             if (op->RequiresOptions()) {
-                std::string modified_url;
                 std::shared_ptr<CurlOptionsOp> options_op(
                     new CurlOptionsOp(
                         curl, op,
-                        std::string(
-                            VerbsCache::GetUrlKey(op->GetUrl(), modified_url)
-                        ),
+                        op->GetUrl(),
                         m_logger, op->GetConnCalloutFunc()
                     )
                 );
@@ -1564,7 +1640,8 @@ CurlWorker::Run() {
                     mres = CURLM_BAD_EASY_HANDLE;
                     break;
                 }
-                auto iter = m_op_map.find(msg->easy_handle);
+                CURL *const easy_handle = msg->easy_handle;
+                auto iter = m_op_map.find(easy_handle);
                 if (iter == m_op_map.end()) {
                     m_logger->Error(kLogXrdClHttp, "Logic error: got a callback for an entry that doesn't exist");
                     mres = CURLM_BAD_EASY_HANDLE;
@@ -1574,18 +1651,19 @@ CurlWorker::Run() {
                 auto res = msg->data.result;
                 bool keep_handle = false;
                 bool waiting_on_callout = false;
+                bool options_pending = false;
                 if (res == CURLE_OK) {
                     auto sc = op->GetStatusCode();
                     OpRecord(*op, OpKind::Finish);
-                    if (HTTPStatusIsError(sc)) {
+                    if (HTTPStatusIsError(sc) && !op->AcceptErrorStatus(sc)) {
                         auto httpErr = HTTPStatusConvert(sc);
                         op->Fail(httpErr.first, httpErr.second, op->GetStatusMessage());
                         op->ReleaseHandle();
                         // If this was a failed CurlOptionsOp, then we re-activate the parent handle.
                         // If the parent handle was stopped at a redirect that now returns failure, then
                         // we'll clean it up.
-                        CurlOptionsOp *options_op = nullptr;
-                        if ((options_op = dynamic_cast<CurlOptionsOp*>(op.get())) != nullptr) {
+                        auto options_op = std::dynamic_pointer_cast<CurlOptionsOp>(op);
+                        if (options_op) {
                             auto parent_op = options_op->GetOperation();
                             bool parent_op_failed = false;
                             if (parent_op->IsRedirect()) {
@@ -1607,25 +1685,40 @@ CurlWorker::Run() {
                             }
                         }
                         // The curl operation was successful, it's just the HTTP request failed; recycle the handle.
-                        queue.RecycleHandle(iter->first);
+                        queue.RecycleHandle(easy_handle);
                     } else {
-                        CurlOptionsOp *options_op = nullptr;
+                        auto options_op = std::dynamic_pointer_cast<CurlOptionsOp>(op);
+                        bool parent_op_failed = false;
                         // If this was a successful OPTIONS op, invoke the parent operation.
-                        if ((options_op = dynamic_cast<CurlOptionsOp*>(op.get()))) {
+                        if (options_op) {
                             options_op->Success();
                             options_op->ReleaseHandle();
                             // Note: op is scoped external to the conditional block
                             op = options_op->GetOperation();
                             op->OptionsDone();
                             OpRecord(*op, OpKind::Start);
-                            curl_multi_add_handle(multi_handle, options_op->GetParentCurlHandle());
-                            curl_multi_remove_handle(multi_handle, iter->first);
-                            queue.RecycleHandle(iter->first);
+                            auto parent_handle = options_op->GetParentCurlHandle();
+                            auto parent_res = curl_multi_add_handle(multi_handle, parent_handle);
+                            if (parent_res != CURLM_OK) {
+                                m_logger->Debug(kLogXrdClHttp,
+                                    "Unable to re-add the parent operation to the curl multi-handle: %s",
+                                    curl_multi_strerror(parent_res));
+                                op->Fail(XrdCl::errInternal, parent_res,
+                                    "Unable to re-add the parent operation to the curl multi-handle");
+                                OpRecord(*op, OpKind::Error);
+                                curl_multi_remove_handle(multi_handle, parent_handle);
+                                if (m_op_map.erase(parent_handle)) {
+                                    running_handles -= 1;
+                                }
+                                parent_op_failed = true;
+                            }
+                            curl_multi_remove_handle(multi_handle, easy_handle);
+                            queue.RecycleHandle(easy_handle);
                         }
                         // Check to see if the operation ended in a redirect (note: this might)
                         // be invoked a second time if this was the parent operation of an OPTIONS
                         // op.
-                        if (op->IsRedirect()) {
+                        if (!parent_op_failed && op->IsRedirect()) {
                             std::string target;
                             switch (op->Redirect(target)) {
                                 case CurlOperation::RedirectAction::Fail:
@@ -1636,6 +1729,11 @@ CurlWorker::Run() {
                                         // In the non-OPTIONS case, we never recorded a second start and
                                         // don't need a matching failure.
                                         OpRecord(*op, OpKind::Error);
+                                        auto parent_handle = options_op->GetParentCurlHandle();
+                                        curl_multi_remove_handle(multi_handle, parent_handle);
+                                        if (m_op_map.erase(parent_handle)) {
+                                            running_handles -= 1;
+                                        }
                                     }
                                     keep_handle = false;
                                     break;
@@ -1655,16 +1753,13 @@ CurlWorker::Run() {
                                     // operation can continue.  Inject a new CurlOptionsOp and chain it to the one
                                     // being processed.  Once the OPTIONS request is done, then we'll restart this
                                     // operation.
-                                    std::string modified_url;
-                                    target = VerbsCache::GetUrlKey(target, modified_url);
-                                    options_op = new CurlOptionsOp(iter->first, op, target, m_logger, op->GetConnCalloutFunc());
-                                    std::shared_ptr<CurlOperation> new_op(options_op);
+                                    auto new_op = std::make_shared<CurlOptionsOp>(
+                                        easy_handle, op, target, m_logger, op->GetConnCalloutFunc());
                                     auto curl = queue.GetHandle();
                                     if (curl == nullptr) {
                                         m_logger->Debug(kLogXrdClHttp, "Unable to allocate a curl handle");
                                         op->Fail(XrdCl::errInternal, ENOMEM, "Unable to get allocate a curl handle");
                                         keep_handle = false;
-                                        options_op = nullptr;
                                         break;
                                     }
                                     OpRecord(*new_op, OpKind::Start);
@@ -1672,14 +1767,20 @@ CurlWorker::Run() {
                                         auto rv = new_op->Setup(curl, *this);
                                         if (!rv) {
                                             m_logger->Debug(kLogXrdClHttp,  "Unable to configure a curl handle for OPTIONS");
+                                            new_op->Fail(XrdCl::errInternal, ENOMEM,
+                                                "Failed to setup the curl handle for the OPTIONS operation");
+                                            OpRecord(*new_op, OpKind::Error);
+                                            op->Fail(XrdCl::errInternal, ENOMEM,
+                                                "Failed to setup the curl handle for the OPTIONS operation");
                                             keep_handle = false;
-                                            options_op = nullptr;
                                             break;
                                         }
                                     } catch (...) {
                                         m_logger->Debug(kLogXrdClHttp, "Unable to setup the curl handle for the OPTIONS operation");
                                         new_op->Fail(XrdCl::errInternal, ENOMEM, "Failed to setup the curl handle for the OPTIONS operation");
                                         OpRecord(*new_op, OpKind::Error);
+                                        op->Fail(XrdCl::errInternal, ENOMEM,
+                                            "Failed to setup the curl handle for the OPTIONS operation");
                                         keep_handle = false;
                                         break;
                                     }
@@ -1688,14 +1789,18 @@ CurlWorker::Run() {
                                     auto mres = curl_multi_add_handle(multi_handle, curl);
                                     if (mres != CURLM_OK) {
                                         m_logger->Debug(kLogXrdClHttp, "Unable to add OPTIONS operation to the curl multi-handle: %s", curl_multi_strerror(mres));
+                                        new_op->Fail(XrdCl::errInternal, mres,
+                                            "Unable to add OPTIONS operation to the curl multi-handle");
                                         op->Fail(XrdCl::errInternal, mres, "Unable to add OPTIONS operation to the curl multi-handle");
                                         OpRecord(*new_op, OpKind::Error);
+                                        m_op_map.erase(curl);
                                         break;
                                     }
                                     running_handles += 1;
                                     m_logger->Debug(kLogXrdClHttp, "Invoking the OPTIONS operation before redirect to %s", target.c_str());
-                                    // The original curl operation needs to be kept around.  Note that because options_op
-                                    // is non-nil, we won't re-add the handle to the multi-handle.
+                                    // The original curl operation needs to be kept around without re-adding its handle
+                                    // to the multi-handle until the OPTIONS operation completes.
+                                    options_pending = true;
                                     keep_handle = true;
                                 }
                             }
@@ -1703,35 +1808,34 @@ CurlWorker::Run() {
                             if ((waiting_on_callout = callout_socket >= 0)) {
                                 auto expiry = time(nullptr) + 20;
                                 m_logger->Debug(kLogXrdClHttp, "Creating a callout wait request on socket %d", callout_socket);
-                                broker_reqs[callout_socket] = {iter->first, expiry};
+                                broker_reqs[callout_socket] = {easy_handle, expiry};
                                 m_conncall_req.fetch_add(1, std::memory_order_relaxed);
                             }
-                        } else if (options_op) {
-                            // In this case, the OPTIONS call happened before the parent operation was started.
-                            curl_multi_add_handle(multi_handle, options_op->GetParentCurlHandle());
                         }
                         if (keep_handle) {
-                            curl_multi_remove_handle(multi_handle, iter->first);
-                            if (!waiting_on_callout && !options_op) {
-                                curl_multi_add_handle(multi_handle, iter->first);
+                            curl_multi_remove_handle(multi_handle, easy_handle);
+                            if (!waiting_on_callout && !options_op && !options_pending) {
+                                curl_multi_add_handle(multi_handle, easy_handle);
                             }
                         } else if (!options_op) {
                             // A multi-step operation may reset and reconfigure its
                             // easy handle from Success().  Remove the completed
                             // request before invoking it so libcurl no longer owns
                             // the request configuration being replaced.
-                            curl_multi_remove_handle(multi_handle, iter->first);
-                            op->Success();
+                            curl_multi_remove_handle(multi_handle, easy_handle);
+                            if (!op->IsDone()) {
+                                op->Success();
+                            }
                             if (op->IsDone()) {
                                 op->ReleaseHandle();
                                 // If the handle was successful, then we can recycle it.
-                                queue.RecycleHandle(iter->first);
+                                queue.RecycleHandle(easy_handle);
                             } else {
                                 // Multi-step operations may configure their easy handle
                                 // for another request from Success().  Keep ownership of
                                 // the handle and run the next request through this worker's
                                 // multi-handle like any other operation.
-                                auto next_res = curl_multi_add_handle(multi_handle, iter->first);
+                                auto next_res = curl_multi_add_handle(multi_handle, easy_handle);
                                 if (next_res == CURLM_OK) {
                                     keep_handle = true;
                                     OpRecord(*op, OpKind::Start);
@@ -1740,7 +1844,7 @@ CurlWorker::Run() {
                                         "Unable to add the next operation request to the curl multi-handle");
                                     OpRecord(*op, OpKind::Error);
                                     op->ReleaseHandle();
-                                    queue.RecycleHandle(iter->first);
+                                    queue.RecycleHandle(easy_handle);
                                 }
                             }
                         }
@@ -1757,10 +1861,10 @@ CurlWorker::Run() {
                         op->ReleaseHandle();
                         keep_handle = false;
                     } else {
-                        curl_multi_remove_handle(multi_handle, iter->first);
+                        curl_multi_remove_handle(multi_handle, easy_handle);
                         auto expiry = time(nullptr) + 20;
                         m_logger->Debug(kLogXrdClHttp, "Curl operation requires a new TCP socket; waiting for callout to respond on socket %d", wait_socket);
-                        broker_reqs[wait_socket] = {iter->first, expiry};
+                        broker_reqs[wait_socket] = {easy_handle, expiry};
                         m_conncall_req.fetch_add(1, std::memory_order_relaxed);
                     }
                 } else {
@@ -1803,8 +1907,8 @@ CurlWorker::Run() {
                             OpRecord(*op, OpKind::Error);
                             break;
                         };
-                        CurlOptionsOp *options_op = nullptr;
-                        if ((options_op = dynamic_cast<CurlOptionsOp*>(op.get())) != nullptr) {
+                        auto options_op = std::dynamic_pointer_cast<CurlOptionsOp>(op);
+                        if (options_op) {
                             auto parent_op = options_op->GetOperation();
                             bool parent_op_failed = false;
                             if (parent_op->IsRedirect()) {
@@ -1836,8 +1940,8 @@ CurlWorker::Run() {
                         m_logger->Debug(kLogXrdClHttp, "Curl generated an error: %s (%d)", fail_err.c_str(), res);
                         op->Fail(xrdCode.first, xrdCode.second, fail_err);
                         OpRecord(*op, OpKind::Error);
-                        CurlOptionsOp *options_op = nullptr;
-                        if ((options_op = dynamic_cast<CurlOptionsOp*>(op.get())) != nullptr) {
+                        auto options_op = std::dynamic_pointer_cast<CurlOptionsOp>(op);
+                        if (options_op) {
                             auto parent_op = options_op->GetOperation();
                             bool parent_op_failed = false;
                             if (parent_op->IsRedirect()) {
@@ -1861,30 +1965,36 @@ CurlWorker::Run() {
                     op->ReleaseHandle();
                 }
                 if (!keep_handle) {
-                    curl_multi_remove_handle(multi_handle, iter->first);
+                    curl_multi_remove_handle(multi_handle, easy_handle);
                     if (res != CURLE_OK) {
-                        curl_easy_cleanup(iter->first);
+                        curl_easy_cleanup(easy_handle);
                     }
                     for (auto &req : broker_reqs) {
-                        if (req.second.curl == iter->first) {
+                        if (req.second.curl == easy_handle) {
                             m_logger->Warning(kLogXrdClHttp, "Curl handle finished while a broker operation was outstanding");
                             m_conncall_errors.fetch_add(1, std::memory_order_relaxed);
                         }
                     }
-                    m_op_map.erase(iter);
+                    m_op_map.erase(easy_handle);
                     running_handles -= 1;
                 }
             }
         } while (msg);
     }
 
-    for (auto map_entry : m_op_map) {
-        if (mres) {
-            map_entry.second.first->Fail(XrdCl::errInternal, mres, curl_multi_strerror(mres));
-            OpRecord(*map_entry.second.first, OpKind::Error);
+    for (const auto &map_entry : m_op_map) {
+        auto &op = map_entry.second.first;
+        if (!op->IsDone()) {
+            const auto err_num = mres == CURLM_OK ? ECANCELED : static_cast<int>(mres);
+            const std::string err_msg = mres == CURLM_OK
+                ? "Curl worker shut down before the operation completed"
+                : curl_multi_strerror(mres);
+            op->Fail(XrdCl::errInternal, err_num, err_msg);
+            OpRecord(*op, OpKind::Error);
         }
         if (multi_handle && map_entry.first) curl_multi_remove_handle(multi_handle, map_entry.first);
     }
+    m_op_map.clear();
 
     m_queue->ReleaseHandles();
     curl_multi_cleanup(multi_handle);

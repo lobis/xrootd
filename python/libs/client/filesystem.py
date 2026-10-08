@@ -23,23 +23,91 @@
 #-------------------------------------------------------------------------------
 from __future__ import absolute_import, division, print_function
 
+import errno
+import posixpath
+
 from pyxrootd import client
+from XRootD.client.auth import AuthContext
 from XRootD.client.responses import XRootDStatus, StatInfo, StatInfoVFS
+from XRootD.client.responses import XRootDNotFoundError, raise_as_oserror
+from XRootD.client.responses import checksum_query_path, parse_checksum
 from XRootD.client.responses import LocationInfo, DirectoryList, ProtocolInfo
-from XRootD.client.utils import CallbackWrapper
-from XRootD.client.flags import AccessMode
+from XRootD.client.responses import ChecksumInfo
+from XRootD.client.utils import CallbackWrapper, _xattr_mapping, _xattr_value
+from XRootD.client.url import URL
+from XRootD.client.flags import AccessMode, DirListFlags, MkDirFlags
+from XRootD.client.flags import QueryCode, StatInfoFlags
+
+
+class DirectoryEntry(object):
+  """A directory entry with its remote path and stat information."""
+
+  def __init__(self, parent, entry, statinfo):
+    self.name = entry.name
+    base, separator, params = parent.partition('?')
+    prefix = base.rstrip('/')
+    if not prefix and base.startswith('//'):
+      prefix = '/'
+    self.path = prefix + '/' + self.name
+    if separator:
+      self.path += '?' + params
+    self.hostaddr = getattr(entry, 'hostaddr', None)
+    self.statinfo = statinfo
+
+  def is_dir(self):
+    return bool(self.statinfo.flags & StatInfoFlags.IS_DIR)
+
+  def is_file(self):
+    return not bool(self.statinfo.flags &
+                    (StatInfoFlags.IS_DIR | StatInfoFlags.OTHER))
+
+  def stat(self):
+    return self.statinfo
+
+  @property
+  def size(self):
+    return int(self.statinfo.size)
+
+
+class RemoveTreeResult(object):
+  """Counts of files, directories, and bytes removed by ``remove_tree``."""
+
+  def __init__(self):
+    self.files_removed = 0
+    self.directories_removed = 0
+    self.size_removed = 0
+
+  def as_dict(self):
+    return {'FilesRemoved': self.files_removed,
+            'DirectoriesRemoved': self.directories_removed,
+            'SizeRemoved': self.size_removed}
 
 class FileSystem(object):
   """Interact with an ``xrootd`` server to perform filesystem-based operations
   such as copying files, creating directories, changing file permissions,
   listing directories, etc.
 
-  :param url: The URL of the server to connect with
-  :type  url: string
+  :param  url: The URL of the server to connect with
+  :type   url: string
+  :param auth: Optional object-scoped authentication context
+  :type  auth: :class:`XRootD.client.AuthContext`
   """
 
-  def __init__(self, url):
+  def __init__(self, url, auth=None):
+    if auth is not None and not isinstance(auth, AuthContext):
+      raise TypeError('auth must be an AuthContext')
+    self.__auth = auth
+    if auth is not None:
+      url = auth.apply(url)
     self.__fs = client.FileSystem(url)
+
+  def __enter__(self):
+    """Return this filesystem instance for use in a ``with`` statement."""
+    return self
+
+  def __exit__(self, exc_type, exc_value, traceback):
+    """Exit a ``with`` statement without suppressing exceptions."""
+    return None
 
   @property
   def url(self):
@@ -65,6 +133,9 @@ class FileSystem(object):
     :returns:      tuple containing :mod:`XRootD.client.responses.XRootDStatus`
                    object and None
     """
+    if self.__auth is not None:
+      source = self.__auth.apply(source)
+      target = self.__auth.apply(target)
     result = self.__fs.copy(source=source, target=target, force=force)[0]
     return XRootDStatus(result), None
 
@@ -141,6 +212,23 @@ class FileSystem(object):
     status, response = self.__fs.query(querycode, arg, timeout)
     return XRootDStatus(status), response
 
+  def checksum_info(self, path, timeout=0, callback=None):
+    """Obtain a structured checksum for a path.
+
+    :param path: path to the file
+    :type  path: string
+    :returns:    tuple containing :mod:`XRootD.client.responses.XRootDStatus`
+                 object and :mod:`XRootD.client.responses.ChecksumInfo` object
+    """
+    if callback:
+      callback = CallbackWrapper(callback, ChecksumInfo)
+      return XRootDStatus(self.__fs.query(QueryCode.CHECKSUM, path, timeout,
+                                          callback))
+
+    status, response = self.__fs.query(QueryCode.CHECKSUM, path, timeout)
+    if response: response = ChecksumInfo(response)
+    return XRootDStatus(status), response
+
   def truncate(self, path, size, timeout=0, callback=None):
     """Truncate a file.
 
@@ -196,6 +284,22 @@ class FileSystem(object):
 
     status, response = self.__fs.mkdir(path, flags, mode, timeout)
     return XRootDStatus(status), None
+
+  def mkdir_p(self, path, flags=0, mode=0, timeout=0, callback=None):
+    """Create a directory and any missing parent directories.
+
+    This is a convenience wrapper around :meth:`mkdir` using
+    :data:`XRootD.client.flags.MkDirFlags.MAKEPATH`.
+
+    :param  path: path to the directory to create
+    :type   path: string
+    :param flags: Additional `ORed` flags from
+                  :mod:`XRootD.client.flags.MkDirFlags`
+    :param  mode: the initial file access mode, an `ORed` combination of
+                  :mod:`XRootD.client.flags.AccessMode`
+    """
+    return self.mkdir(path, flags | MkDirFlags.MAKEPATH, mode, timeout,
+                      callback)
 
   def rmdir(self, path, timeout=0, callback=None):
     """Remove a directory.
@@ -312,6 +416,126 @@ class FileSystem(object):
     if response: response = DirectoryList(response)
     return XRootDStatus(status), response
 
+  def stat_info(self, path, timeout=0):
+    """Return native stat metadata; raise an OSError subclass on failure.
+
+    Unlike ``stat``, this convenience method does not return a status tuple.
+    """
+    status, info = self.stat(path, timeout=timeout)
+    raise_as_oserror(status, path)
+    return info
+
+  def unlink(self, path, missing_ok=False, timeout=0):
+    """Remove one file, optionally ignoring a missing path."""
+    status, _ = self.rm(path, timeout=timeout)
+    try:
+      raise_as_oserror(status, path)
+    except FileNotFoundError:
+      if not missing_ok:
+        raise
+
+  def _stat_if_exists(self, path, timeout=0):
+    status, info = self.stat(path, timeout=timeout)
+    if status.ok:
+      return info
+    if isinstance(status.exception(), XRootDNotFoundError):
+      return None
+    raise_as_oserror(status, path)
+
+  def exists(self, path, timeout=0):
+    """Return whether a path exists; raise for errors other than not found."""
+    return self._stat_if_exists(path, timeout) is not None
+
+  def is_file(self, path, timeout=0):
+    """Return whether a path is a regular file."""
+    info = self._stat_if_exists(path, timeout)
+    return bool(info and not info.flags & (StatInfoFlags.IS_DIR |
+                                           StatInfoFlags.OTHER))
+
+  def is_dir(self, path, timeout=0):
+    """Return whether a path is a directory."""
+    info = self._stat_if_exists(path, timeout)
+    return bool(info and info.flags & StatInfoFlags.IS_DIR)
+
+  def listdir(self, path, timeout=0):
+    """Return directory entry names, like :func:`os.listdir`."""
+    status, listing = self.dirlist(path, flags=DirListFlags.NONE,
+                                   timeout=timeout)
+    raise_as_oserror(status, path)
+    return [entry.name for entry in listing]
+
+  def scandir(self, path, timeout=0):
+    """Return entries with full remote paths and stat data."""
+    status, listing = self.dirlist(path, flags=DirListFlags.STAT,
+                                   timeout=timeout)
+    raise_as_oserror(status, path)
+    result = []
+    for entry in listing:
+      item = DirectoryEntry(path, entry, entry.statinfo)
+      if item.statinfo is None:
+        status, item.statinfo = self.stat(item.path, timeout=timeout)
+        raise_as_oserror(status, item.path)
+      result.append(item)
+    return result
+
+  def checksum(self, path, algorithm=None, timeout=0):
+    """Return the server checksum as an ``(algorithm, value)`` tuple."""
+    query_path = checksum_query_path(path, algorithm)
+    status, response = self.query(QueryCode.CHECKSUM, query_path,
+                                  timeout=timeout)
+    raise_as_oserror(status, path)
+    return parse_checksum(response, algorithm)
+
+  def remove_tree(self, path, missing_ok=False, timeout=0):
+    """Remove a directory recursively and report successful removals."""
+    if path.startswith('root://'):
+      path = URL(path).path_with_params
+    normalized = posixpath.normpath(path.partition('?')[0])
+    if normalized.rstrip('/') in ('', '.', '..'):
+      raise ValueError('refusing to remove the remote root')
+    info = self._stat_if_exists(path, timeout)
+    if info is None:
+      if missing_ok:
+        return RemoveTreeResult()
+      raise FileNotFoundError(errno.ENOENT, 'No such directory', path)
+    if not info.flags & StatInfoFlags.IS_DIR:
+      raise NotADirectoryError(errno.ENOTDIR, 'Not a directory', path)
+
+    result = RemoveTreeResult()
+
+    def remove_directory(directory):
+      for entry in self.scandir(directory, timeout=timeout):
+        if entry.is_dir():
+          remove_directory(entry.path)
+        elif entry.is_file():
+          status, _ = self.rm(entry.path, timeout=timeout)
+          raise_as_oserror(status, entry.path)
+          result.files_removed += 1
+          result.size_removed += entry.size
+        else:
+          raise OSError(errno.EIO, 'Unsupported directory entry', entry.path)
+      status, _ = self.rmdir(directory, timeout=timeout)
+      raise_as_oserror(status, directory)
+      result.directories_removed += 1
+
+    remove_directory(path)
+    return result
+
+  def makedirs(self, path, mode=0, exist_ok=False, timeout=0):
+    """Create a directory and its parents, like :func:`os.makedirs`."""
+    info = self._stat_if_exists(path, timeout)
+    if info is not None:
+      if exist_ok and info.flags & StatInfoFlags.IS_DIR:
+        return
+      raise FileExistsError(errno.EEXIST, 'File exists', path)
+    status, _ = self.mkdir(path, flags=MkDirFlags.MAKEPATH, mode=mode,
+                           timeout=timeout)
+    if status.ok:
+      return
+    if exist_ok and self.is_dir(path, timeout=timeout):
+      return
+    raise_as_oserror(status, path)
+
   def sendinfo(self, info, timeout=0, callback=None):
     """Send info to the server (up to 1024 characters).
 
@@ -372,6 +596,9 @@ class FileSystem(object):
     :type  path: string
     """
     source = self.__fs.url.hostid + '/' + path
+    if self.__auth is not None:
+      source = '{}://{}'.format(self.__fs.url.protocol, source)
+      source = self.__auth.apply(source)
     return self.__fs.cat(source)
 
   def set_xattr(self, path, attrs, timeout=0, callback=None):
@@ -394,8 +621,8 @@ class FileSystem(object):
     """Get extended file attributes.
     :param path:  path to the file
     :type  path:  string
-    :param attrs: extended attributes to be set on the file
-    :type  attrs: list of tuples of name/value pairs
+    :param attrs: list of extended attribute names to be retrieved
+    :type  attrs: list of strings
     :returns:     tuple containing :mod:`XRootD.client.responses.XRootDStatus`
                   object and :mod:`list of touples (name, value, XRootD.client.responses.XRootDStatus)` object
     """
@@ -423,11 +650,9 @@ class FileSystem(object):
     return XRootDStatus(status), response
 
   def list_xattr(self, path, timeout=0, callback=None):
-    """Delete extended file attributes.
+    """List all extended file attributes.
     :param path:  path to the file
     :type  path:  string
-    :param attrs: extended attributes to be set on the file
-    :type  attrs: list of tuples of name/value pairs
     :returns:     tuple containing :mod:`XRootD.client.responses.XRootDStatus`
                   object and :mod:`list of touples (name, value, XRootD.client.responses.XRootDStatus)` object
     """
@@ -437,3 +662,57 @@ class FileSystem(object):
 
     status, response = self.__fs.list_xattr(path, timeout)
     return XRootDStatus(status), response
+
+  def xattrs(self, path, timeout=0, callback=None):
+    """Get all extended file attributes as a mapping.
+    :param path:  path to the file
+    :type  path:  string
+    :returns:     tuple containing :mod:`XRootD.client.responses.XRootDStatus`
+                  object and dict mapping xattr names to values
+    """
+    if callback:
+      def handle_xattrs(status, response, hostlist):
+        if status.ok:
+          item_status, response = _xattr_mapping(response)
+          if item_status:
+            status, response = item_status, None
+        else:
+          response = None
+        callback(status, response, hostlist)
+      return self.list_xattr(path, timeout, handle_xattrs)
+
+    status, response = self.list_xattr(path, timeout)
+    if not status.ok:
+      return status, None
+    item_status, response = _xattr_mapping(response)
+    if item_status:
+      return item_status, None
+    return status, response
+
+  def xattr(self, path, attr, timeout=0, callback=None):
+    """Get one extended file attribute value.
+    :param path:  path to the file
+    :type  path:  string
+    :param attr:  extended attribute name
+    :type  attr:  string
+    :returns:     tuple containing :mod:`XRootD.client.responses.XRootDStatus`
+                  object and the attribute value
+    """
+    if callback:
+      def handle_xattr(status, response, hostlist):
+        if status.ok:
+          item_status, response = _xattr_value(response)
+          if item_status:
+            status, response = item_status, None
+        else:
+          response = None
+        callback(status, response, hostlist)
+      return self.get_xattr(path, [attr], timeout, handle_xattr)
+
+    status, response = self.get_xattr(path, [attr], timeout)
+    if not status.ok:
+      return status, None
+    item_status, response = _xattr_value(response)
+    if item_status:
+      return item_status, None
+    return status, response
