@@ -183,6 +183,20 @@ jobs:
         python -c 'from XRootD import client; help(client)'
         python -c 'from XRootD import client; print(client.FileSystem("root://localhost"))'
 
+    - name: Run authentication plugin test
+      run: |
+        cd "${RUNNER_TEMP}"
+        python - <<'PY'
+        from XRootD import client
+
+        url = 'root://eospublic.cern.ch//eos/root-eos/cms_opendata_2012_nanoaod/Run2012B_DoubleMuParked.root'
+        f = client.File()
+        status, _ = f.open(url, timeout=30)
+        if not status.ok:
+            raise SystemExit(status.message)
+        f.close()
+        PY
+
     - name: Upload Artifacts
       uses: actions/upload-artifact@v7
       with:
