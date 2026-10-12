@@ -24,9 +24,13 @@
 #include "XrdClHttpConnectionCallout.hh"
 #include "XrdClHttpHeaderCallout.hh"
 #include "XrdClHttpResponseInfo.hh"
+#include "XrdClHttpTape.hh"
 #include "XrdClHttpUtil.hh"
+#include "XrdClHttpVerb.hh"
 
 #include <XrdCl/XrdClBuffer.hh>
+#include <XrdCl/XrdClFileSystem.hh>
+#include <XrdCl/XrdClThirdPartyCopyPlugIn.hh>
 #include <XrdCl/XrdClXRootDResponses.hh>
 
 #include <atomic>
@@ -56,18 +60,7 @@ class ResponseInfo;
 class CurlOperation {
 public:
     using HeaderList = std::vector<std::pair<std::string, std::string>>;
-
-    enum class HttpVerb {
-        COPY,
-        DELETE,
-        HEAD,
-        GET,
-        MKCOL,
-        OPTIONS,
-        PROPFIND,
-        PUT,
-        Count
-    };
+    using HttpVerb = XrdClHttp::HttpVerb;
 
     // Operation constructor when the timeout is given as an offset from now.
     CurlOperation(XrdCl::ResponseHandler *handler, const std::string &url, struct timespec timeout,
@@ -107,14 +100,31 @@ public:
     // Returns when the curl header timeout expires.
     //
     // The first byte of the header must be received before this time.
-    std::chrono::steady_clock::time_point GetHeaderExpiry() const {return m_header_expiry;}
+    std::chrono::steady_clock::time_point GetHeaderExpiry() const {
+        return m_header_expiry.load(std::memory_order_relaxed);
+    }
+
+    // Push the header deadline out to `timeout` from now, if that is later than
+    // the current deadline; never brings it forward.
+    //
+    // A chunked PUT is a single curl operation that spans many client writes,
+    // each carrying its own timeout.  Without this, the whole upload would stay
+    // bound by the deadline derived from the very first write.
+    void ExtendDeadline(struct timespec timeout);
 
     // Returns when the curl operation expires
     std::chrono::steady_clock::time_point GetOperationExpiry() {
-        if (m_last_xfer == std::chrono::steady_clock::time_point()) {
-            return GetHeaderExpiry();
+        if (m_last_xfer != std::chrono::steady_clock::time_point()) {
+            return m_last_xfer + m_stall_interval;
         }
-        return m_last_xfer + m_stall_interval;
+        // Headers have arrived but no payload byte has been accounted for yet.
+        // The header deadline no longer applies (HeaderTimeoutExpired stops
+        // enforcing it at the same point), so anchor the stall clock on the
+        // last header activity instead of reviving a deadline that is moot.
+        if (m_received_header) {
+            return m_header_lastop + m_stall_interval;
+        }
+        return GetHeaderExpiry();
     }
 
     // Clean up the thread-local DNS cache for fake lookups associated with the
@@ -173,8 +183,8 @@ public:
     // Invoked after the OPTIONS request is done and results are available
     void virtual OptionsDone() {}
 
-    // Returns the URL that was used for the operation.
-    const std::string &GetUrl() const {return m_url;}
+    // Returns the URL used by the current request.
+    const std::string &GetUrl() const {return m_request_url;}
 
     // Returns the response info for the operation
     std::unique_ptr<ResponseInfo> GetResponseInfo();
@@ -288,6 +298,11 @@ public:
 
 protected:
 
+    // Prepare the current easy handle for another HTTP request in a
+    // multi-step operation.  The operation deadline and response handler are
+    // preserved while per-request curl, header, and callout state is reset.
+    bool SetupNextRequest(const std::string &url, CurlWorker &worker);
+
     // Update the count of bytes transferred
     void UpdateBytes(uint64_t bytes) {m_bytes += bytes;}
 
@@ -315,7 +330,10 @@ protected:
     std::chrono::steady_clock::time_point m_operation_expiry;
 
     // The expiration time for receiving the first header.
-    std::chrono::steady_clock::time_point m_header_expiry;
+    //
+    // Atomic because ExtendDeadline() is invoked from the client thread that
+    // submits writes while the curl worker thread evaluates the deadline.
+    std::atomic<std::chrono::steady_clock::time_point> m_header_expiry;
 
     // Any additional headers to send with the request.
     HeaderCallout *m_header_callout;
@@ -391,6 +409,9 @@ private:
 protected:
     void SetDone(bool has_failed) {m_done = true; m_has_failed.store(has_failed, std::memory_order_release);}
     const std::string m_url;
+    // Multi-step operations retain their immutable input URL in m_url while
+    // advancing the URL used for each individual HTTP request here.
+    std::string m_request_url;
     XrdCl::ResponseHandler *m_handler{nullptr};
     std::unique_ptr<CURL, void(*)(CURL *)> m_curl;
     HeaderParser m_headers;
@@ -413,7 +434,7 @@ public:
         m_parent(op),
         m_parent_curl(curl)
     {
-        m_operation_expiry = m_header_expiry;
+        m_operation_expiry = GetHeaderExpiry();
     }
 
     virtual ~CurlOptionsOp() {}
@@ -449,7 +470,7 @@ public:
     CurlOperation(handler, url, timeout, log, callout, header_callout),
     m_response_info(response_info)
     {
-        m_operation_expiry = m_header_expiry;
+        m_operation_expiry = GetHeaderExpiry();
     }
 
     virtual ~CurlStatOp() {}
@@ -540,7 +561,7 @@ class CurlChecksumOp final : public CurlStatOp {
         void ReleaseHandle() override;
 
     private:
-        XrdClHttp::ChecksumType m_preferred_cksum{XrdClHttp::ChecksumType::kCRC32C};
+        XrdClHttp::ChecksumType m_preferred_cksum{XrdClHttp::ChecksumType::kAll};
         XrdClHttp::File *m_file{nullptr};
     };
 
@@ -606,6 +627,55 @@ public:
 
     int  m_queryCode;
     std::string m_queryVal;
+};
+
+class CurlTapeOp : public CurlOperation {
+public:
+    ~CurlTapeOp() override;
+
+    bool Setup(CURL *curl, CurlWorker &worker) override;
+    void Fail(uint16_t errCode, uint32_t errNum,
+              const std::string &message) override;
+    void ReleaseHandle() override;
+    void Success() override;
+
+    HttpVerb GetVerb() const override;
+
+protected:
+    CurlTapeOp(XrdCl::ResponseHandler *handler, const std::string &url,
+        std::unique_ptr<TapeOperation> tape, struct timespec timeout,
+        XrdCl::Log *logger, CreateConnCalloutType callout,
+        HeaderCallout *header_callout);
+
+private:
+    bool ConfigureRequest();
+    void Complete(const std::string &response);
+    std::string RequestDescription() const;
+    static size_t WriteCallback(char *buffer, size_t size, size_t nitems,
+                                void *data);
+    size_t Write(char *buffer, size_t size);
+
+    std::unique_ptr<TapeOperation> m_tape;
+    TapeHttpRequest m_request;
+    CurlWorker *m_worker{nullptr};
+    std::string m_response;
+};
+
+class CurlTapePrepareOp final : public CurlTapeOp {
+public:
+    CurlTapePrepareOp(XrdCl::ResponseHandler *handler, const std::string &url,
+        const std::vector<std::string> &file_list,
+        XrdCl::PrepareFlags::Flags flags, struct timespec timeout,
+        XrdCl::Log *logger, CreateConnCalloutType callout,
+        HeaderCallout *header_callout);
+};
+
+class CurlTapeQueryOp final : public CurlTapeOp {
+public:
+    CurlTapeQueryOp(XrdCl::ResponseHandler *handler, const std::string &url,
+        XrdCl::QueryCode::Code query_code, const XrdCl::Buffer &arg,
+        struct timespec timeout, XrdCl::Log *logger,
+        CreateConnCalloutType callout, HeaderCallout *header_callout);
 };
 
 class CurlReadOp : public CurlOperation {
@@ -731,12 +801,15 @@ class CurlVectorReadOp : public CurlOperation {
         // Sets the m_response_idx and m_skip_bytes
         void CalculateNextBuffer();
 
+        bool m_multipart_boundary {true}; // 
+
     protected:
         size_t m_response_idx{0}; // The offset in the m_chunk_list which the current response chunk will write into.
         off_t m_chunk_buffer_idx{0}; // Current offset in requested chunk where we are writing bytes.
         off_t m_bytes_consumed{0}; // Total number of bytes used for results serving the request.
         uint64_t m_skip_bytes{0}; // Count of bytes to skip in the next response (if response chunk contains unneeded bytes).
         std::string m_response_headers; // Buffer of an incomplete response line from a prior curl write operation.
+        std::string m_header_line; // Storage for the last complete header line returned by get_next_line.
         std::pair<off_t, off_t> m_current_op{-1, -1}; // The (offset, length) of the current response chunk.
         std::unique_ptr<XrdCl::VectorReadInfo> m_vr; // The response buffers for the client.
         XrdCl::ChunkList m_chunk_list; // The requested chunks from the client.
@@ -806,6 +879,16 @@ private:
     std::string m_host_addr;
 };
 
+// The side of a third-party-copy which the client drives.
+//
+// In pull mode the client sends the COPY to the destination and the
+// destination reads from the source. In push mode the client sends the COPY to
+// the source and the source writes to the destination.
+enum class TpcMode {
+    Pull,
+    Push
+};
+
 // A third-party-copy operation
 //
 // Invoke the COPY verb to move a file between two HTTP endpoints.
@@ -813,7 +896,7 @@ class CurlCopyOp final : public CurlOperation {
 public:
     using Headers = std::vector<std::pair<std::string, std::string>>;
 
-    CurlCopyOp(XrdCl::ResponseHandler *handler, const std::string &source_url, const Headers &source_hdrs, const std::string &dest_url, const Headers &dest_hdrs, struct timespec timeout,
+    CurlCopyOp(XrdCl::ResponseHandler *handler, const std::string &source_url, const Headers &source_hdrs, const std::string &dest_url, const Headers &dest_hdrs, const Headers &connection_hdrs, TpcMode mode, struct timespec timeout,
         XrdCl::Log *logger, CreateConnCalloutType callout);
 
     virtual ~CurlCopyOp() {}
@@ -822,15 +905,16 @@ public:
     void Success() override;
     void ReleaseHandle() override;
 
-    class CurlProgressCallback {
-    public:
-        virtual ~CurlProgressCallback() {}
-        virtual void Progress(off_t bytemark) = 0;
-    };
-
-    void SetCallback(std::unique_ptr<CurlProgressCallback> callback);
+    // Set the handler notified when a performance marker is received.
+    //
+    // The handler is not owned by this operation and must outlive it. Give
+    // nullptr to send no notification.
+    void SetProgressHandler(XrdCl::ProgressHandler *handler) noexcept;
 
     virtual HttpVerb GetVerb() const override {return HttpVerb::COPY;}
+
+    bool IsSentSuccessfully() {return m_sent_success;}
+    std::string GetSendingFailureMessage() {return m_failure;}
 
 private:
     // Callback for writing the response body to the internal buffer.
@@ -842,14 +926,11 @@ private:
     // Returns true if the control channel has not gotten data recently enough.
     bool ControlChannelTimeoutExpired() const;
 
-    // Source of the TPC transfer
-    std::string m_source_url;
-
     // Buffer of current response line
     std::string m_line_buffer;
 
-    // A callback object for when a performance marker is received
-    std::unique_ptr<CurlProgressCallback> m_callback;
+    // Handler notified when a performance marker is received; not owned.
+    XrdCl::ProgressHandler *m_progress_handler{nullptr};
 
     // The performance marker indication of bytes processed.
     off_t m_bytemark{-1};

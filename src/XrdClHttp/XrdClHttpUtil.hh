@@ -42,6 +42,7 @@ namespace XrdCl {
 
 class ResponseHandler;
 class Log;
+class URL;
 
 }
 
@@ -55,11 +56,32 @@ bool HTTPStatusIsError(unsigned status);
 
 std::pair<uint16_t, uint32_t> HTTPStatusConvert(unsigned status);
 
+// Read a bearer token from the standard XrdCl environment options, falling
+// back to the corresponding process environment variables.
+std::string GetBearerToken(XrdCl::Log *logger = nullptr);
+
+// Return whether bearer-token authentication is the first available method
+// requested through XrdSecPROTOCOL.  With no explicit preference, use a token
+// whenever one is available.
+bool ShouldUseBearerToken(const std::string &protocols,
+                          bool hasX509Credential,
+                          bool hasBearerToken);
+
+// Add a bearer-token Authorization header through the common XrdClHttp
+// authentication path when it is the preferred available credential.
+void InjectBearerToken(
+    const XrdCl::URL &url,
+    std::vector<std::pair<std::string, std::string>> &headers,
+    XrdCl::Log *logger = nullptr);
+
 // Trim the left side of a string_view for space
 std::string_view ltrim_view(const std::string_view &input_view);
 
 // Trim the left and right side of a string_view of whitespace
 std::string_view trim_view(const std::string_view &input_view);
+
+// Apply the common XrdClHttp configuration to a curl handle.
+void ConfigureHandle(CURL *curl, bool verbose);
 
 // Returns a newly-created curl handle (no internal caching) with the
 // various configurations needed to be used by XrdClHttp
@@ -125,7 +147,9 @@ public:
     static void ParseDigest(const std::string &digest, XrdClHttp::ChecksumInfo &info);
 
     // Decode a base64-encoded string into a binary buffer.
-    static bool Base64Decode(std::string_view input, std::array<unsigned char, 32> &output);
+    static bool Base64Decode(
+        std::string_view input,
+        std::array<unsigned char, g_max_checksum_length> &output);
 
     // Convert a checksum type to a RFC 3230 digest name.
     static std::string ChecksumTypeToDigestName(XrdClHttp::ChecksumType type);

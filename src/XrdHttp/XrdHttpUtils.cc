@@ -685,3 +685,47 @@ std::string httpStatusToString(int status) {
       }
   }
 }
+
+std::string httpPathFromAbsoluteUrl(const char *hname) {
+  std::string path = "/";
+  if (hname) {
+    if (const char *scheme = strstr(hname, "://")) {
+      if (const char *urlPath = strchr(scheme + 3, '/'))
+        path = urlPath;
+    }
+  }
+  return path;
+}
+
+std::string httpCollapseSlashes(std::string path) {
+  // Erase one character at a time without advancing, so "///a" becomes "/a".
+  for (size_t pos = 0; (pos = path.find("//", pos)) != std::string::npos; )
+    path.erase(pos, 1);
+  return path;
+}
+
+std::string httpBuildRedirectLocation(bool destHttps, int port, const char *hname,
+                                      const char *encodedResource) {
+  std::string out;
+  // Same rule as XRootD: port < 0 => hname is a full scheme://… URL.
+  const bool fullUrl = (port < 0);
+  if (fullUrl)
+    out = "Location: ";
+  else if (destHttps)
+    out = "Location: https://";
+  else
+    out = "Location: http://";
+
+  if (hname)
+    out += hname;
+
+  if (port > 0) {
+    out += ':';
+    out += std::to_string(port);
+  }
+
+  if (!fullUrl && encodedResource)
+    out += encodedResource;
+
+  return out;
+}

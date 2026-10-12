@@ -17,7 +17,41 @@
 #-------------------------------------------------------------------------------
 from __future__ import absolute_import, division, print_function
 
+try:
+  from urllib.parse import urlparse
+except ImportError:
+  from urlparse import urlparse
+
 from XRootD.client.url import URL
+
+
+class XRootDError(RuntimeError):
+  """Base exception raised from unsuccessful :class:`XRootDStatus` objects."""
+
+  def __init__(self, status):
+    self.status = status
+    RuntimeError.__init__(self, str(status))
+
+
+class XRootDNotFoundError(XRootDError):
+  """The requested file or resource was not found."""
+
+
+class XRootDAuthorizationError(XRootDError):
+  """Authentication or authorization failed."""
+
+
+class XRootDTimeoutError(XRootDError):
+  """The request timed out or expired."""
+
+
+class XRootDChecksumError(XRootDError):
+  """The request failed checksum validation."""
+
+
+class XRootDOperationError(XRootDError):
+  """Generic unsuccessful XRootD operation."""
+
 
 class Struct(object):
   """Convert a dict into an object by adding each dict entry to __dict__"""
@@ -86,6 +120,7 @@ class XRootDStatus(Struct):
   suRetry           = 2
   suPartial         = 3
   suAlreadyDone     = 4
+  suNotStarted      = 5
 
   #----------------------------------------------------------------------------
   # Generic errors
@@ -108,7 +143,8 @@ class XRootDStatus(Struct):
   errDataError           = 14; # data is corrupted
   errNotImplemented      = 15; # Operation is not implemented
   errNoMoreReplicas      = 16; # No more replicas to try
-  errPipelineError       = 17; # Pipeline failed and operation couldn't be executed
+  errPipelineError       = 17; # Backward-compatible spelling
+  errPipelineFailed      = 17; # Pipeline failed and operation couldn't be executed
 
   #----------------------------------------------------------------------------
   # Socket related errors
@@ -122,6 +158,7 @@ class XRootDStatus(Struct):
   errStreamDisconnect   = 107;
   errConnectionError    = 108;
   errInvalidSession     = 109;
+  errTlsError           = 110;
 
   #----------------------------------------------------------------------------
   # Post Master related errors
@@ -133,6 +170,7 @@ class XRootDStatus(Struct):
   errQueryNotSupported    = 205;
   errOperationExpired     = 206;
   errOperationInterrupted = 207;
+  errThresholdExceeded    = 208;
 
   #----------------------------------------------------------------------------
   # XRootD related errors
@@ -143,17 +181,168 @@ class XRootDStatus(Struct):
   errNotFound           = 304;
   errCheckSumError      = 305;
   errRedirectLimit      = 306;
+  errCorruptedHeader    = 307;
 
   errErrorResponse      = 400;
   errRedirect           = 401;
+  errLocalError         = 402;
 
   errResponseNegative   = 500; # Query response was negative
+
+  _ERROR_NAMES = dict(
+    (value, name) for name, value in locals().copy().items()
+    if name.startswith('err')
+  )
+
+  # XRootD protocol error numbers carried by errErrorResponse statuses.
+  _SERVER_NOT_AUTHORIZED = 3010
+  _SERVER_NOT_FOUND = 3011
+  _SERVER_CHECKSUM_ERROR = 3019
+  _SERVER_AUTH_FAILED = 3030
+  _SERVER_REQUEST_TIMED_OUT = 3034
+  _SERVER_TIMER_EXPIRED = 3035
 
   def __init__(self, status):
     super(XRootDStatus, self).__init__(status)
 
   def __str__(self):
     return self.message
+
+  @property
+  def error_name(self):
+    """Symbolic name for the status code, when known."""
+    return self._ERROR_NAMES.get(getattr(self, 'code', None))
+
+  def exception(self):
+    """Return a Python exception representing this status, or ``None`` if OK."""
+    if self.ok:
+      return None
+    code = getattr(self, 'code', None)
+    errno = getattr(self, 'errno', None)
+    server_error = code == self.errErrorResponse
+    if code == self.errNotFound or (
+        server_error and errno == self._SERVER_NOT_FOUND):
+      return XRootDNotFoundError(self)
+    if code in (self.errAuthFailed, self.errLoginFailed) or (
+        server_error and errno in (
+          self._SERVER_NOT_AUTHORIZED, self._SERVER_AUTH_FAILED)):
+      return XRootDAuthorizationError(self)
+    if code in (self.errSocketTimeout, self.errOperationExpired) or (
+        server_error and errno in (
+          self._SERVER_REQUEST_TIMED_OUT, self._SERVER_TIMER_EXPIRED)):
+      return XRootDTimeoutError(self)
+    if code == self.errCheckSumError or (
+        server_error and errno == self._SERVER_CHECKSUM_ERROR):
+      return XRootDChecksumError(self)
+    return XRootDOperationError(self)
+
+  def raise_on_error(self):
+    """Raise a mapped Python exception if this status is not OK."""
+    error = self.exception()
+    if error:
+      raise error
+    return self
+
+
+def raise_on_error(status):
+  """Raise a mapped Python exception if ``status`` is not OK.
+
+  :param status: :class:`XRootDStatus` or raw status dictionary
+  :returns:      the normalized :class:`XRootDStatus`
+  """
+  if not isinstance(status, XRootDStatus):
+    status = XRootDStatus(status)
+  return status.raise_on_error()
+
+
+class TapeEndpoint(Struct):
+  """WLCG Tape REST API endpoint selected through discovery.
+
+  :var      uri: Base URI of the selected Tape REST API endpoint
+  :var  version: Endpoint API version
+  :var sitename: Storage site name advertised by discovery
+  """
+  def __init__(self, endpoint):
+    super(TapeEndpoint, self).__init__(endpoint)
+
+class TapeArchiveInfo(Struct):
+  """Archive locality information for a file.
+
+  :var      url: Original URL requested by the caller
+  :var     path: Storage path sent to the Tape REST API
+  :var locality: Locality reported by the Tape REST API
+  :var    error: Per-path error reported by the service, if any
+  """
+  def __init__(self, info):
+    payload = {'locality': None, 'error': None}
+    payload.update(info)
+    super(TapeArchiveInfo, self).__init__(payload)
+
+class TapeStageResponse(Struct):
+  """Response returned after submitting a Tape REST stage request.
+
+  :var requestId: Server-side stage request identifier
+  """
+  def __init__(self, response):
+    super(TapeStageResponse, self).__init__(response)
+
+  @property
+  def request_id(self):
+    return self.requestId
+
+class TapeStageFileStatus(Struct):
+  """Status of one file in a Tape REST stage request.
+
+  :var       path: Storage path submitted in the stage request
+  :var     onDisk: Whether the file is available on disk, if reported
+  :var      state: Stage processing state, if reported
+  :var      error: File-specific error, if reported
+  :var  startedAt: Stage start timestamp, if reported
+  :var finishedAt: Terminal-state timestamp, if reported
+  """
+  def __init__(self, status):
+    super(TapeStageFileStatus, self).__init__(status)
+
+  @property
+  def on_disk(self):
+    if hasattr(self, 'onDisk'):
+      return self.onDisk
+    return getattr(self, 'state', '') == 'COMPLETED'
+
+class TapeStageStatus(Struct):
+  """Status of a Tape REST stage request.
+
+  :var          id: Server-side stage request identifier
+  :var   createdAt: Request creation timestamp, if reported
+  :var   startedAt: Request start timestamp, if reported
+  :var completedAt: Request completion timestamp, if reported
+  :var       files: Per-file stage statuses
+  """
+  def __init__(self, status):
+    status = dict(status)
+    status['files'] = [TapeStageFileStatus(f)
+                       for f in status.get('files', [])]
+    super(TapeStageStatus, self).__init__(status)
+
+  @staticmethod
+  def _normalize_path(path):
+    parsed = urlparse(path)
+    if parsed.scheme and parsed.netloc:
+      path = parsed.path or '/'
+    if path.startswith('//'):
+      path = path[1:]
+    return path
+
+  def file_status(self, path):
+    path = self._normalize_path(path)
+    for status in self.files:
+      if status.path == path:
+        return status
+    return None
+
+  def is_on_disk(self, path):
+    status = self.file_status(path)
+    return bool(status and status.on_disk)
 
 class ProtocolInfo(Struct):
   """Protocol information for a server.
@@ -165,15 +354,47 @@ class ProtocolInfo(Struct):
   def __init__(self, info):
     super(ProtocolInfo, self).__init__(info)
 
+
+class ChecksumInfo(Struct):
+  """Structured checksum response.
+
+  :param response: raw response returned by ``QueryCode.CHECKSUM``
+  :type  response: string
+  :var algorithm: checksum algorithm name, for example ``adler32``
+  :var value:     checksum value
+  """
+
+  def __init__(self, response):
+    if isinstance(response, bytes):
+      response = response.decode('ascii')
+    parts = response.strip('\n\0').split(None, 1)
+    if len(parts) != 2:
+      raise ValueError('Invalid checksum response: %r' % response)
+    algorithm, value = parts
+    super(ChecksumInfo, self).__init__({
+      'algorithm': algorithm,
+      'value': value,
+    })
+
 class StatInfo(Struct):
   """Status information for files and directories.
 
   :var         id: This file's unique identifier
+  :var       size: The file size (in bytes)
   :var      flags: Informational flags. An `ORed` combination of
                    :mod:`XRootD.client.flags.StatInfoFlags`
-  :var       size: The file size (in bytes)
-  :var    modtime: Modification time (in seconds since epoch)
-  :var modtimestr: Modification time (as readable string)
+  :var      mtime: Modification time (in seconds since epoch)
+  :var    modtime: Deprecated alias for ``mtime``
+  :var modtimestr: Deprecated modification time (as readable string)
+  :var      ctime: Change time (in seconds since epoch)
+  :var      atime: Access time (in seconds since epoch)
+  :var       mode: File mode
+  :var modeoctstr: File mode as a readable permissions string
+  :var      owner: File owner
+  :var      group: File group
+  :var   extended: Whether extended stat information is available
+  :var haschecksum: Whether checksum information is available
+  :var   checksum: File checksum
   """
   def __init__(self, info):
     super(StatInfo, self).__init__(info)

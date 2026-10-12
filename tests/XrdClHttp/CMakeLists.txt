@@ -1,16 +1,25 @@
-# XrdClHttp tests depend on scitokens fixture for authentication
+find_package(CURL REQUIRED)
+
+include(GoogleTest)
+
+add_executable(xrdcl-http-unit-tests
+  HeaderParserTest.cc
+  ParseTimeoutTest.cc
+  TapeTest.cc
+)
+
+target_link_libraries(xrdcl-http-unit-tests
+  XrdClHttpObj XrdCl CURL::libcurl GTest::gtest_main)
+target_include_directories(xrdcl-http-unit-tests
+  PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../src")
+
+gtest_discover_tests(xrdcl-http-unit-tests TEST_PREFIX XrdClHttp::
+  PROPERTIES DISCOVERY_TIMEOUT 10)
+
+# XrdClHttp integration tests depend on scitokens fixture for authentication
 if(NOT BUILD_SCITOKENS)
   return()
 endif()
-
-# The final shared library has its symbols stripped; we need the symbols available
-# to allow unit tests to access them.  Rather than build the objects twice, we
-# create an internal object library and just link twice -- once stripping the symbols,
-# once without.
-add_library(XrdClHttpTesting SHARED)
-target_link_libraries(XrdClHttpTesting PRIVATE XrdClHttpObj)
-
-include(GoogleTest)
 
 find_program(OPENSSL_BIN openssl REQUIRED)
 
@@ -27,22 +36,26 @@ add_executable(xrdcl-test
 # Tests depending on XrdClHttp linkage
 add_executable(xrdcl-http-test
   CopyTest.cc
-  ParseTimeoutTest.cc
   VectorReadTest.cc
 )
 
 target_link_libraries(xrdcl-test XrdClHttpTransferTest GTest::gtest_main)
-target_link_libraries(xrdcl-http-test XrdClHttpTesting XrdClHttpTransferTest GTest::gtest_main)
+target_link_libraries(xrdcl-http-test XrdClHttpObj XrdClHttpTransferTest GTest::gtest_main)
 
 gtest_add_tests(TARGET xrdcl-test TEST_LIST CurlClOnlyTests)
 gtest_add_tests(TARGET xrdcl-http-test TEST_LIST CurlTests)
+
+# The client picks up a grid proxy from $X509_USER_PROXY or /tmp/x509up_u<uid>
+# and presents it to the servers, whose test CA cannot verify it, failing the
+# TLS handshake. Point the client at a path that can never exist, so that a
+# proxy belonging to the user running the tests is never used.
 
 set_tests_properties(${CurlTests} ${CurlClOnlyTests}
   PROPERTIES
     FIXTURES_REQUIRED
       XrdClHttp
     ENVIRONMENT
-      "ENV_FILE=${CMAKE_BINARY_DIR}/tests/curl/setup.sh;XRD_PLUGINCONFDIR=${CMAKE_BINARY_DIR}/tests/curl/client.plugins.d"
+      "ENV_FILE=${CMAKE_BINARY_DIR}/tests/curl/setup.sh;XRD_PLUGINCONFDIR=${CMAKE_BINARY_DIR}/tests/curl/client.plugins.d;X509_USER_PROXY=/dev/null/x509"
 )
 
 ######################################
@@ -73,9 +86,11 @@ set_tests_properties(XrdClHttp::teardown
 add_test(NAME XrdClHttp::test
   COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/test.sh" curl)
 
-list(APPEND CURL_TEST_LOGS ${CMAKE_CURRENT_BINARY_DIR}/tests/curl/origin.log)
-list(APPEND CURL_TEST_LOGS ${CMAKE_CURRENT_BINARY_DIR}/tests/curl/cache.log)
-list(APPEND CURL_TEST_LOGS ${CMAKE_CURRENT_BINARY_DIR}/tests/curl/client.log)
+add_bats_test(XrdClHttp::tape tape.bats)
+
+list(APPEND CURL_TEST_LOGS ${CMAKE_BINARY_DIR}/tests/curl/origin.log)
+list(APPEND CURL_TEST_LOGS ${CMAKE_BINARY_DIR}/tests/curl/cache.log)
+list(APPEND CURL_TEST_LOGS ${CMAKE_BINARY_DIR}/tests/curl/client.log)
 
 set_tests_properties(XrdClHttp::test
   PROPERTIES
@@ -83,6 +98,14 @@ set_tests_properties(XrdClHttp::test
       XrdClHttp
     ENVIRONMENT
       "BINARY_DIR=${CMAKE_BINARY_DIR}"
+    ATTACHED_FILES_ON_FAIL
+      "${CURL_TEST_LOGS}"
+)
+
+set_tests_properties(XrdClHttp::tape
+  PROPERTIES
+    FIXTURES_REQUIRED
+      XrdClHttp
     ATTACHED_FILES_ON_FAIL
       "${CURL_TEST_LOGS}"
 )

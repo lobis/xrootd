@@ -126,11 +126,14 @@ RUNDIR="$BINARY_DIR/tests/$TEST_NAME"
 echo "Using $RUNDIR as the test run's home directory."
 cd "$RUNDIR" || exit 1
 
-XROOTD_EXPORTDIR="$RUNDIR/export"
-rm -rf "$XROOTD_EXPORTDIR"
+TAPE_API_ROOT="$RUNDIR/tape-api"
+XROOTD_EXPORTDIR="$TAPE_API_ROOT/disk"
+rm -rf "$TAPE_API_ROOT"
+mkdir -p "$TAPE_API_ROOT/archive/test/tape" || exit 1
 mkdir -p "$XROOTD_EXPORTDIR/test" || exit 1
 XROOTD_PUBLIC_EXPORTDIR="$XROOTD_EXPORTDIR/test-public"
 mkdir -p "$XROOTD_PUBLIC_EXPORTDIR" || exit 1
+printf '%s\n' 'tape contents' > "$TAPE_API_ROOT/archive/test/tape/file" || exit 1
 
 mkdir -p "$XROOTD_EXPORTDIR"/.well-known || exit 1
 cp "$SOURCE_DIR/tests/XrdClHttp/openid-configuration" "$XROOTD_EXPORTDIR/.well-known/openid-configuration" || exit 1
@@ -197,7 +200,7 @@ EOF
 # limits.  Hence, we explicitly place the XRootD rundir in /tmp
 XROOTD_RUNDIR="$(mktemp -d -p /tmp xrdcl-http-rundir.XXXXXXXX)"
 chmod 0755 "$XROOTD_RUNDIR"
-mkdir -p "$XROOTD_RUNDIR/cache" "XROOTD_RUNDIR/origin"
+mkdir -p "$XROOTD_RUNDIR/cache" "$XROOTD_RUNDIR/origin"
 XROOTD_CONFIGDIR="$RUNDIR/xrootd"
 rm -rf "$XROOTD_CONFIGDIR"
 mkdir -p "$XROOTD_CONFIGDIR"
@@ -216,6 +219,7 @@ http.header2cgi Authorization authz strip-on-redirect
 ofs.osslib ++ libXrdOssStats.so
 all.adminpath $XROOTD_RUNDIR/origin
 all.pidpath $XROOTD_RUNDIR/origin
+all.sitename xrootd-ci
 
 oss.localroot $XROOTD_EXPORTDIR
 
@@ -241,6 +245,9 @@ xrd.network nodnr
 scitokens.trace debug info warning error
 
 ofs.osslib ++ $BINARY_DIR/lib/libXrdOssSlowOpen.so
+
+# WLCG Tape REST API handler used by the XrdClHttp Tape client tests.
+http.exthandler xrdhttptapeapi libXrdHttpTapeApi.so $TAPE_API_ROOT
 
 # Required for the COPY tests
 http.exthandler xrdtpc libXrdHttpTPC.so
@@ -374,6 +381,10 @@ export XRD_HTTPSLOWRATEBYTESSEC=1024
 export XRD_HTTPSTALLTIMEOUT=2
 export XRD_HTTPCERTFILE=$CA_DIR/tlsca.pem
 export XRD_LOGLEVEL=Debug
+# The cache is itself an HTTP client of the origin and would pick up a grid
+# proxy of the user running the tests from /tmp/x509up_u<uid>, which the test
+# CA cannot verify. Point it at a path that can never exist instead.
+export X509_USER_PROXY=/dev/null/x509
 set -x
 exec "$XROOTD_BIN" "\$@"
 EOF
@@ -393,11 +404,11 @@ echo "Origin PID: $ORIGIN_PID"
 
 echo "Origin logs are available at $BINARY_DIR/tests/$TEST_NAME/origin.log"
 
-ORIGIN_PORT=$(grep -E -a '\-\-\-\-\-\- xrootd origin@.*:[0-9]+ initialization completed' "$BINARY_DIR/tests/$TEST_NAME/origin.log" | tr ':' ' ' | awk '{print $4}')
+ORIGIN_PORT=$(grep -E -a -e '------ xrootd origin@.*:[0-9]+ initialization completed' "$BINARY_DIR/tests/$TEST_NAME/origin.log" | tr ':' ' ' | awk '{print $4}')
 IDX=0
 while [ -z "$ORIGIN_PORT" ]; do
   sleep 1
-  ORIGIN_PORT=$(grep -E -a '\-\-\-\-\-\- xrootd origin@.*:[0-9]+ initialization completed' "$BINARY_DIR/tests/$TEST_NAME/origin.log" | tr ':' ' ' | awk '{print $4}')
+  ORIGIN_PORT=$(grep -E -a -e '------ xrootd origin@.*:[0-9]+ initialization completed' "$BINARY_DIR/tests/$TEST_NAME/origin.log" | tr ':' ' ' | awk '{print $4}')
   IDX=$((IDX+1))
   if [ $IDX -gt 1 ]; then
     echo "Waiting for origin to start ($IDX seconds so far) ..."
@@ -422,11 +433,11 @@ echo "Cache PID: $ORIGIN_PID"
 
 echo "Cache logs are available at $BINARY_DIR/tests/$TEST_NAME/cache.log"
 
-CACHE_PORT=$(grep -E -a '\-\-\-\-\-\- xrootd cache@.*:[0-9]+ initialization completed' "$BINARY_DIR/tests/$TEST_NAME/cache.log" | tr ':' ' ' | awk '{print $4}')
+CACHE_PORT=$(grep -E -a -e '------ xrootd cache@.*:[0-9]+ initialization completed' "$BINARY_DIR/tests/$TEST_NAME/cache.log" | tr ':' ' ' | awk '{print $4}')
 IDX=0
 while [ -z "$CACHE_PORT" ]; do
   sleep 1
-  CACHE_PORT=$(grep -E -a '\-\-\-\-\-\- xrootd cache@.*:[0-9]+ initialization completed' "$BINARY_DIR/tests/$TEST_NAME/cache.log" | tr ':' ' ' | awk '{print $4}')
+  CACHE_PORT=$(grep -E -a -e '------ xrootd cache@.*:[0-9]+ initialization completed' "$BINARY_DIR/tests/$TEST_NAME/cache.log" | tr ':' ' ' | awk '{print $4}')
   IDX=$((IDX+1))
   if [ $IDX -gt 1 ]; then
     echo "Waiting for cache to start ($IDX seconds so far) ..."

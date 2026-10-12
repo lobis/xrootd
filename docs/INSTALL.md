@@ -19,7 +19,6 @@ together with the extra dependencies required to enable them.
 | SciTokens             | scitokens-cpp-devel                      |
 | systemd support       | systemd-devel                            |
 | VOMS                  | voms-devel                               |
-| Testing               | gtest-devel                              |
 
 Other optional dependencies: libxml2-devel. If not available, only the XML
 reader based on tinyxml will be available to parse metalink files. In the
@@ -47,7 +46,6 @@ dnf install \
     fuse-devel \
     gcc-c++ \
     git \
-    gtest-devel \
     json-c-devel \
     krb5-devel \
     libmacaroons-devel \
@@ -78,7 +76,6 @@ apt install \
     g++ \
     libcurl4-openssl-dev \
     libfuse-dev \
-    libgtest-dev \
     libisal-dev \
     libjson-c-dev \
     libkrb5-dev \
@@ -160,8 +157,6 @@ the build:
 | `ENABLE_XRDCL`     |  TRUE   | Enable XRootD client
 | `ENABLE_CEPH`      |  FALSE  | Enable Ceph plugin (XrdCeph)
 | `ENABLE_XRDEC`     |  FALSE  | Enable support for erasure coding (DEPRECATED)
-| `ENABLE_ASAN`      |  FALSE  | Build with adress sanitizer enabled
-| `ENABLE_TSAN`      |  FALSE  | Build with thread sanitizer enabled
 | `ENABLE_TESTS`     |  FALSE  | Enable unit tests
 | `FORCE_ENABLED`    |  FALSE  | Fail CMake configuration if enabled components cannot be built
 | `XRDCL_LIB_ONLY`   |  FALSE  | Build only the client libraries and necessary dependencies

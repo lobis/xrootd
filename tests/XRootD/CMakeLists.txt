@@ -1,12 +1,13 @@
 
-list(APPEND XROOTD_CONFIGS noauth gsi host unix sss cache posix diglib)
+list(APPEND XROOTD_CONFIGS noauth gsi host unix sss cache posix diglib mirage)
 
 if(ENABLE_FUSE_TESTS)
   list(APPEND XROOTD_CONFIGS fuse)
 endif()
 
 if(ENABLE_HTTP_TESTS)
-  list(APPEND XROOTD_CONFIGS http tpcredir)
+  list(APPEND XROOTD_CONFIGS http httpsredirect tpcredir)
+  list(APPEND httpsredirect_FIXTURES TLS)
   # Test-only XrdXrootdRedirPI plugin loaded by tpcredir.cfg.
   add_subdirectory(redir_test)
 endif()
@@ -14,6 +15,11 @@ endif()
 if(BUILD_KRB5 AND NOT APPLE)
   list(APPEND XROOTD_CONFIGS krb5)
   list(APPEND krb5_FIXTURES Kerberos)
+endif()
+
+if(BUILD_MACAROONS)
+  list(APPEND XROOTD_CONFIGS macaroons)
+  list(APPEND macaroons_FIXTURES TLS)
 endif()
 
 # Note: HAVE_SCITOKEN_CONFIG_SET_STR is required to override the CA file
