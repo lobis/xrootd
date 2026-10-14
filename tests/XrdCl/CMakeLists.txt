@@ -4,6 +4,7 @@ add_executable(xrdcl-unit-tests
   XrdClPoller.cc
   XrdClSocket.cc
   XrdClUtilsTest.cc
+  XrdClCopyBatchTest.cc
   XrdClCopyChecksumTest.cc
   XrdClProtocolRespTest.cc
   )
