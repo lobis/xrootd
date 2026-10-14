@@ -318,8 +318,13 @@ namespace XrdCl
     checkSum = elems[0] + ":";
     checkSum += NormalizeChecksum( elems[0], elems[1] );
 
+    // Query callers may put opaque arguments in the path. Retain those for
+    // authorization, but never include their values in checksum diagnostics.
+    std::string displayPath = url.GetPath();
+    size_t query = displayPath.find( '?' );
+    if( query != std::string::npos ) displayPath.erase( query );
     log->Dump( UtilityMsg, "Checksum for %s checksum: %s",
-               url.GetPath().c_str(), checkSum.c_str() );
+               displayPath.c_str(), checkSum.c_str() );
 
     return XRootDStatus();
   }
