@@ -1,5 +1,5 @@
 # XrdClHttp tests depend on scitokens fixture for authentication
-if(NOT BUILD_SCITOKENS)
+if(NOT ENABLE_SERVER_TESTS OR NOT BUILD_SCITOKENS)
   return()
 endif()
 
@@ -15,4 +15,3 @@ target_include_directories( XrdClHttpTransferTest PUBLIC "${CMAKE_CURRENT_SOURCE
 add_library( XrdOssSlowOpen MODULE XrdOssSlowOpen.cc )
 target_link_libraries( XrdOssSlowOpen XrdUtils XrdServer )
 set_target_properties( XrdOssSlowOpen PROPERTIES OUTPUT_NAME "XrdOssSlowOpen-${PLUGIN_VERSION}" SUFFIX ".so" )
-

@@ -1,26 +1,77 @@
+if(NOT TARGET XrdClHttpObj)
+  return()
+endif()
+
 find_package(CURL REQUIRED)
 
 include(GoogleTest)
 
+add_executable(xrdcl-http-token-unit-tests
+  TokenTest.cc
+  ${PROJECT_SOURCE_DIR}/src/XrdClHttp/XrdClHttpToken.cc
+)
+target_link_libraries(xrdcl-http-token-unit-tests GTest::gtest_main)
+if(nlohmann_json_FOUND)
+  target_link_libraries(xrdcl-http-token-unit-tests
+    nlohmann_json::nlohmann_json)
+endif()
+gtest_discover_tests(xrdcl-http-token-unit-tests
+  TEST_PREFIX XrdClHttp::
+  PROPERTIES DISCOVERY_TIMEOUT 10)
+
 add_executable(xrdcl-http-unit-tests
+  ClientConfigTest.cc
   HeaderParserTest.cc
+  ReadResponseTest.cc
   ParseTimeoutTest.cc
+  RedirectTest.cc
   TapeTest.cc
+  WebDavParserTest.cc
+  SpaceResponseTest.cc
 )
 
 target_link_libraries(xrdcl-http-unit-tests
-  XrdClHttpObj XrdCl CURL::libcurl GTest::gtest_main)
+  XrdClHttpObj XrdCl XrdXml XrdTestUtils CURL::libcurl GTest::gtest_main)
 target_include_directories(xrdcl-http-unit-tests
   PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../src")
 
 gtest_discover_tests(xrdcl-http-unit-tests TEST_PREFIX XrdClHttp::
   PROPERTIES DISCOVERY_TIMEOUT 10)
 
-# XrdClHttp integration tests depend on scitokens fixture for authentication
-if(NOT BUILD_SCITOKENS)
-  return()
+add_executable(xrdcl-http-copy-response-test CopyResponseTest.cc)
+target_link_libraries(xrdcl-http-copy-response-test
+  XrdClHttpObj XrdTestUtils XrdXml CURL::libcurl GTest::gtest_main)
+target_include_directories(xrdcl-http-copy-response-test
+  PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../src")
+gtest_discover_tests(xrdcl-http-copy-response-test TEST_PREFIX XrdClHttp::
+  PROPERTIES DISCOVERY_TIMEOUT 10 TIMEOUT 20)
+
+# Per-file credentials coverage uses a disposable localhost HTTP server.
+find_package(Python3 QUIET COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+  add_test(NAME XrdClHttp::FileCredentials
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/FileCredentialsTest.py"
+      --xrdcp $<TARGET_FILE:xrdcp>
+      --plugin $<TARGET_FILE:XrdClHttp-${PLUGIN_VERSION}>)
+  set_tests_properties(XrdClHttp::FileCredentials PROPERTIES TIMEOUT 150)
 endif()
 
+if(Python3_Interpreter_FOUND AND TARGET xrdcp AND TARGET xrdfs)
+  add_executable(xrdcl-http-upload-buffer UploadBufferDriver.cc)
+  target_link_libraries(xrdcl-http-upload-buffer PRIVATE XrdClHttpObj XrdCl)
+  target_include_directories(xrdcl-http-upload-buffer
+    PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../src")
+  add_test(NAME XrdClHttp::cli
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/cli.py"
+      "$<TARGET_FILE_DIR:xrdcp>" "$<TARGET_FILE:XrdClHttp-${PLUGIN_VERSION}>"
+      "$<TARGET_FILE:xrdcl-http-upload-buffer>")
+  set_tests_properties(XrdClHttp::cli PROPERTIES TIMEOUT 120)
+endif()
+
+# XrdClHttp integration tests depend on scitokens fixture for authentication
+if(NOT ENABLE_SERVER_TESTS OR NOT BUILD_SCITOKENS)
+  return()
+endif()
 find_program(OPENSSL_BIN openssl REQUIRED)
 
 # All tests that only depend on the pure XrdCl interfaces and
@@ -29,6 +80,7 @@ add_executable(xrdcl-test
   ChecksumTest.cc
   DeleteTest.cc
   MkcolTest.cc
+  MoveTest.cc
   ReadTest.cc
   WriteTest.cc
 )
@@ -36,11 +88,12 @@ add_executable(xrdcl-test
 # Tests depending on XrdClHttp linkage
 add_executable(xrdcl-http-test
   CopyTest.cc
+  OptionsCacheTest.cc
   VectorReadTest.cc
 )
 
 target_link_libraries(xrdcl-test XrdClHttpTransferTest GTest::gtest_main)
-target_link_libraries(xrdcl-http-test XrdClHttpObj XrdClHttpTransferTest GTest::gtest_main)
+target_link_libraries(xrdcl-http-test XrdClHttpObj XrdClHttpTransferTest XrdXml GTest::gtest_main)
 
 gtest_add_tests(TARGET xrdcl-test TEST_LIST CurlClOnlyTests)
 gtest_add_tests(TARGET xrdcl-http-test TEST_LIST CurlTests)
