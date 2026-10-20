@@ -25,7 +25,7 @@ from __future__ import absolute_import, division, print_function
 
 from pyxrootd import client
 from XRootD.client.url import URL
-from XRootD.client.responses import XRootDStatus
+from XRootD.client.responses import XRootDStatus, raise_as_oserror
 from .env import EnvGetInt, EnvGetString
 
 class ProgressHandlerWrapper(object):
@@ -61,6 +61,36 @@ class CopyProcess(object):
 
   def __init__(self):
     self.__process = client.CopyProcess()
+
+  @classmethod
+  def copy_one(cls, source, target, handler=None, **options):
+    """Run one configurable copy job, raising for preparation or copy errors.
+
+    ``options`` are passed to :meth:`add_job`. The per-job result dictionary
+    is returned so callers can inspect transfer statistics.
+    """
+    process = cls()
+    process.add_job(source, target, **options)
+    raise_as_oserror(process.prepare(), source)
+    status, results = process.run(handler=handler)
+    result = results[0] if results else {}
+    raise_as_oserror(result.get('status', status), target)
+    raise_as_oserror(status, target)
+    return result
+
+  def run_async(self, callback, handler=None):
+    """Prepare and run on a native worker, notifying one final completion.
+
+    Mutating or running this process again while it is active raises. Use
+    cancel() to request cooperative cancellation, then wait for completion.
+    """
+    from XRootD.client.utils import CallbackWrapper
+    return XRootDStatus(self.__process.run_async(
+        CallbackWrapper(callback, None), ProgressHandlerWrapper(handler)))
+
+  def cancel(self):
+    """Request cooperative cancellation of the active native copy."""
+    self.__process.cancel()
 
   def parallel(self, parallel):
     """ Add a config job to the copy process in order to set the number of
@@ -146,11 +176,13 @@ class CopyProcess(object):
     :param     rtrplc: the retry polic (force or continue)
     :type      rtrplc: string
     """
-    self.__process.add_job(source, target, sourcelimit, force, posc,
-                           coerce, mkdir, thirdparty, checksummode, checksumtype,
-                           checksumpreset, dynamicsource, chunksize, parallelchunks, inittimeout,
-                           tpctimeout, rmBadCksum, cptimeout, retry, xrateThreshold,
-                           xrate, cont, rtrplc )
+    status = self.__process.add_job(
+        source, target, sourcelimit, force, posc, coerce, mkdir, thirdparty,
+        checksummode, checksumtype, checksumpreset, dynamicsource, chunksize,
+        parallelchunks, inittimeout, tpctimeout, rmBadCksum, cptimeout,
+        xrateThreshold, xrate, retry, cont, rtrplc)
+
+    return XRootDStatus(status)
 
   def prepare(self):
     """Prepare the copy jobs. **Must be called before** ``run()``."""

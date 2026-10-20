@@ -25,6 +25,7 @@
 #define BINDINGS_PYTHON_SRC_PYXROOTDFINALIZE_HH_
 
 #include "PyXRootD.hh"
+#include "PyXRootDCopyProcess.hh"
 
 #include "XrdCl/XrdClDefaultEnv.hh"
 #include "XrdCl/XrdClPostMaster.hh"
@@ -41,6 +42,7 @@ namespace PyXRootD
   PyObject* __XrdCl_Stop_Threads( PyObject *self, PyObject* )
   {
     Py_BEGIN_ALLOW_THREADS
+    StopCopyWorkers();
     XrdCl::DefaultEnv::GetPostMaster()->Stop();
     Py_END_ALLOW_THREADS
     Py_RETURN_NONE;

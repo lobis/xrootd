@@ -150,6 +150,41 @@ class File(object):
     status, response = self.__file.read(offset, size, timeout)
     return XRootDStatus(status), response
 
+  def readinto(self, buffer, offset=0, timeout=0, callback=None):
+    """Read directly into a writable contiguous buffer and return byte count.
+
+    The extension pins the buffer until completion. Do not access its contents
+    until the callback runs; cancellation of a waiter does not stop the read.
+    """
+    if callback:
+      callback = CallbackWrapper(callback, None)
+      return XRootDStatus(self.__file.readinto(
+          buffer, offset, timeout, callback))
+    status, count = self.__file.readinto(buffer, offset, timeout)
+    return XRootDStatus(status), count
+
+  def read_ranges(self, chunks, timeout=0, callback=None, parallel=4):
+    """Read complete (offset, size) ranges with native bounded batching.
+
+    Returns one bytes object per input range, in input order. A range extending
+    past EOF fails. Empty ranges return empty bytes. No intermediate chunk
+    objects or Python buffer joins are needed.
+    """
+    if callback:
+      callback = CallbackWrapper(callback, None)
+      return XRootDStatus(self.__file.read_ranges(
+          chunks, timeout, callback, parallel))
+    status, data = self.__file.read_ranges(chunks, timeout, None, parallel)
+    return XRootDStatus(status), data
+
+  def drain(self, callback):
+    """Notify when all submitted buffer I/O has completed.
+
+    Includes data I/O and metadata operations on this file. Callers must
+    stop submitting new I/O before draining and closing a file.
+    """
+    return XRootDStatus(self.__file.drain(CallbackWrapper(callback, None)))
+
   def readline(self, offset=0, size=0, chunksize=0):
     """Read a data chunk from a given offset, until the first newline or EOF
     encountered.
@@ -196,7 +231,8 @@ class File(object):
     """
     return self.__file.readchunks(offset, chunksize)
 
-  def write(self, buffer, offset=0, size=0, timeout=0, callback=None):
+  def write(self, buffer, offset=0, size=0, timeout=0, callback=None,
+            buffer_offset=0):
     """Write a data chunk at a given offset.
 
     :param buffer: data to be written
@@ -209,9 +245,11 @@ class File(object):
     """
     if callback:
       callback = CallbackWrapper(callback, None)
-      return XRootDStatus(self.__file.write(buffer, offset, size, timeout, callback))
+      return XRootDStatus(self.__file.write(
+          buffer, offset, size, timeout, callback, buffer_offset))
 
-    status, response = self.__file.write(buffer, offset, size, timeout)
+    status, response = self.__file.write(
+        buffer, offset, size, timeout, None, buffer_offset)
     return XRootDStatus(status), None
 
   def sync(self, timeout=0, callback=None):
