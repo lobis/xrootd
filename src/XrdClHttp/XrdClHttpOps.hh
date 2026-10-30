@@ -57,6 +57,26 @@ class CurlWorker;
 class File;
 class ResponseInfo;
 
+// Authentication and TLS settings encoded in client-only URL parameters.
+// These parameters are removed before a request is sent to the server.
+struct HttpClientConfig {
+    std::string bearer_token_file;
+    std::string client_cert;
+    std::string client_key;
+    std::string ca_file;
+    std::string ca_dir;
+    bool scoped_auth{false};
+    bool no_auth{false};
+    bool no_verify{false};
+};
+
+// Extract XrdClHttp client-only parameters from a URL.  All unrelated query
+// parameters retain their original spelling and order, which is required for
+// signed URLs.  If client_query is provided, it receives the extracted,
+// still-encoded parameter fragments for propagation by FileSystem operations.
+std::string ExtractHttpClientConfig(const std::string &url,
+    HttpClientConfig &config, std::string *client_query = nullptr);
+
 class CurlOperation {
 public:
     using HeaderList = std::vector<std::pair<std::string, std::string>>;
@@ -185,6 +205,10 @@ public:
 
     // Returns the URL used by the current request.
     const std::string &GetUrl() const {return m_request_url;}
+
+    // Return object-scoped settings for internal sub-operations such as the
+    // authenticated OPTIONS probe.
+    const HttpClientConfig &GetClientConfig() const {return m_client_config;}
 
     // Returns the response info for the operation
     std::unique_ptr<ResponseInfo> GetResponseInfo();
@@ -408,6 +432,7 @@ private:
 
 protected:
     void SetDone(bool has_failed) {m_done = true; m_has_failed.store(has_failed, std::memory_order_release);}
+    HttpClientConfig m_client_config;
     const std::string m_url;
     // Multi-step operations retain their immutable input URL in m_url while
     // advancing the URL used for each individual HTTP request here.
@@ -434,6 +459,7 @@ public:
         m_parent(op),
         m_parent_curl(curl)
     {
+        m_client_config = op->GetClientConfig();
         m_operation_expiry = GetHeaderExpiry();
     }
 

@@ -164,6 +164,9 @@ private:
     // even for `Read`-type calls.
     const std::string GetCurrentURL() const;
 
+    // Restore file-local policy after Open records curl's wire-only LastURL.
+    std::string WithClientConfig(const std::string &url) const;
+
     // Calculate the current URL given the query parameter value
     //
     // Must be called with the m_properties_mutex held for write.

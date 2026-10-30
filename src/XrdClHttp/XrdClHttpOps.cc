@@ -33,6 +33,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cmath>
+#include <fstream>
 #ifdef __APPLE__
 #include <stdlib.h>
 #else
@@ -46,6 +47,63 @@ std::chrono::steady_clock::duration CurlOperation::m_stall_interval{CurlOperatio
 int CurlOperation::m_minimum_transfer_rate{CurlOperation::m_default_minimum_rate};
 
 namespace {
+
+bool IsClientParameter(const std::string &key) {
+    return key == "xrdcl.http.bearertokenfile" ||
+        key == "xrdcl.http.clientcert" || key == "xrdcl.http.clientkey" ||
+        key == "xrdcl.http.cafile" || key == "xrdcl.http.cadir" ||
+        key == "xrdcl.http.noauth" || key == "xrdcl.http.noverify" ||
+        key == "xrdcl.authctx";
+}
+
+int HexValue(char value) {
+    if (value >= '0' && value <= '9') return value - '0';
+    if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+    if (value >= 'A' && value <= 'F') return value - 'A' + 10;
+    return -1;
+}
+
+std::string DecodeParameter(const std::string &value) {
+    std::string result;
+    result.reserve(value.size());
+    for (size_t idx = 0; idx < value.size(); ++idx) {
+        if (value[idx] == '%' && idx + 2 < value.size()) {
+            auto high = HexValue(value[idx + 1]);
+            auto low = HexValue(value[idx + 2]);
+            if (high >= 0 && low >= 0) {
+                result.push_back(static_cast<char>((high << 4) | low));
+                idx += 2;
+                continue;
+            }
+        }
+        result.push_back(value[idx]);
+    }
+    return result;
+}
+
+bool IsTrue(const std::string &value) {
+    return value.empty() || value == "1" || value == "true" || value == "yes";
+}
+
+bool ReadBearerToken(const std::string &path, std::string &token) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) return false;
+    constexpr size_t max_token_size = 1024 * 1024;
+    char buffer[4096];
+    token.clear();
+    while (input) {
+        input.read(buffer, sizeof(buffer));
+        const auto count = static_cast<size_t>(input.gcount());
+        if (count > max_token_size - token.size()) return false;
+        token.append(buffer, count);
+    }
+    if (!input.eof()) return false;
+    auto first = token.find_first_not_of(" \t\r\n");
+    auto last = token.find_last_not_of(" \t\r\n");
+    if (first == std::string::npos) return false;
+    token = token.substr(first, last - first + 1);
+    return token.find_first_of("\r\n") == std::string::npos;
+}
 
 // For connection callbacks, we don't want to require a real DNS lookup; instead, we
 // will generate a fake address in the 169.254.x.y range and use that for the connection.
@@ -158,6 +216,74 @@ std::string DavToHttp(const std::string &url) {
 
 } // namespace
 
+std::string
+XrdClHttp::ExtractHttpClientConfig(const std::string &url,
+    HttpClientConfig &config, std::string *client_query)
+{
+    auto fragment_pos = url.find('#');
+    auto query_pos = url.find('?');
+    if (query_pos == std::string::npos ||
+        (fragment_pos != std::string::npos && query_pos > fragment_pos)) {
+        return url;
+    }
+
+    const auto query_end = fragment_pos == std::string::npos ? url.size() : fragment_pos;
+    const auto query = url.substr(query_pos + 1, query_end - query_pos - 1);
+    std::vector<std::string> server_parameters;
+    std::vector<std::string> client_parameters;
+    size_t begin = 0;
+    while (begin <= query.size()) {
+        auto end = query.find('&', begin);
+        if (end == std::string::npos) end = query.size();
+        auto parameter = query.substr(begin, end - begin);
+        auto equals = parameter.find('=');
+        auto key = parameter.substr(0, equals);
+        auto encoded_value = equals == std::string::npos ? std::string() : parameter.substr(equals + 1);
+        if (IsClientParameter(key)) {
+            client_parameters.emplace_back(parameter);
+            auto value = DecodeParameter(encoded_value);
+            if (key == "xrdcl.http.bearertokenfile") config.bearer_token_file = value;
+            else if (key == "xrdcl.http.clientcert") config.client_cert = value;
+            else if (key == "xrdcl.http.clientkey") config.client_key = value;
+            else if (key == "xrdcl.http.cafile") config.ca_file = value;
+            else if (key == "xrdcl.http.cadir") config.ca_dir = value;
+            else if (key == "xrdcl.http.noauth") config.no_auth = IsTrue(value);
+            else if (key == "xrdcl.http.noverify") config.no_verify = IsTrue(value);
+        } else if (!parameter.empty()) {
+            server_parameters.emplace_back(parameter);
+        }
+        if (end == query.size()) break;
+        begin = end + 1;
+    }
+
+    auto join = [](const std::vector<std::string> &parameters) {
+        std::string result;
+        for (const auto &parameter : parameters) {
+            if (!result.empty()) result.push_back('&');
+            result.append(parameter);
+        }
+        return result;
+    };
+
+    if (client_query) {
+        *client_query = join(client_parameters);
+    }
+    if (client_parameters.empty()) {
+        return url;
+    }
+
+    auto server_query = join(server_parameters);
+    std::string result = url.substr(0, query_pos);
+    if (!server_query.empty()) {
+        result.push_back('?');
+        result.append(server_query);
+    }
+    if (fragment_pos != std::string::npos) {
+        result.append(url.substr(fragment_pos));
+    }
+    return result;
+}
+
 std::chrono::steady_clock::time_point CalculateExpiry(struct timespec timeout) {
     if (timeout.tv_sec == 0 && timeout.tv_nsec == 0) {
         return std::chrono::steady_clock::now() + std::chrono::seconds(30);
@@ -181,7 +307,7 @@ CurlOperation::CurlOperation(XrdCl::ResponseHandler *handler, const std::string 
     m_start_op(m_last_reset),
     m_header_start(m_last_reset),
     m_conn_callout(callout),
-    m_url(DavToHttp(url)),
+    m_url(DavToHttp(ExtractHttpClientConfig(url, m_client_config))),
     m_request_url(m_url),
     m_handler(handler),
     m_curl(nullptr, &curl_easy_cleanup),
@@ -229,9 +355,20 @@ CurlOperation::FailCallback(XErrorCode ecode, const std::string &emsg) {
 bool
 CurlOperation::FinishSetup(CURL *curl)
 {
-    if(m_parsed_url)
-    {
-        InjectBearerToken(*m_parsed_url, m_headers_list, m_logger);
+    if (!m_client_config.no_auth &&
+        !m_client_config.bearer_token_file.empty()) {
+        std::string token;
+        if (!ReadBearerToken(m_client_config.bearer_token_file, token)) {
+            m_logger->Error(kLogXrdClHttp, "Failed to read bearer token from %s",
+                m_client_config.bearer_token_file.c_str());
+            return false;
+        }
+        m_headers_list.emplace_back("Authorization", "Bearer " + token);
+    } else if (!m_client_config.no_auth) {
+        if(m_parsed_url)
+        {
+            InjectBearerToken(*m_parsed_url, m_headers_list, m_logger);
+        }
     }
     
     // The client asks every request to carry the headers given by the HttpHeaders
@@ -599,7 +736,13 @@ CurlOperation::Setup(CURL *curl, CurlWorker &worker)
     m_parsed_url = std::make_unique<XrdCl::URL>(m_request_url);
     auto env = XrdCl::DefaultEnv::GetEnv();
     int disable_x509;
-    if (env->GetInt("HttpDisableX509", disable_x509) && !disable_x509) {
+    if (!m_client_config.client_cert.empty()) {
+        curl_easy_setopt(m_curl.get(), CURLOPT_SSLCERT, m_client_config.client_cert.c_str());
+        if (!m_client_config.client_key.empty()) {
+            curl_easy_setopt(m_curl.get(), CURLOPT_SSLKEY, m_client_config.client_key.c_str());
+        }
+    } else if (!m_client_config.scoped_auth && !m_client_config.no_auth &&
+        (env->GetInt("HttpDisableX509", disable_x509) && !disable_x509)) {
         auto [cert, key] = worker.ClientX509CertKeyFile();
         if (!cert.empty()) {
             m_logger->Debug(kLogXrdClHttp,
@@ -612,6 +755,14 @@ CurlOperation::Setup(CURL *curl, CurlWorker &worker)
                 curl_easy_setopt(m_curl.get(), CURLOPT_SSLKEY, key.c_str());
             }
         }
+    }
+    if (!m_client_config.ca_file.empty())
+        curl_easy_setopt(m_curl.get(), CURLOPT_CAINFO, m_client_config.ca_file.c_str());
+    if (!m_client_config.ca_dir.empty())
+        curl_easy_setopt(m_curl.get(), CURLOPT_CAPATH, m_client_config.ca_dir.c_str());
+    if (m_client_config.no_verify) {
+        curl_easy_setopt(m_curl.get(), CURLOPT_SSL_VERIFYPEER, 0L);
+        curl_easy_setopt(m_curl.get(), CURLOPT_SSL_VERIFYHOST, 0L);
     }
 
     if (m_conn_callout) {
