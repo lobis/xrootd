@@ -13,56 +13,6 @@ if [[ -n "${BINARY_DIR:-}" ]]; then
     export PATH="${BINARY_DIR}/bin:${PATH}"
 fi
 
-# Start xrootd in the background and wait until it has completed its
-# initialization, so that a test never races with the server startup.
-launch_xrootd() {
-    local config=$1
-    local name=$2
-    local log="$BATS_TEST_TMPDIR/$name.log"
-    local pidfile="$BATS_TEST_TMPDIR/$name.pid"
-
-    pushd "$(pwd)" 1>/dev/null
-    cd "$BATS_TEST_TMPDIR"
-    BATS_TEST_DIRNAME=${BATS_TEST_DIRNAME} BATS_SUITE_TMPDIR=${BATS_SUITE_TMPDIR} NAME=$name \
-        xrootd -b -c "${BATS_TEST_DIRNAME}/$config" -l "$name.log" -s "$name.pid"
-    popd 1>/dev/null
-
-    # xrootd logs one of these lines at the end of its configuration; the
-    # components log similar lines before it, thus match the whole line
-    for _ in {1..200}; do
-        if grep -qsE '^------ xrootd .* initialization completed' "$log"; then
-            return 0
-        fi
-
-        if grep -qsE '^------ xrootd .* initialization failed' "$log"; then
-            break
-        fi
-
-        # the pid file exists but the daemon is gone
-        if [[ -s "$pidfile" ]] && ! is_running "$(<"$pidfile")"; then
-            break
-        fi
-
-        sleep 0.05
-    done
-
-    echo "xrootd '$name' failed to start" >&2
-    [[ -f "$log" ]] && cat "$log" >&2
-    return 1
-}
-
-print_log_files() {
-    if [[ -z "${BATS_SKIP_SERVER_LOGS}" ]]; then
-        for file in $(find $BATS_TEST_TMPDIR -name '*.log' -type f ! -empty); do
-            name="${file##*/}"
-            name="${name%.*}"
-            printf '\n'
-            sed "s|^|[$name] |" "$file"
-            printf '\n'
-        done
-    fi
-}
-
 # Return success if the process exists and has not exited. A daemon which
 # exited stays a zombie until its parent reaps it, and in a container the
 # parent of a daemon may be a PID 1 which never does, thus kill -0 alone
@@ -81,34 +31,125 @@ is_running() {
     fi
 }
 
-# Stop every daemon started by the test and wait until it exits, so that the
-# next test can bind the same ports.
-kill_pid_files() {
-    local pid
+# Stop the process and wait until it exits, so that the next server can bind
+# the same port. A process which ignores SIGTERM for 5 s gets SIGKILL.
+stop_pid() {
+    local pid=$1
 
-    # xrootd writes its pid both to the file given with -s and to all.pidpath,
-    # without a newline, thus awk rather than cat
-    for pid in $(find "$BATS_TEST_TMPDIR" -name '*.pid' -type f -exec awk '{ print }' {} + | sort -u); do
-        [[ "$pid" =~ ^[0-9]+$ ]] && is_running "$pid" || continue
+    [[ "$pid" =~ ^[0-9]+$ ]] && is_running "$pid" || return 0
 
-        kill "$pid" 2>/dev/null
+    kill "$pid" 2>/dev/null
 
-        for _ in {1..100}; do
-            is_running "$pid" || break
-            sleep 0.05
-        done
-
-        # the graceful shutdown timed out
-        is_running "$pid" && kill -9 "$pid" 2>/dev/null
+    for _ in {1..100}; do
+        is_running "$pid" || return 0
+        sleep 0.05
     done
 
-    find "$BATS_TEST_TMPDIR" -name '*.pid' -type f -delete
+    kill -9 "$pid" 2>/dev/null
 
-    return 0
+    for _ in {1..100}; do
+        is_running "$pid" || return 0
+        sleep 0.05
+    done
+
+    return 1
 }
 
-bats::on_failure() {
-    print_log_files
+# Skip the test (or all tests of the file, in setup_file) when a command
+# which it needs is not available.
+require_commands() {
+    local cmd
+
+    for cmd in "$@"; do
+        command -v "$cmd" >/dev/null || skip "command not found: $cmd"
+    done
+}
+
+# Print a TCP port on which nothing listens, for a daemon which cannot choose
+# a port itself. Another process can take the port before the daemon binds
+# it, which on a test host is not likely.
+free_port() {
+    python3 -c 'import socket; s = socket.socket(); s.bind(("localhost", 0)); print(s.getsockname()[1])'
+}
+
+# wait_for <seconds> <command...>
+#
+# Run the command until it succeeds, for at most the given time, for results
+# which come later, such as monitoring data.
+wait_for() {
+    local end=$(( SECONDS + $1 ))
+    shift
+
+    until "$@"; do
+        (( SECONDS < end )) || return 1
+        sleep 0.2
+    done
+}
+
+# Skip the test (or all tests of the file, in setup_file) when the build has
+# not the plugin, for example libXrdHttp. Without a build directory, the test
+# assumes that the installation has it.
+require_plugin() {
+    local name=$1 lib
+
+    [[ -n "${BINARY_DIR:-}" ]] || return 0
+
+    for lib in "$BINARY_DIR"/lib*/"$name"{,-*}.{so,dylib}; do
+        [[ -e "$lib" ]] && return 0
+    done
+
+    skip "the build has no plugin $name"
+}
+
+# Skip the test (or all tests of the file, in setup_file) when the file system
+# of the directory has no user extended attributes.
+require_xattr() {
+    local dir=$1 probe status=0
+
+    probe=$(mktemp "$dir/xattr.XXXXXX") || return 1
+    if command -v setfattr > /dev/null; then
+        setfattr -n user.probe -v 1 "$probe" 2>/dev/null || status=1
+    elif command -v xattr > /dev/null; then
+        # macOS
+        xattr -w user.probe 1 "$probe" 2>/dev/null || status=1
+    else
+        status=1
+    fi
+    rm -f "$probe"
+
+    (( status == 0 )) || skip "no extended attributes in $dir"
+}
+
+# Skip the test when the client cannot use IPv6. The client uses IPv6 only
+# when an interface has an address which is not loopback and not link-local
+# (see XrdNetIF::GetIF), and the server needs the loopback address ::1.
+require_ipv6() {
+    if [[ -r /proc/net/if_inet6 ]]; then
+        grep -q '^0*1 ' /proc/net/if_inet6 &&
+            awk '$6 != "lo" && $1 !~ /^fe80/ { found = 1 } END { exit !found }' \
+                /proc/net/if_inet6
+    else
+        ifconfig 2>/dev/null | grep -q 'inet6 ::1 ' &&
+            ifconfig 2>/dev/null | grep 'inet6 ' | grep -v -q -e 'inet6 fe80:' -e 'inet6 ::1 '
+    fi || skip 'the host has no IPv6 address for the client'
+}
+
+# Write a file with the given number of random bytes.
+make_random_file() {
+    local path=$1 size=$2
+
+    openssl rand -out "$path" "$size"
+}
+
+# Print the checksum of a local file, in the format of xrdfs query checksum.
+checksum() {
+    local type=$1 path=$2
+
+    case "$type" in
+        adler32) xrdadler32 < "$path" ;;
+        crc32c)  xrdcrc32c < "$path" ;;
+        *) echo "checksum: unknown type '$type'" >&2; return 1 ;;
+    esac | cut -d' ' -f1
 }
 
 # Ask the server at the given URL for a macaroon with full access, over TLS
@@ -117,8 +158,8 @@ request_macaroon() {
     local url=$1
 
     curl --fail --silent --show-error \
-        --cacert "$BATS_SUITE_TMPDIR/ca.pem" \
-        --cert "$BATS_SUITE_TMPDIR/client.crt" --key "$BATS_SUITE_TMPDIR/client.key" \
+        --cacert "$CREDENTIALS/ca.pem" \
+        --cert "$CREDENTIALS/client.crt" --key "$CREDENTIALS/client.key" \
         -X POST -H 'Content-Type: application/macaroon-request' \
         -d '{ "caveats": [ "activity:READ_METADATA,UPDATE_METADATA,LIST,DOWNLOAD,UPLOAD,MANAGE,DELETE" ], "validity": "PT1H" }' \
         "$url" | jq -er .macaroon
