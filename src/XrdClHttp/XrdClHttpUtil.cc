@@ -42,6 +42,7 @@
 
 #include <fcntl.h>
 #include <fstream>
+#include <sys/stat.h>
 #ifdef __APPLE__
 #include <pthread.h>
 #else
@@ -53,7 +54,9 @@
 #include <algorithm>
 #include <cerrno>
 #include <cctype>
+#include <charconv>
 #include <cstdlib>
+#include <ctime>
 #include <sstream>
 #include <stdexcept>
 #include <system_error>
@@ -253,7 +256,8 @@ std::pair<uint16_t, uint32_t> XrdClHttp::HTTPStatusConvert(unsigned status) {
         case 451: // Unavailable For Legal Reasons
             return std::make_pair(XrdCl::errErrorResponse, kXR_Impossible);
         case 500: // Internal Server Error
-            return std::make_pair(XrdCl::errErrorResponse, kXR_ServerError);
+            // This is a failed storage operation, not EFAULT (Bad address).
+            return std::make_pair(XrdCl::errErrorResponse, kXR_IOError);
         case 501: // Not Implemented
             return std::make_pair(XrdCl::errErrorResponse, kXR_Unsupported);
         case 502: // Bad Gateway
@@ -384,6 +388,7 @@ bool HeaderParser::Parse(const std::string &header_line)
 
     if (!m_recv_status_line) {
         m_recv_status_line = true;
+        m_unsatisfied_range_length.reset();
 
         std::stringstream ss(header_line);
         std::string item;
@@ -446,7 +451,8 @@ bool HeaderParser::Parse(const std::string &header_line)
         std::string_view val(header_value);
         while (!val.empty()) {
             auto found = val.find(',');
-            auto method = val.substr(0, found);
+            std::string method(val.substr(0, found));
+            XrdCl::Utils::Trim(method);
             if (method == "PROPFIND") {
                 auto new_verbs = static_cast<unsigned>(m_allow_verbs) | static_cast<unsigned>(VerbsCache::HttpVerb::kPROPFIND);
                 m_allow_verbs = static_cast<VerbsCache::HttpVerb>(new_verbs);
@@ -456,6 +462,11 @@ bool HeaderParser::Parse(const std::string &header_line)
         }
         if (static_cast<unsigned>(m_allow_verbs) & ~static_cast<unsigned>(VerbsCache::HttpVerb::kUnknown)) {
             m_allow_verbs = static_cast<VerbsCache::HttpVerb>(static_cast<unsigned>(m_allow_verbs) & ~static_cast<unsigned>(VerbsCache::HttpVerb::kUnknown));
+        }
+    } else if (header_name == "Last-Modified") {
+        struct tm tm;
+        if (strptime(header_value.c_str(), "%a, %d %b %Y %H:%M:%S", &tm) != nullptr) {
+            m_modtime = timegm(&tm);
         }
     } else if (header_name == "Content-Length") {
          try {
@@ -491,7 +502,19 @@ bool HeaderParser::Parse(const std::string &header_line)
         if (found == std::string::npos) {
             return false;
         }
+        m_unsatisfied_range_length.reset();
         auto incl_range = range_resp.substr(0, found);
+        if (incl_range == "*") {
+            auto complete_length = range_resp.substr(found + 1);
+            uint64_t length;
+            auto result = std::from_chars(complete_length.data(),
+                complete_length.data() + complete_length.size(), length);
+            if (result.ec != std::errc() || result.ptr != complete_length.data() + complete_length.size()) {
+                return false;
+            }
+            m_unsatisfied_range_length = length;
+            return true;
+        }
         found = incl_range.find("-");
         if (found == std::string::npos) {
             return false;
@@ -766,14 +789,8 @@ std::string_view XrdClHttp::ltrim_view(const std::string_view &input_view) {
     return "";
 }
 
-void
-XrdClHttp::ConfigureHandle(CURL *curl, bool verbose) {
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "xrdcl-http/" XrdVERSION);
-    curl_easy_setopt(curl, CURLOPT_DEBUGFUNCTION, DumpHeader);
-    curl_easy_setopt(curl, CURLOPT_DEBUGDATA, XrdCl::DefaultEnv::GetLog());
-    if (verbose)
-        curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
-
+std::pair<std::string, std::string>
+XrdClHttp::DefaultCertificateAuthorities() {
     auto env = XrdCl::DefaultEnv::GetEnv();
     std::string ca_file;
     if (!env->GetString("HttpCertFile", ca_file) || ca_file.empty()) {
@@ -782,15 +799,37 @@ XrdClHttp::ConfigureHandle(CURL *curl, bool verbose) {
             ca_file = std::string(x509_ca_file);
         }
     }
-    if (!ca_file.empty()) {
-        curl_easy_setopt(curl, CURLOPT_CAINFO, ca_file.c_str());
-    }
     std::string ca_dir;
     if (!env->GetString("HttpCertDir", ca_dir) || ca_dir.empty()) {
         char *x509_ca_dir = getenv("X509_CERT_DIR");
         if (x509_ca_dir) {
             ca_dir = std::string(x509_ca_dir);
         }
+    }
+    if (ca_dir.empty() && ca_file.empty()) {
+        // Grid CA packages install hashed certificates here. Preserve explicit
+        // trust settings and libcurl's normal CA bundle on other systems.
+        constexpr auto grid_ca_dir = "/etc/grid-security/certificates";
+        struct stat info;
+        if (stat(grid_ca_dir, &info) == 0 && S_ISDIR(info.st_mode)
+            && access(grid_ca_dir, R_OK | X_OK) == 0) {
+            ca_dir = grid_ca_dir;
+        }
+    }
+    return {ca_file, ca_dir};
+}
+
+void
+XrdClHttp::ConfigureHandle(CURL *curl, bool verbose) {
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "xrdcl-http/" XrdVERSION);
+    curl_easy_setopt(curl, CURLOPT_DEBUGFUNCTION, DumpHeader);
+    curl_easy_setopt(curl, CURLOPT_DEBUGDATA, XrdCl::DefaultEnv::GetLog());
+    if (verbose)
+        curl_easy_setopt(curl, CURLOPT_VERBOSE, 1L);
+
+    auto [ca_file, ca_dir] = DefaultCertificateAuthorities();
+    if (!ca_file.empty()) {
+        curl_easy_setopt(curl, CURLOPT_CAINFO, ca_file.c_str());
     }
     if (!ca_dir.empty()) {
         curl_easy_setopt(curl, CURLOPT_CAPATH, ca_dir.c_str());
@@ -927,6 +966,46 @@ HandlerQueue::Produce(std::shared_ptr<CurlOperation> handler)
     lk.unlock();
     m_consumer_cv.notify_one();
     m_ops_produced.fetch_add(1, std::memory_order_relaxed);
+}
+
+bool
+HandlerQueue::TryProduce(std::shared_ptr<CurlOperation> handler)
+{
+    const auto handler_expiry = handler->GetOperationExpiry();
+    std::unique_lock<std::mutex> lk{m_mutex};
+    if (m_shutdown || m_ops.size() >= m_max_pending_ops ||
+        std::chrono::steady_clock::now() > handler_expiry) {
+        m_ops_rejected.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+
+    try {
+        m_ops.push_back(std::move(handler));
+    } catch (...) {
+        m_ops_rejected.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
+
+    char ready[] = "1";
+    while (true) {
+        auto result = write(m_write_fd, ready, 1);
+        if (result == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
+            if (errno != EAGAIN && errno != EWOULDBLOCK) {
+                m_ops.pop_back();
+                m_ops_rejected.fetch_add(1, std::memory_order_relaxed);
+                return false;
+            }
+        }
+        break;
+    }
+
+    lk.unlock();
+    m_consumer_cv.notify_one();
+    m_ops_produced.fetch_add(1, std::memory_order_relaxed);
+    return true;
 }
 
 std::shared_ptr<CurlOperation>
@@ -1279,9 +1358,8 @@ CurlWorker::Run() {
         std::shared_ptr<CurlOptionsOp> options_op;
         CURL *options_handle = nullptr;
         try {
-            std::string modified_url;
             options_op = std::make_shared<CurlOptionsOp>(parent_handle, parent_op,
-                std::string(VerbsCache::GetUrlKey(target, modified_url)),
+                target,
                 m_logger, parent_op->GetConnCalloutFunc());
             options_handle = queue.GetHandle();
             if (!options_handle || !options_op->Setup(options_handle, *this)) {
@@ -1631,7 +1709,7 @@ CurlWorker::Run() {
                 if (res == CURLE_OK) {
                     auto sc = op->GetStatusCode();
                     OpRecord(*op, OpKind::Finish);
-                    if (HTTPStatusIsError(sc)) {
+                    if (HTTPStatusIsError(sc) && !op->AcceptErrorStatus(sc)) {
                         auto [code, number] = HTTPStatusConvert(sc);
                         op->Fail(code, number, op->GetStatusMessage());
                         op->ReleaseHandle();

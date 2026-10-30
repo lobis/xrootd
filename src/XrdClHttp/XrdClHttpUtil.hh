@@ -27,9 +27,11 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <ctime>
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -81,6 +83,9 @@ std::string_view ltrim_view(const std::string_view &input_view);
 std::string_view trim_view(const std::string_view &input_view);
 
 // Apply the common XrdClHttp configuration to a curl handle.
+// Shared defaults for new and pooled handles; explicit trust settings win.
+std::pair<std::string, std::string> DefaultCertificateAuthorities();
+
 void ConfigureHandle(CURL *curl, bool verbose);
 
 // Returns a newly-created curl handle (no internal caching) with the
@@ -98,7 +103,13 @@ public:
 
     int64_t GetContentLength() const {return m_content_length;}
 
+    // Modification time from Last-Modified, or -1 when the header is absent.
+    time_t GetModTime() const {return m_modtime;}
+
     uint64_t GetOffset() const {return m_response_offset;}
+
+    // Object length reported by an unsatisfied Content-Range: bytes */N.
+    std::optional<uint64_t> GetUnsatisfiedRangeLength() const {return m_unsatisfied_range_length;}
 
     static bool Canonicalize(std::string &headerName);
 
@@ -159,7 +170,9 @@ private:
     static bool validHeaderByte(unsigned char c);
 
     int64_t m_content_length{-1};
+    time_t m_modtime{-1};
     uint64_t m_response_offset{0};
+    std::optional<uint64_t> m_unsatisfied_range_length;
 
     XrdClHttp::ChecksumInfo m_checksums;
 
@@ -193,6 +206,11 @@ public:
     HandlerQueue(unsigned max_pending_ops);
 
     void Produce(std::shared_ptr<CurlOperation> handler);
+
+    // Enqueue without waiting for capacity.  This is intended for operations
+    // submitted by a curl worker callback, where waiting for another worker to
+    // drain a full queue can stall the entire worker pool.
+    bool TryProduce(std::shared_ptr<CurlOperation> handler);
 
     std::shared_ptr<CurlOperation> Consume(std::chrono::steady_clock::duration);
     std::shared_ptr<CurlOperation> TryConsume();

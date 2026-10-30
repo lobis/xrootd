@@ -15,3 +15,27 @@ add_dependencies(xrdcl-tests-unit XrdClRecorder-${PLUGIN_VERSION})
 
 gtest_discover_tests(xrdcl-tests-unit
   PROPERTIES DISCOVERY_TIMEOUT 10)
+
+add_executable(xrdcl-unit-tests
+  XrdClCopyBatchTest.cc
+  XrdClCopyChecksumTest.cc
+  XrdClDirListTest.cc
+  XrdClEnv.cc
+  XrdClLocalFileHandlerTest.cc
+  XrdClProtocolRespTest.cc
+  XrdClReadRangesTest.cc
+  XrdClURL.cc
+  XrdClUtilsTest.cc
+  )
+
+target_link_libraries(xrdcl-unit-tests
+  XrdTestUtils GTest::gtest GTest::gtest_main)
+
+# LocalFileHandlerTest uses std::filesystem
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
+  AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9.1)
+  target_link_libraries(xrdcl-unit-tests stdc++fs)
+endif()
+
+gtest_discover_tests(xrdcl-unit-tests TEST_PREFIX XrdCl:: 
+  PROPERTIES DISCOVERY_TIMEOUT 10)

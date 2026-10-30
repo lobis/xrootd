@@ -71,7 +71,7 @@ jobs:
           zlib-dev
 
     - name: Clone repository
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
       with:
         fetch-depth: 0
 
@@ -106,7 +106,7 @@ jobs:
         dnf install -y gtest-devel
 
     - name: Clone repository
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
       with:
         fetch-depth: 0
 
@@ -127,6 +127,11 @@ jobs:
         tests/post-install.sh
         tests/check-headers.sh
 
+    - name: Verify installed bindings on Alma 8 system Python
+      run: |
+        python3 -c 'import sys; assert sys.version_info[:2] == (3, 6)'
+        python3 -m pytest -q python/tests/test_version_policy.py
+
   alma9:
     name: Alma 9
     runs-on: ubuntu-latest
@@ -142,7 +147,7 @@ jobs:
         dnf config-manager --set-enabled crb
 
     - name: Clone repository
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
       with:
         fetch-depth: 0
 
@@ -178,7 +183,7 @@ jobs:
         dnf config-manager --set-enabled crb
 
     - name: Clone repository
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
       with:
         fetch-depth: 0
 
@@ -221,7 +226,7 @@ jobs:
       run: dnf install -y dnf-plugins-core git ninja-build rpmdevtools ${{ matrix.compiler }}
 
     - name: Clone repository
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
       with:
         fetch-depth: 0
 
@@ -247,7 +252,7 @@ jobs:
 
     strategy:
       matrix:
-        os: [ '24.04', '24.04-arm' ]
+        os: [ '26.04', '26.04-arm' ]
         compiler: [ 'gcc', 'clang' ]
         config: [ 'Debug', 'Release' ]
       fail-fast: false
@@ -264,10 +269,10 @@ jobs:
     - name: Install development tools
       run: |
         sudo apt update -qq
-        sudo apt install -y build-essential devscripts equivs git
+        sudo apt install -y build-essential devscripts equivs git python3-venv
 
     - name: Clone repository
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
       with:
         fetch-depth: 0
 
@@ -276,6 +281,9 @@ jobs:
 
     - name: Build and Test with CTest
       run: env CC=${CC} CXX=${CC/g*/g++} ctest -VV -S test.cmake
+
+    - name: Check CMake wheel in a fresh virtual environment
+      run: python3 python/tests/check_wheel.py build/python/dist/*.whl
 
     - name: Install with CMake
       run: sudo cmake --install build
@@ -301,18 +309,15 @@ jobs:
 
   macos:
     name: macOS
-    runs-on: macos-26
+    runs-on: macos-latest
 
     env:
       CC: clang
       CXX: clang++
       CMAKE_ARGS: "-DPython_FIND_UNVERSIONED_NAMES=FIRST"
-      CMAKE_PREFIX_PATH: /usr/local/opt/openssl@3
+      CMAKE_PREFIX_PATH: /usr/local/opt/openssl@4
 
     steps:
-    - name: Workaround for issue 1772
-      run: sudo sed -i -e "s/localhost/localhost $(hostname)/g" /etc/hosts
-
     - name: Install dependencies with Homebrew
       run: brew install googletest libzip nlohmann-json python-setuptools
 
@@ -320,12 +325,15 @@ jobs:
       run: python3 -m pip install --user --break-system-packages pytest
 
     - name: Clone repository
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
       with:
         fetch-depth: 0
 
     - name: Build and Test with CTest
       run: ctest -VV -S test.cmake
+
+    - name: Check CMake wheel in a fresh virtual environment
+      run: python3 python/tests/check_wheel.py build/python/dist/*.whl
 
     - name: Install with CMake
       run: sudo cmake --install build

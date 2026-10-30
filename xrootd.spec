@@ -15,7 +15,7 @@ License:	LGPL-3.0-or-later AND BSD-2-Clause AND BSD-3-Clause AND curl AND MIT AN
 URL:		https://xrootd.org
 
 %if !%{with git}
-Version:	6.2.0
+Version:	6.2.1
 Source0:	https://xrootd.web.cern.ch/download/v%{version}/%{name}-%{version}.tar.gz
 %else
 %define git_version %(tar xzf %{_sourcedir}/%{name}.tar.gz -O xrootd/VERSION)
@@ -600,17 +600,20 @@ fi
 %files server-libs
 %{_libdir}/libXrdHttpUtils.so.*
 %{_libdir}/libXrdServer.so.*
+%{_libdir}/libXrdOfsPrepPersist.so.*
 # Plugins
 %{_libdir}/libXrdBlacklistDecision-6.so
 %{_libdir}/libXrdBwm-6.so
 %{_libdir}/libXrdCmsRedirectLocal-6.so
 %{_libdir}/libXrdFileCache-6.so
 %{_libdir}/libXrdHttp-6.so
+%{_libdir}/libXrdHttpTapeApi-6.so
 %{_libdir}/libXrdHttpTPC-6.so
 %{_libdir}/libXrdHttpCors-6.so
 %{_libdir}/libXrdMacaroons-6.so
 %{_libdir}/libXrdN2No2p-6.so
 %{_libdir}/libXrdOfsPrepGPI-6.so
+%{_libdir}/libXrdOfsPrepPersist-6.so
 %{_libdir}/libXrdOssArc-6.so
 %{_libdir}/libXrdOssCsi-6.so
 %{_libdir}/libXrdOssMirage-6.so
@@ -635,6 +638,7 @@ fi
 %{_includedir}/%{name}/XrdXrootd
 %{_libdir}/libXrdHttpUtils.so
 %{_libdir}/libXrdServer.so
+%{_libdir}/libXrdOfsPrepPersist.so
 
 %files private-devel
 %{_includedir}/%{name}/private
@@ -648,6 +652,7 @@ fi
 %{_bindir}/xrdcp
 %{_bindir}/xrdcrc32c
 %{_bindir}/xrdfs
+%{_bindir}/xrdtoken
 %{_bindir}/xrdgsiproxy
 %{_bindir}/xrdgsitest
 %{_bindir}/xrdmapc
@@ -657,6 +662,7 @@ fi
 %{_mandir}/man1/xrdcopy.1*
 %{_mandir}/man1/xrdcp.1*
 %{_mandir}/man1/xrdfs.1*
+%{_mandir}/man1/xrdtoken.1*
 %{_mandir}/man1/xrdgsiproxy.1*
 %{_mandir}/man1/xrdgsitest.1*
 %{_mandir}/man1/xrdmapc.1*
@@ -695,6 +701,12 @@ fi
 %endif
 
 %changelog
+
+* Thu Oct 29 2026 Guilherme Amadio <amadio@cern.ch> - 1:6.2.1-1
+- XRootD 6.2.1
+
+* Wed Oct 28 2026 Guilherme Amadio <amadio@cern.ch> - 1:5.9.9-1
+- XRootD 5.9.9
 
 * Tue Sep 29 2026 Guilherme Amadio <amadio@cern.ch> - 1:6.2.0-1
 - XRootD 6.2.0

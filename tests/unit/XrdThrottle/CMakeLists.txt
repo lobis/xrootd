@@ -1,0 +1,49 @@
+# The tested code links XrdServer, which a client-only build does not have
+if(NOT TARGET XrdServer)
+  return()
+endif()
+
+# Create a static library for testing (since MODULE libraries can't be linked)
+add_library(XrdThrottleTestLib STATIC
+  ${PROJECT_SOURCE_DIR}/src/XrdThrottle/XrdThrottleManager.cc
+  ${PROJECT_SOURCE_DIR}/src/XrdThrottle/XrdThrottleConfig.cc
+)
+
+target_link_libraries(XrdThrottleTestLib
+  PRIVATE
+    XrdUtils
+    XrdServer
+    ${ATOMIC_LIBRARY}
+)
+
+target_include_directories(XrdThrottleTestLib
+  PUBLIC
+    ${PROJECT_SOURCE_DIR}/src
+    ${PROJECT_SOURCE_DIR}/vendor/inih
+)
+
+# Create the test executable
+add_executable(xrdthrottle-unit-tests XrdThrottleUserLimitsTests.cc)
+
+target_link_libraries(xrdthrottle-unit-tests
+  PRIVATE
+    XrdThrottleTestLib
+    XrdUtils
+    XrdServer
+    GTest::gtest
+    GTest::gtest_main
+)
+
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
+  AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9.1)
+  target_link_libraries(xrdthrottle-unit-tests PRIVATE stdc++fs)
+endif()
+
+target_include_directories(xrdthrottle-unit-tests
+  PRIVATE
+    ${PROJECT_SOURCE_DIR}/src
+    ${PROJECT_SOURCE_DIR}/vendor/inih
+)
+
+gtest_discover_tests(xrdthrottle-unit-tests
+  PROPERTIES DISCOVERY_TIMEOUT 10)
