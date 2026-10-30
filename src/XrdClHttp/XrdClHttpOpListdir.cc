@@ -78,8 +78,13 @@ bool CurlListdirOp::ParseProp(DavEntry &entry, TiXmlElement *prop)
 {
     for (auto child = prop->FirstChildElement(); child != nullptr; child = child->NextSiblingElement()) {
         if (!strcasecmp(child->Value(), "D:resourcetype") || !strcasecmp(child->Value(), "lp1:resourcetype")) {
-            auto collection = child->FirstChildElement("D:collection");
-            entry.m_isdir = collection != nullptr;
+            for (auto type = child->FirstChildElement(); type;
+                 type = type->NextSiblingElement()) {
+                if (!strcasecmp(type->Value(), "D:collection") ||
+                    !strcasecmp(type->Value(), "lp1:collection")) {
+                    entry.m_isdir = true;
+                }
+            }
             if (entry.m_isdir && entry.m_size < 0) {
                 entry.m_size = 0;
             }

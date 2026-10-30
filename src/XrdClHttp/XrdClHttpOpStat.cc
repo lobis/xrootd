@@ -38,7 +38,6 @@ CurlStatOp::OptionsDone()
     auto verbs = instance.Get(target.empty() ? m_url : target);
     if (verbs.IsSet(VerbsCache::HttpVerb::kPROPFIND)) {
         curl_easy_setopt(m_curl.get(), CURLOPT_CUSTOMREQUEST, "PROPFIND");
-        m_headers_list.emplace_back("Depth", "0");
         curl_easy_setopt(m_curl.get(), CURLOPT_NOBODY, 0L);
         m_is_propfind = true;
     } else {
@@ -64,7 +63,6 @@ CurlStatOp::Redirect(std::string &target)
 
     if (verbs.IsSet(VerbsCache::HttpVerb::kPROPFIND)) {
         curl_easy_setopt(m_curl.get(), CURLOPT_CUSTOMREQUEST, "PROPFIND");
-        m_headers_list.emplace_back("Depth", "0");
         curl_easy_setopt(m_curl.get(), CURLOPT_NOBODY, 0L);
         m_is_propfind = true;
     } else {
@@ -80,12 +78,15 @@ CurlStatOp::Setup(CURL *curl, CurlWorker &worker)
     if (!CurlOperation::Setup(curl, worker)) return false;
     curl_easy_setopt(m_curl.get(), CURLOPT_WRITEFUNCTION, CurlStatOp::WriteCallback);
     curl_easy_setopt(m_curl.get(), CURLOPT_WRITEDATA, this);
+    // FinishSetup serializes the headers before OPTIONS completes.  Include
+    // the stat depth now so switching HEAD to PROPFIND does not accidentally
+    // request the server's default (infinite) collection depth.
+    m_headers_list.emplace_back("Depth", "0");
 
     auto &instance = VerbsCache::Instance();
     auto verbs = instance.Get(m_url);
     if (verbs.IsSet(VerbsCache::HttpVerb::kPROPFIND)) {
         curl_easy_setopt(m_curl.get(), CURLOPT_CUSTOMREQUEST, "PROPFIND");
-        m_headers_list.emplace_back("Depth", "0");
         curl_easy_setopt(m_curl.get(), CURLOPT_NOBODY, 0L);
         m_is_propfind = true;
     } else {
@@ -134,7 +135,13 @@ CurlStatOp::ParseProp(TiXmlElement *prop) {
                 m_length = std::stoll(len);
             }
         } else if (!strcasecmp(child->Value(), "D:resourcetype") || !strcasecmp(child->Value(), "lp1:resourcetype")) {
-            m_is_dir = child->FirstChildElement("D:collection") != nullptr;
+            for (auto type = child->FirstChildElement(); type;
+                 type = type->NextSiblingElement()) {
+                if (!strcasecmp(type->Value(), "D:collection") ||
+                    !strcasecmp(type->Value(), "lp1:collection")) {
+                    m_is_dir = true;
+                }
+            }
         }
     }
     if (m_length < 0 && m_is_dir) {
