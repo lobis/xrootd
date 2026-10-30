@@ -10,6 +10,7 @@ add_executable(xrdclhttp-tests-unit
         HeaderBuilderForbiddenHeaderTest.cc
         HeaderBuilderParsingTest.cc
         ParseTokenFileTests.cc
+        StatusConvertTest.cc
         )
 
 target_include_directories(xrdclhttp-tests-unit PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
