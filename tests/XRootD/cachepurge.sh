@@ -49,9 +49,29 @@ function cached_bytes() {
 function cached_indices() {
 	local i out=()
 	for i in $(seq 1 $((2 * PFC_GROUP))); do
-		[[ -f "$(cached_file ${i})" ]] && out+=("${i}")
+		[[ -f "$(cached_file "${i}")" ]] && out+=("${i}")
 	done
 	echo "${out[*]}"
+}
+
+# A completed download can still have an open access record. Wait for the
+# close write too, since its cinfo mtime is what purge uses to order files.
+function wait_for_purge_cinfo() {
+	local nblk ndone state detached
+	for _ in $(seq 100); do
+		if [[ -f "$1" ]]; then
+			read -r nblk ndone state <<< "$(cinfo_blocks "$1")"
+			detached="$(xrdpfc_print -u B "$1" | awk '$1 == 1 { print $3; exit }')"
+			if [[ "${state}" == complete ]] && [[ "${nblk}" == "${ndone}" ]] &&
+			   [[ -n "${detached}" ]] && [[ "${detached}" != ------:------ ]]; then
+				return 0
+			fi
+		fi
+		sleep 0.2
+	done
+	report_cinfo_state "$1"
+	echo "  first access record detach: ${detached:-missing}"
+	error "timed out after 20 s waiting for complete, closed cinfo $1"
 }
 
 function test_cachepurge() {
@@ -71,10 +91,36 @@ function test_cachepurge() {
 	for i in $(seq 1 ${PFC_GROUP}); do
 		assert xrdcp -fs "${HOST}//pfc-purge-${i}.dat" "purge-out-${i}.dat"
 	done
+	for i in $(seq 1 ${PFC_GROUP}); do
+		wait_for_purge_cinfo "$(cinfo_path "pfc-purge-${i}.dat")"
+	done
 	sleep 3
 	for i in $(seq $((PFC_GROUP + 1)) ${n_total}); do
 		assert xrdcp -fs "${HOST}//pfc-purge-${i}.dat" "purge-out-${i}.dat"
 	done
+	for i in $(seq $((PFC_GROUP + 1)) ${n_total}); do
+		wait_for_purge_cinfo "$(cinfo_path "pfc-purge-${i}.dat")"
+	done
+
+	# Purge compares whole-second cinfo mtimes. Check the actual boundary,
+	# rather than assuming that read order produced distinct timestamps.
+	assert python3 - "$(cache_store)" "${PFC_GROUP}" <<'PY'
+import os
+import sys
+
+store, group = sys.argv[1], int(sys.argv[2])
+mtimes = []
+for i in range(1, 2 * group + 1):
+    path = os.path.join(store, "pfc-purge-{}.dat.cinfo".format(i))
+    mtimes.append(int(os.stat(path).st_mtime))
+old, new = mtimes[:group], mtimes[group:]
+print("cinfo mtimes: old={}, new={}".format(old, new))
+if max(old) >= min(new):
+    sys.exit(
+        "cache access cohorts overlap: every old cinfo must predate "
+        "every new cinfo"
+    )
+PY
 
 	local filled
 	filled="$(cached_bytes)"
@@ -120,27 +166,37 @@ function test_cachepurge() {
 
 	# The exact number purged is not fixed -- it depends on how many passes ran
 	# and on what was purge-protected at the time -- but the ordering is the
-	# contract: a recently read file must not be dropped while an older one is
-	# kept.
+	# contract: a file from the newer group must not be dropped while one from
+	# the older group is kept. Files within a group can have equal mtimes.
 	local survivors
 	survivors="$(cached_indices)"
 	echo "survivors: ${survivors:-none}"
 
-	local oldest_survivor=0 newest_purged=0
+	local old_survivor=0 new_purged=0 new_survivor=0 newest_purged=0
 	for i in $(seq 1 ${n_total}); do
-		if [[ -f "$(cached_file ${i})" ]]; then
-			[[ "${oldest_survivor}" -eq 0 ]] && oldest_survivor="${i}"
+		if [[ -f "$(cached_file "${i}")" ]]; then
+			if [[ "${i}" -le "${PFC_GROUP}" ]]; then
+				old_survivor="${i}"
+			else
+				new_survivor="${i}"
+			fi
 		else
 			newest_purged="${i}"
+			if [[ "${i}" -gt "${PFC_GROUP}" ]]; then
+				new_purged="${i}"
+			fi
 		fi
 	done
 
 	if [[ "${newest_purged}" -eq 0 ]]; then
 		error "nothing was purged even though usage came down; the test is not testing purge"
 	fi
-	if [[ "${oldest_survivor}" -ne 0 ]] && [[ "${newest_purged}" -gt "${oldest_survivor}" ]]; then
-		error "purge kept file ${oldest_survivor} but dropped the more recently read" \
-		      "file ${newest_purged}; survivors were: ${survivors}"
+	if [[ "${new_survivor}" -eq 0 ]]; then
+		error "purge removed every file from the newer group; survivors were: ${survivors:-none}"
+	fi
+	if [[ "${old_survivor}" -ne 0 ]] && [[ "${new_purged}" -ne 0 ]]; then
+		error "purge kept old file ${old_survivor} but dropped newer" \
+		      "file ${new_purged}; survivors were: ${survivors}"
 	fi
 
 	#---------------------------------------------------------------------------
@@ -149,8 +205,8 @@ function test_cachepurge() {
 
 	local victim="pfc-purge-${newest_purged}.dat"
 
-	if [[ -e "$(cinfo_path ${victim})" ]]; then
-		error "purge removed the data file but left the cinfo: $(cinfo_path ${victim})"
+	if [[ -e "$(cinfo_path "${victim}")" ]]; then
+		error "purge removed the data file but left the cinfo: $(cinfo_path "${victim}")"
 	fi
 
 	# It still reads correctly, and reading it puts it back in the cache --
@@ -160,8 +216,8 @@ function test_cachepurge() {
 	assert xrdcp -f "${HOST}//${victim}" purge-refetch.dat
 	assert cmp purge-src.dat purge-refetch.dat
 
-	wait_for_access_record "$(cinfo_path ${victim})" 1
+	wait_for_access_record "$(cinfo_path "${victim}")" 1
 	local n_blocks=$((PFC_FILE_MB * 1024 * 1024 / PFC_BLOCKSIZE))
-	assert_eq "${n_blocks} ${n_blocks} complete" "$(cinfo_blocks "$(cinfo_path ${victim})")" \
+	assert_eq "${n_blocks} ${n_blocks} complete" "$(cinfo_blocks "$(cinfo_path "${victim}")")" \
 		"a purged file should be fetched from the origin again"
 }
