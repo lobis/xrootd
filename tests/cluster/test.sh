@@ -204,7 +204,7 @@ done
 # create local files with random contents using OpenSSL
 
 for host in "${!hosts[@]}"; do
-       ${OPENSSL} rand -out "${LCLDATADIR}/${host}.ref" $((1024 * ($RANDOM + 1)))
+       ${OPENSSL} rand -out "${LCLDATADIR}/${host}.ref" $((1024 * ($RANDOM % 128 + 1)))
 done
 
 # upload local files to the servers in parallel
