@@ -36,6 +36,7 @@ ${PYTHON} -c 'from XRootD import client; print(client.FileSystem("root://localho
 # the native libraries under site-packages.
 if [[ ${1-} = --native ]]; then
 	${PYTHON} - "${XRDCP}" "${XRDFS}" <<'PY'
+import configparser
 from pathlib import Path
 import pyxrootd
 import sys
@@ -57,6 +58,9 @@ assert not unexpected, 'Bundled native payload: ' + repr(unexpected)
 
 for metadata in payload.parent.glob('xrootd-*.dist-info'):
     entries = metadata / 'entry_points.txt'
-    assert not entries.exists() or '[console_scripts]' not in entries.read_text()
+    parser = configparser.ConfigParser()
+    parser.read(str(entries))
+    assert not parser.has_section('console_scripts') or not parser.options(
+        'console_scripts'), 'Native wheel defines console entry points'
 PY
 fi
