@@ -96,15 +96,9 @@ class CMakeBuild(build_ext):
             if prebuilt is not None:
                 if os.path.isdir(destdir):
                     shutil.rmtree(destdir)
-                # Recreate directly; distutils caches previously created paths.
-                os.makedirs(destdir)
+                # Copy the staged payload without retaining stale files.
+                shutil.copytree(prebuilt, destdir)
                 self.copy_file(srcdir + '/src/__init__.py', destdir)
-
-                # The payload includes native executables and client plugins
-                # when built by the main project, or just the standalone
-                # module.
-                for entry in sorted(os.listdir(prebuilt)):
-                    self.copy_file(os.path.join(prebuilt, entry), destdir)
 
                 continue
 

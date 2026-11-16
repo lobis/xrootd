@@ -97,15 +97,17 @@ class CMakeBuild(build_ext):
             check_call([cmake, ext.src, '-B', self.build_temp] + cmake_args)
             check_call([cmake, '--build', self.build_temp,
                         '--target', 'PyXRootDClientPayload'])
+            # Honor a payload path supplied through CMAKE_ARGS.
+            cache_path = os.path.join(self.build_temp, 'CMakeCache.txt')
+            with open(cache_path) as cache:
+                payload = next(line.split('=', 1)[1].rstrip('\n')
+                               for line in cache
+                               if line.startswith('PYXROOTD_PAYLOAD_DIR:'))
             destdir = os.path.join(extdir, ext.name)
             if os.path.isdir(destdir):
                 shutil.rmtree(destdir)
-            # Recreate directly; distutils caches previously created paths.
-            os.makedirs(destdir)
+            shutil.copytree(payload, destdir)
             self.copy_file('python/src/__init__.py', destdir)
-            payload = os.path.join(self.build_temp, 'payload')
-            for entry in sorted(os.listdir(payload)):
-                self.copy_file(os.path.join(payload, entry), destdir)
 
 
 # Keep the token workflow implementation in its own topic. Its native source

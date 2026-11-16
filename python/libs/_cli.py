@@ -8,18 +8,15 @@ def _payload_dir():
     return os.path.join(os.path.dirname(os.path.dirname(__file__)), 'pyxrootd')
 
 
-def _configure_plugins():
-    directory = _payload_dir()
-    if os.path.isfile(os.path.join(directory, 'http.conf')):
-        os.environ.setdefault('XRD_PLUGINCONFDIR', directory)
-
-
 def _exec(command):
     # Resolve from this installation, never from PATH, so all clients use the
     # matching bundled libraries. exec preserves signals and native exit codes.
-    _configure_plugins()
-    executable = os.path.join(_payload_dir(), command)
-    os.execv(executable, [command] + sys.argv[1:])
+    directory = _payload_dir()
+    env = os.environ.copy()
+    if os.path.isfile(os.path.join(directory, 'http.conf')):
+        env.setdefault('XRD_PLUGINCONFDIR', directory)
+    executable = os.path.join(directory, command)
+    os.execve(executable, [command] + sys.argv[1:], env)
 
 
 def xrdfs():

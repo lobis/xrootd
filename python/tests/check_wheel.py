@@ -1,6 +1,6 @@
 """Check a wheel through a pyproject dependency in a fresh virtual environment.
 
-Run with the build interpreter (with pip, setuptools and wheel available):
+Run with pip, setuptools >= 61 and wheel in the build interpreter:
     python python/tests/check_wheel.py path/to/xrootd.whl
 """
 
@@ -94,7 +94,7 @@ def check(wheel, directory):
     consumer.mkdir()
     (consumer / 'pyproject.toml').write_text('''
 [build-system]
-requires = ["setuptools>=42"]
+requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 [project]
 name = "xrootd-cli-consumer"
@@ -114,12 +114,14 @@ packages = []
     run([binary / 'python', '-m', 'pip', 'install', '--no-index',
          '--find-links', wheelhouse, 'xrootd-cli-consumer'])
 
-    # No user plugin configurations, credentials, library paths or system
-    # XRootD commands may supply missing pieces of the installed wheel.
+    # Use virtual environment commands without inherited environment overrides.
+    # Native clients still read user (passwd home) and system configuration.
     home = directory / 'home'
     home.mkdir()
     env = {'PATH': str(binary) + os.pathsep + '/usr/bin:/bin',
            'HOME': str(home), 'XRD_HTTPDISABLEX509': '1',
+           # Avoid reverse-DNS lookups of the runner's network interfaces.
+           'XRDNET_IDENTITY': 'localhost',
            'BEARER_TOKEN': TOKEN}
     commands = ['xrdfs', 'xrdcp', 'xrdcopy']
     with zipfile.ZipFile(wheel) as archive:
@@ -129,9 +131,22 @@ packages = []
     for name in commands:
         assert shutil.which(name, path=env['PATH']) == str(binary / name)
         run([binary / name, '--help'], env=env)
-    run([binary / 'python', '-c',
-         'from XRootD import client; '
-         'print(client.FileSystem("root://localhost"))'], env=env)
+    result = run([binary / 'python', '-c',
+                  'import os; before = os.environ.copy(); '
+                  'from XRootD import client; '
+                  'import pyxrootd; assert os.environ == before; '
+                  'print(pyxrootd.__path__[0]); '
+                  'print(client.FileSystem("root://localhost"))'], env=env)
+    payload = result.stdout.splitlines()[0].decode()
+
+    # An explicit plugin directory takes precedence over the bundled defaults.
+    plugins = directory / 'plugins'
+    plugins.mkdir()
+    override = dict(env, XRD_PLUGINCONFDIR=str(plugins), XRD_LOGLEVEL='Debug')
+    result = run([binary / 'xrdfs', '--help'], env=override)
+    selected = 'Processing plug-in definitions in {}...'
+    assert selected.format(plugins).encode() in result.stderr
+    assert selected.format(payload).encode() not in result.stderr
 
     # Test stdin and native argument forwarding through both copy entry points.
     for name in ('xrdcp', 'xrdcopy'):
@@ -161,7 +176,7 @@ packages = []
              'import sys; from XRootD import client; '
              'status, info = client.FileSystem(sys.argv[1]).stat("/payload"); '
              'assert status.ok, status; assert info.size == int(sys.argv[2])',
-             url, len(PAYLOAD)], env=env)
+             url, len(PAYLOAD)], env=dict(env, XRD_PLUGINCONFDIR=payload))
         if has_token:
             result = run([binary / 'xrdtoken', 'macaroon', url], env=env)
             assert result.stdout.strip() == b'wheel-test-macaroon'
@@ -170,7 +185,7 @@ packages = []
         server.server_close()
         thread.join()
     print('PASS: pyproject dependency, CLI paths/help/stdin, bindings, '
-          'bearer-authenticated HTTPS stat/copy' +
+          'plugin override, bearer-authenticated HTTPS stat/copy' +
           (', xrdtoken macaroon request' if has_token else ''))
 
 

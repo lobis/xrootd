@@ -150,16 +150,18 @@ endif()
 
 add_custom_command(
   OUTPUT ${PYXROOTD_WHEEL} ${PYXROOTD_SITEDIR}/pyxrootd/__init__.py
+  ${PYXROOTD_PAYLOAD_COMMANDS}
   COMMAND ${CMAKE_COMMAND} -E rm -rf ${CMAKE_CURRENT_BINARY_DIR}/dist
   COMMAND ${PYXROOTD_ENV} ${Python_EXECUTABLE} -m pip wheel --no-deps --no-index
           ${PYXROOTD_PIP_OPTIONS} --disable-pip-version-check --wheel-dir ${CMAKE_CURRENT_BINARY_DIR}/dist .
   COMMAND ${Python_EXECUTABLE} -m pip install --no-deps --no-index --upgrade
           --disable-pip-version-check --target ${PYXROOTD_SITEDIR} ${PYXROOTD_WHEEL}
-  DEPENDS PyXRootDClientPayload ${PYXROOTD_PAYLOAD_TARGETS}
+  DEPENDS ${PYXROOTD_PAYLOAD_TARGETS} ${PYXROOTD_PAYLOAD_FILES}
           ${PYXROOTD_SOURCES}
           ${CMAKE_CURRENT_BINARY_DIR}/setup.py
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-  COMMENT "Building Python bindings wheel")
+  COMMENT "Building Python bindings wheel"
+  VERBATIM)
 
 add_custom_target(PyXRootD ALL DEPENDS ${PYXROOTD_WHEEL})
 

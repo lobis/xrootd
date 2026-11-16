@@ -235,6 +235,12 @@ same native command set. The bindings-only build from the ``python/`` directory,
 or a CMake build with ``XRDCL_LIB_ONLY=ON``, continues to use an external XRootD
 installation and does not install commands.
 
+For a normal CMake prefix installation, CMake installs a private bindings-only
+wheel so that it retains sole ownership of the native executables. This wheel
+reuses the existing client extension without compiling it again.
+It is also built with ``INSTALL_PYTHON_BINDINGS=OFF`` in
+``python/native-bindings/dist`` for native package installers.
+
 Full PyPI builds require libcurl and its development headers for the HTTP
 plugin, together with the dependencies described in INSTALL.md_. PyPI builds
 omit optional readline support. Published Linux and macOS wheels are repaired
@@ -244,10 +250,14 @@ libraries from the build environment. The supported platforms and Python
 versions are those in the Python wheel CI matrix. Windows wheels are not
 provided.
 
-The bundled HTTP plugin configuration is selected automatically for the
-commands and Python bindings. An explicit ``XRD_PLUGINCONFDIR`` or ``XRD_PLUGIN``
-setting retains precedence. Native authentication settings, including bearer
-tokens and X.509 credentials, continue to work as usual.
+The commands select the bundled HTTP plugin configuration unless
+``XRD_PLUGINCONFDIR`` is set. Native user and system plugin directories are
+still read, with the selected directory taking priority. An explicit
+``XRD_PLUGIN`` selects the default plugin instead. Native authentication
+settings, including bearer tokens and X.509 credentials, continue to work as
+usual. Importing the Python bindings does not change these settings. To use
+the bundled HTTP configuration from Python, set ``XRD_PLUGINCONFDIR`` to the
+installed ``pyxrootd`` directory before importing the bindings.
 
 Binary wheels are supported as well. They can be built using the ``wheel``
 subcommand instead of ``install``::

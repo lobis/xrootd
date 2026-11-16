@@ -34,8 +34,7 @@ ${PYTHON} -c 'from XRootD import client; print(client.FileSystem("root://localho
 # Native installs must remain usable without the Python package. In particular,
 # pip must not replace the executables with launchers or bundle another copy of
 # the native libraries under site-packages.
-if [[ ${1-} = --native ]]; then
-	${PYTHON} - "${XRDCP}" "${XRDFS}" <<'PY'
+${PYTHON} - "${XRDCP}" "${XRDFS}" <<'PY'
 import configparser
 from pathlib import Path
 import pyxrootd
@@ -63,4 +62,3 @@ for metadata in payload.parent.glob('xrootd-*.dist-info'):
     assert not parser.has_section('console_scripts') or not parser.options(
         'console_scripts'), 'Native wheel defines console entry points'
 PY
-fi

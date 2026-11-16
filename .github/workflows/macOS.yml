@@ -71,4 +71,4 @@ jobs:
       run: |
         export PYVERSION=$(python3 --version | grep -o 3...)
         export PYTHONPATH=/usr/local/lib/python${PYVERSION}/site-packages
-        tests/post-install.sh --native
+        tests/post-install.sh

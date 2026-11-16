@@ -1,5 +1,5 @@
 # Reuse the native clients, client libraries and dynamically loaded plugins.
-# The same payload target is used by setup.py and the enclosing CMake wheel.
+# The same staging commands are used by setup.py and the enclosing CMake wheel.
 
 set(PYXROOTD_COMMANDS)
 
@@ -8,6 +8,7 @@ if(PYPI_BUILD AND EXISTS ${CMAKE_SOURCE_DIR}/src/XrdApps/XrdToken.cc
   message(FATAL_ERROR "The token client source is present but xrdtoken is disabled")
 endif()
 set(PYXROOTD_PAYLOAD_TARGETS client)
+set(PYXROOTD_PAYLOAD_FILES)
 
 if(TARGET xrdfs AND TARGET xrdcp)
   set(PYXROOTD_COMMANDS xrdfs xrdcp xrdcopy)
@@ -41,54 +42,57 @@ endif()
 set(PYXROOTD_PAYLOAD_DIR "${CMAKE_CURRENT_BINARY_DIR}/extension"
     CACHE PATH "Staging directory for the Python wheel native client payload")
 
-set(payload_commands
+set(PYXROOTD_PAYLOAD_COMMANDS
   COMMAND ${CMAKE_COMMAND} -E rm -rf ${PYXROOTD_PAYLOAD_DIR}
   COMMAND ${CMAKE_COMMAND} -E make_directory ${PYXROOTD_PAYLOAD_DIR})
 
 if(PYXROOTD_COMMANDS AND TARGET XrdClHttp-${PLUGIN_VERSION})
   file(GENERATE OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/http.conf CONTENT
     "url = http://*;https://*;dav://*;davs://*\nlib = $<TARGET_FILE_NAME:XrdClHttp-${PLUGIN_VERSION}>\nenable = true\n")
-  list(APPEND payload_commands COMMAND ${CMAKE_COMMAND} -E copy
+  list(APPEND PYXROOTD_PAYLOAD_COMMANDS COMMAND ${CMAKE_COMMAND} -E copy
     ${CMAKE_CURRENT_BINARY_DIR}/http.conf ${PYXROOTD_PAYLOAD_DIR})
+  list(APPEND PYXROOTD_PAYLOAD_FILES ${CMAKE_CURRENT_BINARY_DIR}/http.conf)
+endif()
+
+if(PYXROOTD_COMMANDS)
+  # The enclosing wheel copies build artifacts. Add sibling lookup there;
+  # regular native installations retain their original install RPATH.
+  # PyPI builds already use the sibling install RPATH from src/CMakeLists.
+  if(APPLE)
+    set(relative_rpath "@loader_path")
+  else()
+    set(relative_rpath "\$ORIGIN")
+  endif()
+  set_property(TARGET ${PYXROOTD_PAYLOAD_TARGETS}
+    APPEND PROPERTY BUILD_RPATH ${relative_rpath})
 endif()
 
 foreach(target IN LISTS PYXROOTD_PAYLOAD_TARGETS)
-  if(PYXROOTD_COMMANDS)
-    # Relative paths come first in the wheel; the usual build paths still allow
-    # these same targets to run in the original CMake build tree. Install paths
-    # are retained for regular native installations as well.
-    if(APPLE)
-      set(relative_rpath "@loader_path")
-      set_target_properties(${target} PROPERTIES
-        INSTALL_NAME_DIR "@rpath" BUILD_WITH_INSTALL_NAME_DIR TRUE)
-    else()
-      set(relative_rpath "\$ORIGIN")
-    endif()
-    set_property(TARGET ${target} APPEND PROPERTY BUILD_RPATH ${relative_rpath})
-    set_property(TARGET ${target} APPEND PROPERTY INSTALL_RPATH ${relative_rpath})
-  endif()
-
   get_target_property(type ${target} TYPE)
   if(type STREQUAL "SHARED_LIBRARY")
     # Preserve the SONAME needed by the loader and the unversioned name used
     # by dlopen. Copies avoid symlinks, which wheel ZIPs cannot preserve.
-    list(APPEND payload_commands
+    list(APPEND PYXROOTD_PAYLOAD_COMMANDS
       COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:${target}>
               ${PYXROOTD_PAYLOAD_DIR}/$<TARGET_SONAME_FILE_NAME:${target}>
       COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:${target}>
               ${PYXROOTD_PAYLOAD_DIR}/$<TARGET_LINKER_FILE_NAME:${target}>)
   else()
-    list(APPEND payload_commands
+    list(APPEND PYXROOTD_PAYLOAD_COMMANDS
       COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:${target}>
               ${PYXROOTD_PAYLOAD_DIR})
   endif()
 endforeach()
 
-add_custom_target(PyXRootDClientPayload
-  ${payload_commands}
-  DEPENDS ${PYXROOTD_PAYLOAD_TARGETS}
-  COMMENT "Staging Python wheel native clients and plugins"
-  VERBATIM)
+# Source-package builds invoke this target explicitly. The enclosing CMake
+# wheel stages within its output rule, so an unchanged build does no copying.
+if(PYPI_BUILD)
+  add_custom_target(PyXRootDClientPayload
+    ${PYXROOTD_PAYLOAD_COMMANDS}
+    DEPENDS ${PYXROOTD_PAYLOAD_TARGETS} ${PYXROOTD_PAYLOAD_FILES}
+    COMMENT "Staging Python wheel native clients and plugins"
+    VERBATIM)
+endif()
 
 # setup.py needs a space-separated list when substituted into Python source.
 string(JOIN " " PYXROOTD_COMMANDS ${PYXROOTD_COMMANDS})
