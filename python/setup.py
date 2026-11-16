@@ -36,7 +36,7 @@ if not srcdir.startswith('$'):
     # client library and tracks its dependencies. All that is left to do here
     # is to pick it up from where CMake left it and package it into a wheel.
 
-    prebuilt = '${CMAKE_CURRENT_BINARY_DIR}/extension'
+    prebuilt = '${PYXROOTD_PAYLOAD_DIR}'
 
     cmake = None
 else:

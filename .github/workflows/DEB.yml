@@ -63,7 +63,7 @@ jobs:
       run: apt install -y ../*.deb
 
     - name: Run post-install tests
-      run: tests/post-install.sh
+      run: tests/post-install.sh --native
 
     - name: Move DEBs to Artifact Directory
       run: |
@@ -113,7 +113,7 @@ jobs:
       run: apt install -y ../*.deb
 
     - name: Run post-install tests
-      run: tests/post-install.sh
+      run: tests/post-install.sh --native
 
     - name: Move DEBs to Artifact Directory
       run: |

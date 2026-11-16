@@ -55,7 +55,7 @@ jobs:
       run: dnf install -y $(rpm -E '%{_rpmdir}')/*/*.rpm
 
     - name: Run post-install tests
-      run: tests/post-install.sh
+      run: tests/post-install.sh --native
 
     - name: Move RPMs to Artifact Directory
       run: mkdir RPMS && mv $(rpm -E '%{_rpmdir}')/ RPMS$(rpm -E '%{dist}' | tr . /)
@@ -100,7 +100,7 @@ jobs:
       run: dnf install -y $(rpm -E '%{_rpmdir}')/*/*.rpm
 
     - name: Run post-install tests
-      run: tests/post-install.sh
+      run: tests/post-install.sh --native
 
     - name: Move RPMs to Artifact Directory
       run: mkdir RPMS && mv $(rpm -E '%{_rpmdir}')/ RPMS$(rpm -E '%{dist}' | tr . /)
@@ -145,7 +145,7 @@ jobs:
       run: dnf install -y $(rpm -E '%{_rpmdir}')/*/*.rpm
 
     - name: Run post-install tests
-      run: tests/post-install.sh
+      run: tests/post-install.sh --native
 
     - name: Move RPMs to Artifact Directory
       run: mkdir RPMS && mv $(rpm -E '%{_rpmdir}')/ RPMS$(rpm -E '%{dist}' | tr . /)
@@ -189,7 +189,7 @@ jobs:
       run: dnf install -y $(rpm -E '%{_rpmdir}')/*/*.rpm
 
     - name: Run post-install tests
-      run: tests/post-install.sh
+      run: tests/post-install.sh --native
 
     - name: Move RPMs to Artifact Directory
       run: mkdir RPMS && mv $(rpm -E '%{_rpmdir}')/ RPMS$(rpm -E '%{dist}' | tr . /)

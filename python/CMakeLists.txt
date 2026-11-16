@@ -168,18 +168,57 @@ add_custom_target(PyXRootD ALL DEPENDS ${PYXROOTD_WHEEL})
 set_property(DIRECTORY APPEND PROPERTY ADDITIONAL_CLEAN_FILES
   ${CMAKE_CURRENT_BINARY_DIR}/build
   ${CMAKE_CURRENT_BINARY_DIR}/dist
-  ${CMAKE_CURRENT_BINARY_DIR}/extension
+  ${CMAKE_CURRENT_BINARY_DIR}/native-bindings/build
+  ${CMAKE_CURRENT_BINARY_DIR}/native-bindings/dist
+  ${CMAKE_CURRENT_BINARY_DIR}/native-bindings/extension
+  ${CMAKE_CURRENT_BINARY_DIR}/native-bindings/xrootd.egg-info
+  ${PYXROOTD_PAYLOAD_DIR}
   ${CMAKE_CURRENT_BINARY_DIR}/xrootd.egg-info
   ${PYXROOTD_SITEDIR})
 
 option(INSTALL_PYTHON_BINDINGS "Install Python bindings" TRUE)
 
+set(PYXROOTD_INSTALL_WHEEL ${PYXROOTD_WHEEL})
+
+# Native installations already own their commands and libraries. Package
+# only the extension for pip, so its RECORD cannot claim those commands.
+# Build it even when CMake installation is disabled, for Debian/RPM packaging.
+if(PYXROOTD_COMMANDS)
+  function(configure_native_bindings)
+    set(PYXROOTD_COMMANDS "")
+    set(PYXROOTD_PAYLOAD_DIR ${CMAKE_CURRENT_BINARY_DIR}/native-bindings/extension)
+    configure_file(setup.py native-bindings/setup.py)
+  endfunction()
+  configure_native_bindings()
+
+  set(PYXROOTD_INSTALL_WHEEL
+    ${CMAKE_CURRENT_BINARY_DIR}/native-bindings/dist/xrootd-${PYXROOTD_VERSION}-${PYXROOTD_TAG}.whl)
+
+  add_custom_command(
+    OUTPUT ${PYXROOTD_INSTALL_WHEEL}
+    COMMAND ${CMAKE_COMMAND} -E rm -rf ${CMAKE_CURRENT_BINARY_DIR}/native-bindings/extension
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/native-bindings/extension
+    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:client>
+            ${CMAKE_CURRENT_BINARY_DIR}/native-bindings/extension
+    COMMAND ${CMAKE_COMMAND} -E rm -rf ${CMAKE_CURRENT_BINARY_DIR}/native-bindings/dist
+    COMMAND ${PYXROOTD_ENV} ${Python_EXECUTABLE} -m pip wheel --no-deps --no-index
+            ${PYXROOTD_PIP_OPTIONS} --disable-pip-version-check --wheel-dir ${CMAKE_CURRENT_BINARY_DIR}/native-bindings/dist .
+    DEPENDS client $<TARGET_FILE:client> ${PYXROOTD_SOURCES}
+            ${CMAKE_CURRENT_BINARY_DIR}/native-bindings/setup.py
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/native-bindings
+    COMMENT "Building Python bindings wheel for native installation"
+    VERBATIM)
+
+  add_custom_target(PyXRootDNativeBindings DEPENDS ${PYXROOTD_INSTALL_WHEEL})
+  add_dependencies(PyXRootD PyXRootDNativeBindings)
+endif()
+
 if(INSTALL_PYTHON_BINDINGS)
   set(PIP_OPTIONS "" CACHE STRING "Install options for pip")
 
   install(CODE "
-    if(NOT EXISTS \"${PYXROOTD_WHEEL}\")
-      message(FATAL_ERROR \"Python bindings wheel not found: ${PYXROOTD_WHEEL}\n\"
+    if(NOT EXISTS \"${PYXROOTD_INSTALL_WHEEL}\")
+      message(FATAL_ERROR \"Python bindings wheel not found: ${PYXROOTD_INSTALL_WHEEL}\n\"
                           \"Please build the project before installing it.\")
     endif()
 
@@ -189,27 +228,13 @@ if(INSTALL_PYTHON_BINDINGS)
 
     execute_process(COMMAND ${Python_EXECUTABLE} -m pip install ${PIP_OPTIONS}
       --no-deps --ignore-installed
-      --prefix \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}\" ${PYXROOTD_WHEEL}
+      --prefix \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}\" ${PYXROOTD_INSTALL_WHEEL}
       RESULT_VARIABLE INSTALL_STATUS COMMAND_ECHO STDOUT)
     if(NOT INSTALL_STATUS EQUAL 0)
       message(FATAL_ERROR \"Failed to install Python bindings\")
     endif()
   ")
 
-  # A prefix installation also installs wheel console scripts into bindir.
-  # Restore the normal CMake executables there: native installations should
-  # remain usable independently of the Python bindings and their interpreter.
-  if(PYXROOTD_COMMANDS)
-    install(TARGETS xrdfs xrdcp RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-    if(TARGET xrdtoken)
-      install(TARGETS xrdtoken RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-    endif()
-    install(CODE "
-      file(REMOVE \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/xrdcopy\")
-      file(CREATE_LINK xrdcp
-        \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}/xrdcopy\" SYMBOLIC)
-    ")
-  endif()
 endif()
 
 if(NOT BUILD_TESTS OR NOT ENABLE_SERVER_TESTS)
