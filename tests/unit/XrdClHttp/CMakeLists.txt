@@ -3,37 +3,40 @@ if(NOT TARGET XrdClHttpObj)
   return()
 endif()
 
-add_executable(xrdclhttp-tests-unit
-        HeaderBuilderAppendMissingTest.cc
-        HeaderBuilderEntrySeparationTest.cc
-        HeaderBuilderForbiddenEntryTest.cc
-        HeaderBuilderForbiddenHeaderTest.cc
-        HeaderBuilderParsingTest.cc
-        ParseTokenFileTests.cc
-        )
-
-target_include_directories(xrdclhttp-tests-unit PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-
-target_link_libraries(xrdclhttp-tests-unit
-        XrdClHttpObj
-        GTest::gmock
-        GTest::gtest
-        GTest::gtest_main
-        )
-
-if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
-  AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9.1)
-  target_link_libraries(xrdclhttp-tests-unit stdc++fs)
-endif()
-
-gtest_discover_tests(xrdclhttp-tests-unit
-        PROPERTIES DISCOVERY_TIMEOUT 10)
 find_package(CURL REQUIRED)
 
-add_executable(xrdclhttp-tpc-tests-unit
-        XrdClHttpFilesystemTests.cc
-        )
+add_unit_tests(
+  SOURCES
+    ClientConfigTest.cc
+    CopyResponseTest.cc
+    HandlerQueueTest.cc
+    OptionsCacheTest.cc
+    ReadResponseTest.cc
+    RedirectTest.cc
+    SpaceResponseTest.cc
+    TokenTest.cc
+    WebDavParserTest.cc
+    XrdClHttpHeaderBuilderAppendMissing.cc
+    XrdClHttpHeaderBuilderEntrySeparation.cc
+    XrdClHttpHeaderBuilderForbiddenEntry.cc
+    XrdClHttpHeaderBuilderForbiddenHeader.cc
+    XrdClHttpHeaderBuilderParsing.cc
+    XrdClHttpParseTimeout.cc
+    XrdClHttpTape.cc
+    XrdClHttpTokenFileParser.cc
+    XrdClHttpUtil.cc
+  LIBRARIES
+    XrdClHttpObj
+    XrdCl
+    XrdXml
+    CURL::libcurl
+  INCLUDE_DIRECTORIES
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${PROJECT_SOURCE_DIR}/src
+)
 
+# The tests of the third-party copy compile XrdClHttpFilesystem.cc
+# themselves, thus they link the plug-in without it.
 file(GLOB_RECURSE XrdClHttpWithoutFilesystemSources
   ${PROJECT_SOURCE_DIR}/src/XrdClHttp/*.cc
 )
@@ -54,19 +57,10 @@ target_link_libraries(XrdClHttpWithoutFilesystem
     OpenSSL::Crypto
 )
 
-target_link_libraries(xrdclhttp-tpc-tests-unit
-    GTest::gmock
-    GTest::gtest
-    GTest::gtest_main
-    XrdClHttpWithoutFilesystem)
-
-if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
-  AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9.1)
-  target_link_libraries(xrdclhttp-tpc-tests-unit stdc++fs)
-endif()
-
-gtest_discover_tests(xrdclhttp-tpc-tests-unit
-  PROPERTIES DISCOVERY_TIMEOUT 10)
+add_unit_tests(filesystem
+  SOURCES XrdClHttpFilesystem.cc
+  LIBRARIES XrdClHttpWithoutFilesystem
+)
 
 # Exercise the actual worker with test-only aliases for the curl driver calls.
 # Keep this object library separate so the installed plugin never contains the
@@ -80,41 +74,12 @@ target_link_libraries(XrdClHttpLifecycle PRIVATE
 target_include_directories(XrdClHttpLifecycle PRIVATE
   "${PROJECT_SOURCE_DIR}/src")
 
-add_executable(xrdcl-http-worker-lifecycle-tests WorkerLifecycleTest.cc)
-target_link_libraries(xrdcl-http-worker-lifecycle-tests PRIVATE
-  XrdClHttpLifecycle XrdCl CURL::libcurl GTest::gtest_main)
-target_include_directories(xrdcl-http-worker-lifecycle-tests PRIVATE
-  "${PROJECT_SOURCE_DIR}/src")
-gtest_discover_tests(xrdcl-http-worker-lifecycle-tests TEST_PREFIX XrdClHttp::
-  DISCOVERY_TIMEOUT 10 PROPERTIES TIMEOUT 10)
-
-if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
-  AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9.1)
-  target_link_libraries(xrdcl-http-worker-lifecycle-tests PRIVATE stdc++fs)
-endif()
-
-add_executable(xrdcl-http-unit-tests
-  ClientConfigTest.cc
-  CopyResponseTest.cc
-  HandlerQueueTest.cc
-  HeaderParserTest.cc
-  OptionsCacheTest.cc
-  ParseTimeoutTest.cc
-  ReadResponseTest.cc
-  RedirectTest.cc
-  SpaceResponseTest.cc
-  TapeTest.cc
-  TokenTest.cc
-  WebDavParserTest.cc
+add_unit_tests(worker
+  SOURCES XrdClHttpWorker.cc
+  LIBRARIES XrdClHttpLifecycle XrdCl CURL::libcurl
+  INCLUDE_DIRECTORIES ${PROJECT_SOURCE_DIR}/src
+  PROPERTIES TIMEOUT 10
 )
-
-target_link_libraries(xrdcl-http-unit-tests
-  XrdClHttpObj XrdCl XrdXml CURL::libcurl GTest::gtest_main)
-target_include_directories(xrdcl-http-unit-tests
-  PRIVATE "${PROJECT_SOURCE_DIR}/src")
-
-gtest_discover_tests(xrdcl-http-unit-tests TEST_PREFIX XrdClHttp::
-  PROPERTIES DISCOVERY_TIMEOUT 10)
 
 # Per-file credentials coverage uses a disposable localhost HTTP server.
 find_package(Python3 QUIET COMPONENTS Interpreter)

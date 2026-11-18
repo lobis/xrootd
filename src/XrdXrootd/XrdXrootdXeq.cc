@@ -137,6 +137,17 @@ struct XrdXrootdSessID
 namespace
 {
 
+// Report a failed open on the f-stream. The isError record names the path
+// with its lfn. It gets no dictid and no "d" mapping record, because a path
+// that does not exist is a frequent error, and a failed open has no file.
+//
+void monOpenErr(XrdXrootdMonitor::User &mon, const char *path, int ecode,
+                char op = XrdXrootdMonStatERR::errOpen)
+{
+   if (!mon.Fstat() || !XrdXrootdMonFile::Errors()) return;
+   XrdXrootdMonFile::OpenErr(path, mon.Did, ecode, op);
+}
+
 const char *getTime()
 {
 static char buff[16];
@@ -701,7 +712,9 @@ int XrdXrootdProtocol::do_Close()
 // while the response is sent.
 //
    int retval = 0;
-   if (SFS_OK != rc) retval = fsError(rc, 0, fp->XrdSfsp->error, 0, 0);
+   if (SFS_OK != rc)
+      retval = fsError(rc, 0, fp->XrdSfsp->error, 0, 0,
+                       fp, XrdXrootdMonStatERR::errClose);
 
 // Delete the file from the file table. If the file object is deleted then it
 // will unlock the file In all cases, final monitoring records will be produced.
@@ -1190,6 +1203,13 @@ int XrdXrootdProtocol::do_Login()
    Entity.addrInfo = Link->AddrInfo();
    Client = &Entity;
 
+// Format the numeric client address for monitoring (no DNS lookup)
+//
+   char ipBuff[64] = "";
+   if (Monitor.Ready())
+      addrP->Format(ipBuff, sizeof(ipBuff), XrdNetAddrInfo::fmtAddr,
+                    XrdNetAddrInfo::prefipv4 | XrdNetAddrInfo::noPortRaw);
+
 // Check if we need to process a login environment
 //
    if (Request.login.dlen > 8)
@@ -1199,6 +1219,7 @@ int XrdXrootdProtocol::do_Login()
        char *tzVal = loginEnv.Get("xrd.tz");
        char *appXQ = loginEnv.Get("xrd.appname");
        char *aInfo = loginEnv.Get("xrd.info");
+       char *sName = loginEnv.Get("xrd.site");
        int   tzNum = (tzVal ? atoi(tzVal) : 0);
        if (cCode && *cCode && tzNum >= -12 && tzNum <= 14)
           {XrdNetAddrInfo::LocInfo locInfo;
@@ -1206,12 +1227,16 @@ int XrdXrootdProtocol::do_Login()
            locInfo.TimeZone = tzNum & 0xff;
            Link->setLocation(locInfo);
           }
-       if (Monitor.Ready() && (appXQ || aInfo))
-          {char apBuff[1024];
-           snprintf(apBuff, sizeof(apBuff), "&R=%s&x=%s&y=%s&I=%c",
+       if (Monitor.Ready())
+          {char apBuff[1024], sBuff[64];
+           snprintf(sBuff, sizeof(sBuff), "%s", (sName ? sName : ""));
+           for (char *cP = sBuff; *cP; cP++)
+               if (!isalnum((unsigned char)*cP) && !strchr("_-:", *cP))
+                  *cP = '.';
+           snprintf(apBuff, sizeof(apBuff), "&a=%s&I=%c&S=%s&R=%s&x=%s&y=%s",
+                    ipBuff, (clientPV & XrdOucEI::uIPv4 ? '4' : '6'), sBuff,
                     (rnumb ? rnumb : ""),
-                    (appXQ ? appXQ : ""), (aInfo ? aInfo : ""),
-                    (clientPV & XrdOucEI::uIPv4 ? '4' : '6'));
+                    (appXQ ? appXQ : ""), (aInfo ? aInfo : ""));
            Entity.moninfo = strdup(apBuff);
           }
 
@@ -1223,6 +1248,12 @@ int XrdXrootdProtocol::do_Login()
           }
        if (appXQ) AppName = strdup(appXQ);
       }
+      else if (Monitor.Ready())
+              {char apBuff[80];
+               snprintf(apBuff, sizeof(apBuff), "&a=%s&I=%c", ipBuff,
+                        (clientPV & XrdOucEI::uIPv4 ? '4' : '6'));
+               Entity.moninfo = strdup(apBuff);
+              }
 
 // Allocate a monitoring object, if needed for this connection
 //
@@ -1641,6 +1672,7 @@ int XrdXrootdProtocol::do_Open()
                     "%s file %s is already opened by %d %s; open denied.",
                     ('r' == usage ? "Input" : "Output"), fn, rc, who);
            eDest.Emsg("Xeq", ebuff);
+           monOpenErr(Monitor, fn, kXR_FileLocked);
            return Response.Send(kXR_FileLocked, ebuff);
           } else oHelp.mode = usage;
       }
@@ -1655,6 +1687,7 @@ int XrdXrootdProtocol::do_Open()
    if (!fp)
       {snprintf(ebuff, sizeof(ebuff)-1,"Insufficient memory to open %s",fn);
        eDest.Emsg("Xeq", ebuff);
+       monOpenErr(Monitor, fn, kXR_NoMemory);
        return Response.Send(kXR_NoMemory, ebuff);
       }
    oHelp.fp = fp;
@@ -1686,12 +1719,14 @@ int XrdXrootdProtocol::do_Open()
 //
    if ((rc = fp->open(fn, (XrdSfsFileOpenMode)openopts,
                      (mode_t)mode, CRED, oinfo.c_str())))
-      return fsError(rc, opC, fp->error, fn, opaque);
+      return fsError(rc, opC, fp->error, fn, opaque,
+                     0, XrdXrootdMonStatERR::errOpen);
 
 // If file needs to be cloned, do so now
 //
    if (doClone && (rc = fp->Clone(*(sameFS->XrdSfsp))))
-      return fsError(rc, opC, fp->error, fn, opaque);
+      return fsError(rc, opC, fp->error, fn, opaque,
+                     0, XrdXrootdMonStatERR::errClone);
 
 // Obtain a hyper file object
 //
@@ -1699,6 +1734,7 @@ int XrdXrootdProtocol::do_Open()
    if (!xp)
       {snprintf(ebuff, sizeof(ebuff)-1, "Insufficient memory to open %s", fn);
        eDest.Emsg("Xeq", ebuff);
+       monOpenErr(Monitor, fn, kXR_NoMemory);
        return Response.Send(kXR_NoMemory, ebuff);
       }
    oHelp.xp = xp;
@@ -1717,6 +1753,7 @@ int XrdXrootdProtocol::do_Open()
    if (!FTab || (fhandle = FTab->Add(xp)) < 0)
       {snprintf(ebuff, sizeof(ebuff)-1, "Insufficient memory to open %s", fn);
        eDest.Emsg("Xeq", ebuff);
+       monOpenErr(Monitor, fn, kXR_NoMemory);
        return Response.Send(kXR_NoMemory, ebuff);
       }
 
@@ -2665,7 +2702,8 @@ int XrdXrootdProtocol::do_ReadAll()
        if (rc == SFS_OK)
           {if (!IO.IOLen)    return 0;
            if (IO.IOLen < 0) return -1;  // Otherwise retry using read()
-          } else return fsError(rc, 0, IO.File->XrdSfsp->error, 0, 0);
+          } else return fsError(rc, 0, IO.File->XrdSfsp->error, 0, 0,
+                                IO.File, XrdXrootdMonStatERR::errRead);
       }
 
 // Make sure we have a large enough buffer
@@ -2689,7 +2727,8 @@ int XrdXrootdProtocol::do_ReadAll()
 // Determine why we ended here
 //
    if (xframt == 0) return Response.Send();
-   return fsError(xframt, 0, IO.File->XrdSfsp->error, 0, 0);
+   return fsError(xframt, 0, IO.File->XrdSfsp->error, 0, 0,
+                  IO.File, XrdXrootdMonStatERR::errRead);
 }
 
 /******************************************************************************/
@@ -2888,11 +2927,13 @@ int XrdXrootdProtocol::do_ReadV()
 // Check if we have an error here. This is indicated when rdVAmt is not zero.
 //
    if (rdVAmt)
-      {if (xfrSZ >= 0)
+      {bool pastEOF = xfrSZ >= 0;
+       if (pastEOF)
           {xfrSZ = SFS_ERROR;
            IO.File->XrdSfsp->error.setErrInfo(-ENODATA,"readv past EOF");
           }
-       return fsError(xfrSZ, 0, IO.File->XrdSfsp->error, 0, 0);
+       return fsError(xfrSZ, 0, IO.File->XrdSfsp->error, 0, 0,
+                      (pastEOF ? 0 : IO.File), XrdXrootdMonStatERR::errRead);
       }
 
 // All done, return result of the last segment or just zero
@@ -3231,7 +3272,9 @@ int XrdXrootdProtocol::do_Sync()
 //
    rc = fp->XrdSfsp->sync();
    TRACEP(FS, "fh=" <<fh.handle <<" sync rc=" <<rc);
-   if (SFS_OK != rc) return fsError(rc, 0, fp->XrdSfsp->error, 0, 0);
+   if (SFS_OK != rc)
+      return fsError(rc, 0, fp->XrdSfsp->error, 0, 0,
+                     fp, XrdXrootdMonStatERR::errWrite);
 
 // Respond that all went well
 //
@@ -3273,7 +3316,9 @@ int XrdXrootdProtocol::do_Truncate()
         fp->XrdSfsp->error.setErrCB(&truncCB, ReqID.getID());
         rc = fp->XrdSfsp->truncate(theOffset);
         TRACEP(FS, "fh=" <<fh.handle <<" trunc rc=" <<rc <<" sz=" <<theOffset);
-        if (SFS_OK != rc) return fsError(rc, 0, fp->XrdSfsp->error, 0, 0);
+        if (SFS_OK != rc)
+           return fsError(rc, 0, fp->XrdSfsp->error, 0, 0,
+                          fp, XrdXrootdMonStatERR::errWrite);
 
    } else {
 
@@ -3539,11 +3584,22 @@ int XrdXrootdProtocol::do_WriteNoneMsg()
    if (!IO.File) return
       Response.Send(kXR_FileNotOpen,"write does not refer to an open file");
 
+// An error code in EInfo[1] comes from pgwrite. Only kXR_TooManyErrs is kept
+// as the first error of the file: too many pages had a bad checksum, thus the
+// data of the file can be wrong. kXR_ArgInvalid is a retry that breaks the
+// rules of the protocol, thus an error of the client. kXR_Impossible is a
+// check of the internal state of the server, which is not about the file.
+//
    if (IO.EInfo[1])
-      return Response.Send((XErrorCode)IO.EInfo[1],
-                           IO.File->XrdSfsp->error.getErrText());
+      {if (IO.EInfo[1] == kXR_TooManyErrs)
+          IO.File->Stats.setErr(kXR_TooManyErrs, XrdXrootdMonStatERR::errWrite);
+       return Response.Send((XErrorCode)IO.EInfo[1],
+                            IO.File->XrdSfsp->error.getErrText());
+      }
 
-   if (IO.EInfo[0]) return fsError(IO.EInfo[0], 0, IO.File->XrdSfsp->error, 0, 0);
+   if (IO.EInfo[0])
+      return fsError(IO.EInfo[0], 0, IO.File->XrdSfsp->error, 0, 0,
+                     IO.File, XrdXrootdMonStatERR::errWrite);
 
    return Response.Send(kXR_FSError, IO.File->XrdSfsp->error.getErrText());
 }
@@ -3822,7 +3878,8 @@ do{if (IO.IOLen > 0)
 // If we got here then there was a write error (file pointer is valid).
 //
    if (wvInfo) {free(wvInfo); wvInfo = 0;}
-   return fsError((int)xfrSZ, 0, IO.File->XrdSfsp->error, 0, 0);
+   return fsError((int)xfrSZ, 0, IO.File->XrdSfsp->error, 0, 0,
+                  IO.File, XrdXrootdMonStatERR::errWrite);
 }
 
 /******************************************************************************/
@@ -3881,8 +3938,15 @@ void XrdXrootdProtocol::SetFD(int fildes)
 /*                               f s E r r o r                                */
 /******************************************************************************/
 
+// When fP and errOp are given, a file system error is also kept as the
+// first error of the file, for the f-stream close record. do_Open() gives
+// errOp errOpen or errClone without fP: an error sent to the client then
+// gives an isError record. The open opC does not tell this, because fattr
+// requests use it too.
+//
 int XrdXrootdProtocol::fsError(int rc, char opC, XrdOucErrInfo &myError,
-                               const char *Path, char *Cgi)
+                               const char *Path, char *Cgi,
+                               XrdXrootdFile *fP, char errOp)
 {
    int ecode, popt, rs;
    const char *eMsg = myError.getErrText(ecode);
@@ -3892,6 +3956,7 @@ int XrdXrootdProtocol::fsError(int rc, char opC, XrdOucErrInfo &myError,
    if (rc == SFS_ERROR)
       {SI->errorCnt++;
        rc = XProtocol::mapError(ecode);
+       if (fP && errOp) fP->Stats.setErr(rc, errOp);
 
        if (Path && (rc == kXR_Overloaded) && (opC == XROOTD_MON_OPENR
                 || opC == XROOTD_MON_OPENW || opC == XROOTD_MON_OPENC))
@@ -3910,7 +3975,12 @@ int XrdXrootdProtocol::fsError(int rc, char opC, XrdOucErrInfo &myError,
               else  rs = Response.Send(kXR_redirect,
                                        Route[popt].Port[rdType],
                                        Route[popt].Host[rdType]);
-          } else rs = Response.Send((XErrorCode)rc, eMsg);
+          } else {
+           if (Path && (errOp == XrdXrootdMonStatERR::errOpen
+                    ||  errOp == XrdXrootdMonStatERR::errClone))
+              monOpenErr(Monitor, Path, rc, errOp);
+           rs = Response.Send((XErrorCode)rc, eMsg);
+          }
        if (myError.extData()) myError.Reset();
        return rs;
       }
@@ -4348,8 +4418,19 @@ void XrdXrootdProtocol::MonAuth()
    const char *bP = Buff;
 
    if (Client == &Entity) bP = Entity.moninfo;
-      else {snprintf(Buff,sizeof(Buff),
-                    "&p=%s&n=%s&h=%s&o=%s&r=%s&g=%s&m=%s%s&I=%c",
+      else {const char *mInfo = (Entity.moninfo ? Entity.moninfo : "");
+            char iBuff[8] = "";
+            int hLen = 0;
+            if (!strncmp(mInfo, "&a=", 3)) hLen = 1 + strcspn(mInfo+1, "&");
+            if (!strncmp(mInfo+hLen, "&I=", 3))
+               hLen += 1 + strcspn(mInfo+hLen+1, "&");
+               else snprintf(iBuff, sizeof(iBuff), "&I=%c",
+                             (clientPV & XrdOucEI::uIPv4 ? '4' : '6'));
+            if (!strncmp(mInfo+hLen, "&S=", 3))
+               hLen += 1 + strcspn(mInfo+hLen+1, "&");
+            snprintf(Buff,sizeof(Buff),
+                    "%.*s%s&p=%s&n=%s&h=%s&o=%s&r=%s&g=%s&m=%s%s",
+                     hLen, mInfo, iBuff,
                      Client->prot,
                     (Client->name ? Client->name : ""),
                     (Client->host ? Client->host : ""),
@@ -4357,8 +4438,7 @@ void XrdXrootdProtocol::MonAuth()
                     (Client->role ? Client->role : ""),
                     (Client->grps ? Client->grps : ""),
                     (Client->moninfo ? Client->moninfo : ""),
-                    (Entity.moninfo  ? Entity.moninfo  : ""),
-                    (clientPV & XrdOucEI::uIPv4 ? '4' : '6')
+                     mInfo + hLen
                    );
             Client->secMon = &Monitor;
            }
