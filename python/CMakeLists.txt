@@ -6,6 +6,10 @@ find_package(Python REQUIRED COMPONENTS Interpreter Development.Module)
 
 add_subdirectory(src)
 
+if(NOT CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
+  include(client-payload.cmake)
+endif()
+
 # When building standalone or for PyPI, setup.py drives the build and takes
 # care of installation, so there is nothing else to do here.
 
@@ -23,9 +27,9 @@ endif()
 set_target_properties(client PROPERTIES BUILD_WITH_INSTALL_RPATH TRUE)
 
 if(APPLE)
-  set_target_properties(client PROPERTIES INSTALL_RPATH "@loader_path/../../..")
+  set_target_properties(client PROPERTIES INSTALL_RPATH "@loader_path;@loader_path/../../..")
 else()
-  set_target_properties(client PROPERTIES INSTALL_RPATH "\$ORIGIN/../../../../\$LIB")
+  set_target_properties(client PROPERTIES INSTALL_RPATH "\$ORIGIN;\$ORIGIN/../../../../\$LIB")
 endif()
 
 configure_file(setup.py setup.py)
@@ -88,24 +92,33 @@ set(PYXROOTD_SITEDIR ${CMAKE_CURRENT_BINARY_DIR}/site-packages)
 
 message(STATUS "Python bindings wheel: ${PYXROOTD_WHEEL}")
 
-# The C++ dependencies of the wheel are tracked via the module built above.
+# The C++ dependencies are tracked via the native payload targets below.
 # The remaining files it packages have to be listed here, though. README.md
 # is in the list because setup.py reads it for the package description.
 
 set(PYXROOTD_SOURCES
   README.md
+  client-payload.cmake
   libs/__init__.py
+  libs/_cli.py
   libs/client/__init__.py
+  libs/client/_asyncio.py
   libs/client/_version.py
+  libs/client/aio.py
+  libs/client/auth.py
+  libs/client/asyncstream.py
   libs/client/copyprocess.py
   libs/client/env.py
   libs/client/file.py
+  libs/client/fsspec.py
   libs/client/filesystem.py
   libs/client/finalize.py
   libs/client/flags.py
   libs/client/glob_funcs.py
   libs/client/py.typed
   libs/client/responses.py
+  libs/client/storage.py
+  libs/client/stream.py
   libs/client/url.py
   libs/client/utils.py
   src/__init__.py)
@@ -126,7 +139,7 @@ else()
   set(PYXROOTD_PIP_OPTIONS)
 endif()
 
-# Stage exactly the module built above for setup.py to package, recreating
+# Stage the native payload built above for setup.py to package, recreating
 # the staging directory every time so that a wheel can never pick up stale
 # files, such as a module left behind by a build with another Python version.
 # Clear the wheel directory as well, so that it holds exactly one wheel,
@@ -137,19 +150,18 @@ endif()
 
 add_custom_command(
   OUTPUT ${PYXROOTD_WHEEL} ${PYXROOTD_SITEDIR}/pyxrootd/__init__.py
-  COMMAND ${CMAKE_COMMAND} -E rm -rf
-          ${CMAKE_CURRENT_BINARY_DIR}/extension ${CMAKE_CURRENT_BINARY_DIR}/dist
-  COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/extension
-  COMMAND ${CMAKE_COMMAND} -E copy
-          $<TARGET_FILE:client> ${CMAKE_CURRENT_BINARY_DIR}/extension
+  ${PYXROOTD_PAYLOAD_COMMANDS}
+  COMMAND ${CMAKE_COMMAND} -E rm -rf ${CMAKE_CURRENT_BINARY_DIR}/dist
   COMMAND ${PYXROOTD_ENV} ${Python_EXECUTABLE} -m pip wheel --no-deps --no-index
           ${PYXROOTD_PIP_OPTIONS} --disable-pip-version-check --wheel-dir ${CMAKE_CURRENT_BINARY_DIR}/dist .
   COMMAND ${Python_EXECUTABLE} -m pip install --no-deps --no-index --upgrade
           --disable-pip-version-check --target ${PYXROOTD_SITEDIR} ${PYXROOTD_WHEEL}
-  DEPENDS client $<TARGET_FILE:client> ${PYXROOTD_SOURCES}
+  DEPENDS ${PYXROOTD_PAYLOAD_TARGETS} ${PYXROOTD_PAYLOAD_FILES}
+          ${PYXROOTD_SOURCES}
           ${CMAKE_CURRENT_BINARY_DIR}/setup.py
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-  COMMENT "Building Python bindings wheel")
+  COMMENT "Building Python bindings wheel"
+  VERBATIM)
 
 add_custom_target(PyXRootD ALL DEPENDS ${PYXROOTD_WHEEL})
 
@@ -158,18 +170,57 @@ add_custom_target(PyXRootD ALL DEPENDS ${PYXROOTD_WHEEL})
 set_property(DIRECTORY APPEND PROPERTY ADDITIONAL_CLEAN_FILES
   ${CMAKE_CURRENT_BINARY_DIR}/build
   ${CMAKE_CURRENT_BINARY_DIR}/dist
-  ${CMAKE_CURRENT_BINARY_DIR}/extension
+  ${CMAKE_CURRENT_BINARY_DIR}/native-bindings/build
+  ${CMAKE_CURRENT_BINARY_DIR}/native-bindings/dist
+  ${CMAKE_CURRENT_BINARY_DIR}/native-bindings/extension
+  ${CMAKE_CURRENT_BINARY_DIR}/native-bindings/xrootd.egg-info
+  ${PYXROOTD_PAYLOAD_DIR}
   ${CMAKE_CURRENT_BINARY_DIR}/xrootd.egg-info
   ${PYXROOTD_SITEDIR})
 
 option(INSTALL_PYTHON_BINDINGS "Install Python bindings" TRUE)
 
+set(PYXROOTD_INSTALL_WHEEL ${PYXROOTD_WHEEL})
+
+# Native installations already own their commands and libraries. Package
+# only the extension for pip, so its RECORD cannot claim those commands.
+# Build it even when CMake installation is disabled, for Debian/RPM packaging.
+if(PYXROOTD_COMMANDS)
+  function(configure_native_bindings)
+    set(PYXROOTD_COMMANDS "")
+    set(PYXROOTD_PAYLOAD_DIR ${CMAKE_CURRENT_BINARY_DIR}/native-bindings/extension)
+    configure_file(setup.py native-bindings/setup.py)
+  endfunction()
+  configure_native_bindings()
+
+  set(PYXROOTD_INSTALL_WHEEL
+    ${CMAKE_CURRENT_BINARY_DIR}/native-bindings/dist/xrootd-${PYXROOTD_VERSION}-${PYXROOTD_TAG}.whl)
+
+  add_custom_command(
+    OUTPUT ${PYXROOTD_INSTALL_WHEEL}
+    COMMAND ${CMAKE_COMMAND} -E rm -rf ${CMAKE_CURRENT_BINARY_DIR}/native-bindings/extension
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_CURRENT_BINARY_DIR}/native-bindings/extension
+    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:client>
+            ${CMAKE_CURRENT_BINARY_DIR}/native-bindings/extension
+    COMMAND ${CMAKE_COMMAND} -E rm -rf ${CMAKE_CURRENT_BINARY_DIR}/native-bindings/dist
+    COMMAND ${PYXROOTD_ENV} ${Python_EXECUTABLE} -m pip wheel --no-deps --no-index
+            ${PYXROOTD_PIP_OPTIONS} --disable-pip-version-check --wheel-dir ${CMAKE_CURRENT_BINARY_DIR}/native-bindings/dist .
+    DEPENDS client $<TARGET_FILE:client> ${PYXROOTD_SOURCES}
+            ${CMAKE_CURRENT_BINARY_DIR}/native-bindings/setup.py
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/native-bindings
+    COMMENT "Building Python bindings wheel for native installation"
+    VERBATIM)
+
+  add_custom_target(PyXRootDNativeBindings DEPENDS ${PYXROOTD_INSTALL_WHEEL})
+  add_dependencies(PyXRootD PyXRootDNativeBindings)
+endif()
+
 if(INSTALL_PYTHON_BINDINGS)
   set(PIP_OPTIONS "" CACHE STRING "Install options for pip")
 
   install(CODE "
-    if(NOT EXISTS \"${PYXROOTD_WHEEL}\")
-      message(FATAL_ERROR \"Python bindings wheel not found: ${PYXROOTD_WHEEL}\n\"
+    if(NOT EXISTS \"${PYXROOTD_INSTALL_WHEEL}\")
+      message(FATAL_ERROR \"Python bindings wheel not found: ${PYXROOTD_INSTALL_WHEEL}\n\"
                           \"Please build the project before installing it.\")
     endif()
 
@@ -179,12 +230,13 @@ if(INSTALL_PYTHON_BINDINGS)
 
     execute_process(COMMAND ${Python_EXECUTABLE} -m pip install ${PIP_OPTIONS}
       --no-deps --ignore-installed
-      --prefix \$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX} ${PYXROOTD_WHEEL}
+      --prefix \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}\" ${PYXROOTD_INSTALL_WHEEL}
       RESULT_VARIABLE INSTALL_STATUS COMMAND_ECHO STDOUT)
     if(NOT INSTALL_STATUS EQUAL 0)
       message(FATAL_ERROR \"Failed to install Python bindings\")
     endif()
   ")
+
 endif()
 
 if(NOT BUILD_TESTS OR NOT ENABLE_SERVER_TESTS)
@@ -227,7 +279,26 @@ list(APPEND ENVIRON "XROOTD=$<TARGET_FILE:xrootd>")
 list(APPEND ENVIRON "XRDFS=$<TARGET_FILE:xrdfs>")
 list(APPEND ENVIRON "PYTHONDONTWRITEBYTECODE=1")
 
-foreach(test copy file filesystem glob threads url)
+set(PYXROOTD_TESTS auth copy copyprocess_arguments file file_readlines filesystem filesystem_helpers glob storage storage_http stream threads
+                  read_ranges url version_policy xattr_helpers)
+
+if(Python_VERSION VERSION_GREATER_EQUAL 3.11)
+  list(APPEND PYXROOTD_TESTS aio aio_helpers asyncstream)
+endif()
+
+# fsspec is an optional Python dependency. A module-level pytest skip with no
+# collected tests exits with status 5, which CTest would report as a failure.
+execute_process(COMMAND ${Python_EXECUTABLE} -c "import fsspec"
+  RESULT_VARIABLE PYXROOTD_FSSPEC_STATUS
+  OUTPUT_QUIET ERROR_QUIET)
+
+if(Python_VERSION VERSION_GREATER_EQUAL 3.11 AND PYXROOTD_FSSPEC_STATUS EQUAL 0)
+  list(APPEND PYXROOTD_TESTS fsspec fsspec_contracts)
+else()
+  message(STATUS "fsspec tests require Python >= 3.11 and fsspec; skipping PyXRootD::fsspec")
+endif()
+
+foreach(test IN LISTS PYXROOTD_TESTS)
   add_test(NAME PyXRootD::${test}
     COMMAND ${Python_EXECUTABLE} -m pytest -p no:cacheprovider
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_${test}.py)

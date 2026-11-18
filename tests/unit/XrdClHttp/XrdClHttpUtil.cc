@@ -151,6 +151,51 @@ TEST(HeaderParserTest, ParsesLastModifiedAsUtc)
   EXPECT_EQ(parser.GetModTime(), timegm(&expected));
 }
 
+TEST(HeaderParserTest, ParsesUnsatisfiedRangeWithoutChangingBodyLength)
+{
+  XrdClHttp::HeaderParser parser;
+  ASSERT_TRUE(parser.Parse("HTTP/1.1 416 Range Not Satisfiable\r\n"));
+  ASSERT_TRUE(parser.Parse("Content-Length: 12\r\n"));
+  ASSERT_TRUE(parser.Parse("Content-Range: bytes */32\r\n"));
+  ASSERT_TRUE(parser.GetUnsatisfiedRangeLength());
+  EXPECT_EQ(*parser.GetUnsatisfiedRangeLength(), 32);
+  EXPECT_EQ(parser.GetContentLength(), 12);
+}
+
+TEST(HeaderParserTest, RejectsInvalidUnsatisfiedRangeLengths)
+{
+  for (const auto &length : {"", "*", "-1", "+32", "32x", "32/64",
+                             "18446744073709551616"}) {
+    SCOPED_TRACE(length);
+    XrdClHttp::HeaderParser parser;
+    ASSERT_TRUE(parser.Parse("HTTP/1.1 416 Range Not Satisfiable\r\n"));
+    EXPECT_FALSE(parser.Parse(std::string("Content-Range: bytes */") + length + "\r\n"));
+    EXPECT_FALSE(parser.GetUnsatisfiedRangeLength());
+  }
+}
+
+TEST(HeaderParserTest, ClearsUnsatisfiedRangeLengthForNextResponse)
+{
+  XrdClHttp::HeaderParser parser;
+  ASSERT_TRUE(parser.Parse("HTTP/1.1 416 Range Not Satisfiable\r\n"));
+  ASSERT_TRUE(parser.Parse("Content-Range: bytes */0\r\n"));
+  ASSERT_TRUE(parser.GetUnsatisfiedRangeLength());
+  EXPECT_EQ(*parser.GetUnsatisfiedRangeLength(), 0);
+  ASSERT_TRUE(parser.Parse("\r\n"));
+  ASSERT_TRUE(parser.Parse("HTTP/1.1 416 Range Not Satisfiable\r\n"));
+  EXPECT_FALSE(parser.GetUnsatisfiedRangeLength());
+}
+
+TEST(HeaderParserTest, PreservesSatisfiedRangeParsing)
+{
+  XrdClHttp::HeaderParser parser;
+  ASSERT_TRUE(parser.Parse("HTTP/1.1 206 Partial Content\r\n"));
+  ASSERT_TRUE(parser.Parse("Content-Range: bytes 8-11/32\r\n"));
+  EXPECT_EQ(parser.GetOffset(), 8);
+  EXPECT_EQ(parser.GetContentLength(), 4);
+  EXPECT_FALSE(parser.GetUnsatisfiedRangeLength());
+}
+
 TEST(UtilTest, ShouldUseBearerTokenWhenZtnIsTheFirstAvailableProtocol)
 {
   EXPECT_TRUE(XrdClHttp::ShouldUseBearerToken("", true, true));
@@ -192,4 +237,20 @@ TEST(UtilTest, InjectBearerTokenAddsTheTokenWhenZtnIsSelectedAndNoTokenIsGiven)
   headers.clear();
   XrdClHttp::InjectBearerToken(url, headers);
   EXPECT_TRUE(headers.empty());
+}
+
+TEST(UtilTest, TrimsEmptyAndWhitespaceOnlyValuesSafely)
+{
+  for (const auto value : {"", " ", "\t\r\n", "  \t  "}) {
+    EXPECT_TRUE(XrdClHttp::trim_view(value).empty());
+    EXPECT_TRUE(XrdClHttp::ltrim_view(value).empty());
+  }
+  EXPECT_EQ(XrdClHttp::trim_view(" \tvalue\r\n "), "value");
+  EXPECT_EQ(XrdClHttp::trim_view("value"), "value");
+}
+
+TEST(UtilTest, TrimmingPreservesNonAsciiBytes)
+{
+  EXPECT_EQ(XrdClHttp::trim_view(" \xff "), "\xff");
+  EXPECT_EQ(XrdClHttp::ltrim_view(" \xff "), "\xff ");
 }

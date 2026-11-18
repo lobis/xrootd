@@ -35,6 +35,7 @@ add_library(XrdCl SHARED
   XrdClFile.cc                   XrdClFile.hh
   XrdClFileStateHandler.cc       XrdClFileStateHandler.hh
   XrdClCopyProcess.cc            XrdClCopyProcess.hh
+  XrdClCopyChecksum.cc           XrdClCopyChecksum.hh
   XrdClClassicCopyJob.cc         XrdClClassicCopyJob.hh
   XrdClThirdPartyCopyJob.cc      XrdClThirdPartyCopyJob.hh
   XrdClThirdPartyCopyPlugIn.cc   XrdClThirdPartyCopyPlugIn.hh
@@ -200,7 +201,7 @@ if(NOT XRDCL_LIB_ONLY)
 
   install(CODE "
     execute_process(COMMAND ln -sf xrdcp xrdcopy
-      WORKING_DIRECTORY \$ENV{DESTDIR}/${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}
+      WORKING_DIRECTORY \"\$ENV{DESTDIR}\${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_BINDIR}\"
     )
   ")
 endif()

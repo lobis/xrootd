@@ -356,7 +356,7 @@ doxygen Doxyfile
 
 %{__python3} -m pip install \
 	--no-deps --ignore-installed --disable-pip-version-check --verbose \
-	--prefix %{buildroot}%{_prefix} %{_vpath_builddir}/python/dist/*.whl
+	--prefix %{buildroot}%{_prefix} %{_vpath_builddir}/python/native-bindings/dist/*.whl
 
 rm -f %{buildroot}%{python3_sitearch}/xrootd-*.*-info/direct_url.json
 rm -f %{buildroot}%{python3_sitearch}/xrootd-*.*-info/RECORD
@@ -600,17 +600,20 @@ fi
 %files server-libs
 %{_libdir}/libXrdHttpUtils.so.*
 %{_libdir}/libXrdServer.so.*
+%{_libdir}/libXrdOfsPrepPersist.so.*
 # Plugins
 %{_libdir}/libXrdBlacklistDecision-6.so
 %{_libdir}/libXrdBwm-6.so
 %{_libdir}/libXrdCmsRedirectLocal-6.so
 %{_libdir}/libXrdFileCache-6.so
 %{_libdir}/libXrdHttp-6.so
+%{_libdir}/libXrdHttpTapeApi-6.so
 %{_libdir}/libXrdHttpTPC-6.so
 %{_libdir}/libXrdHttpCors-6.so
 %{_libdir}/libXrdMacaroons-6.so
 %{_libdir}/libXrdN2No2p-6.so
 %{_libdir}/libXrdOfsPrepGPI-6.so
+%{_libdir}/libXrdOfsPrepPersist-6.so
 %{_libdir}/libXrdOssArc-6.so
 %{_libdir}/libXrdOssCsi-6.so
 %{_libdir}/libXrdOssMirage-6.so
@@ -635,6 +638,7 @@ fi
 %{_includedir}/%{name}/XrdXrootd
 %{_libdir}/libXrdHttpUtils.so
 %{_libdir}/libXrdServer.so
+%{_libdir}/libXrdOfsPrepPersist.so
 
 %files private-devel
 %{_includedir}/%{name}/private
@@ -648,6 +652,7 @@ fi
 %{_bindir}/xrdcp
 %{_bindir}/xrdcrc32c
 %{_bindir}/xrdfs
+%{_bindir}/xrdtoken
 %{_bindir}/xrdgsiproxy
 %{_bindir}/xrdgsitest
 %{_bindir}/xrdmapc
@@ -657,6 +662,7 @@ fi
 %{_mandir}/man1/xrdcopy.1*
 %{_mandir}/man1/xrdcp.1*
 %{_mandir}/man1/xrdfs.1*
+%{_mandir}/man1/xrdtoken.1*
 %{_mandir}/man1/xrdgsiproxy.1*
 %{_mandir}/man1/xrdgsitest.1*
 %{_mandir}/man1/xrdmapc.1*

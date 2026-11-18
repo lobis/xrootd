@@ -25,13 +25,21 @@ from __future__ import absolute_import, division, print_function
 
 from pyxrootd import client
 from XRootD.client.responses import XRootDStatus, StatInfo, VectorReadInfo
-from XRootD.client.utils import CallbackWrapper
+from XRootD.client.utils import CallbackWrapper, _xattr_mapping, _xattr_value
+from XRootD.client.auth import AuthContext
 
 class File(object):
   """Interact with an ``xrootd`` server to perform file-based operations such
-  as reading, writing, vector reading, etc."""
+  as reading, writing, vector reading, etc.
 
-  def __init__(self):
+  :param auth: Optional object-scoped authentication context
+  :type  auth: :class:`XRootD.client.AuthContext`
+  """
+
+  def __init__(self, auth=None):
+    if auth is not None and not isinstance(auth, AuthContext):
+      raise TypeError('auth must be an AuthContext')
+    self.__auth = auth
     self.__file = client.File()
 
   def __enter__(self):
@@ -63,6 +71,8 @@ class File(object):
     :returns:    tuple containing :mod:`XRootD.client.responses.XRootDStatus`
                  object and None
     """
+    if self.__auth is not None:
+      url = self.__auth.apply(url)
     if callback:
       callback = CallbackWrapper(callback, None)
       return XRootDStatus(self.__file.open(url, flags, mode, timeout, callback))
@@ -86,6 +96,8 @@ class File(object):
     :returns:    tuple containing :mod:`XRootD.client.responses.XRootDStatus`
                  object and None
     """
+    if self.__auth is not None:
+      url = self.__auth.apply(url)
     if callback:
       callback = CallbackWrapper(callback, None)
       return XRootDStatus(self.__file.openusingtemplate(src_file.__file, url, flags, mode, timeout, callback))
@@ -263,6 +275,34 @@ class File(object):
     if response: response = VectorReadInfo(response)
     return XRootDStatus(status), response
 
+  def read_ranges(self, chunks, timeout=0, callback=None, parallel=4):
+    """Read arbitrary ranges through one native operation.
+
+    :param chunks: list of (offset, size) pairs, in the desired result order
+    :param timeout: deadline in seconds for the whole operation, including
+                    server-limit discovery. Zero uses each native request's
+                    configured default, without a whole-operation deadline.
+    :param parallel: maximum number of simultaneous native vector requests
+    :returns: tuple of :mod:`XRootD.client.responses.XRootDStatus` and an
+              ordered list of bytes, or None on failure. With a callback,
+              return the submission status and deliver the same result once
+              through callback(status, result, hostlist).
+
+    The native client discovers server limits, splits oversized ranges and
+    assembles their results. Empty ranges produce empty bytes; non-empty
+    ranges extending past EOF fail. Output buffers and the open native File
+    remain owned until completion. Callers must wait for completion before
+    closing the File. Offsets and lengths must be non-negative integers;
+    timeout is in 0..65535 and parallel is in 1..65535.
+    """
+    if callback is not None:
+      callback = CallbackWrapper(callback, None)
+      return XRootDStatus(self.__file.read_ranges(
+        chunks, timeout, callback, parallel))
+
+    status, response = self.__file.read_ranges(chunks, timeout, None, parallel)
+    return XRootDStatus(status), response
+
   def fcntl(self, arg, timeout=0, callback=None):
     """Perform a custom operation on an open file.
 
@@ -373,6 +413,58 @@ class File(object):
 
     status, response = self.__file.list_xattr(timeout)
     return XRootDStatus(status), response
+
+  def xattrs(self, timeout=0, callback=None):
+    """Get all extended file attributes as a mapping.
+
+    :returns:     tuple containing :mod:`XRootD.client.responses.XRootDStatus`
+                  object and dict mapping xattr names to values
+    """
+    if callback:
+      def handle_xattrs(status, response, hostlist):
+        if status.ok:
+          item_status, response = _xattr_mapping(response)
+          if item_status:
+            status, response = item_status, None
+        else:
+          response = None
+        callback(status, response, hostlist)
+      return self.list_xattr(timeout, handle_xattrs)
+
+    status, response = self.list_xattr(timeout)
+    if not status.ok:
+      return status, None
+    item_status, response = _xattr_mapping(response)
+    if item_status:
+      return item_status, None
+    return status, response
+
+  def xattr(self, attr, timeout=0, callback=None):
+    """Get one extended file attribute value.
+
+    :param attr:  extended attribute name
+    :type  attr:  string
+    :returns:     tuple containing :mod:`XRootD.client.responses.XRootDStatus`
+                  object and the attribute value
+    """
+    if callback:
+      def handle_xattr(status, response, hostlist):
+        if status.ok:
+          item_status, response = _xattr_value(response)
+          if item_status:
+            status, response = item_status, None
+        else:
+          response = None
+        callback(status, response, hostlist)
+      return self.get_xattr([attr], timeout, handle_xattr)
+
+    status, response = self.get_xattr([attr], timeout)
+    if not status.ok:
+      return status, None
+    item_status, response = _xattr_value(response)
+    if item_status:
+      return item_status, None
+    return status, response
 
   def clone(self, locs, timeout=0, callback=None):
     """Duplicate ranges from other files into this file by using range based cloning.

@@ -1,1 +1,4 @@
-add_unit_tests(SOURCES XrdSysStatx.cc)
+add_unit_tests(
+  SOURCES XrdSysStatx.cc XrdSysTimerTests.cc
+  LIBRARIES XrdUtils
+)

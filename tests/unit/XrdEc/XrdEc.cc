@@ -22,7 +22,6 @@
 // or submit itself to any jurisdiction.
 //------------------------------------------------------------------------------
 
-#include "TestEnv.hh"
 #include "GTestXrdHelpers.hh"
 #include <gtest/gtest.h>
 
@@ -292,7 +291,7 @@ TEST_F(EcTest, ReadsBackAlignedWritesWithOneLocationUnreachable)
   AlignedWrite1MissingTest();
 }
 
-TEST_F(EcTest, ReadsBackAlignedWritesWithTwoLocationsUnreachable) 
+TEST_F(EcTest, ReadsBackAlignedWritesWithTwoLocationsUnreachable)
 {
   AlignedWrite2MissingTest();
 }
@@ -546,9 +545,9 @@ void XrdEcTests::ReadVerify( uint32_t rdsize, uint64_t maxrd )
   XrdCl::XRootDStatus *status = handler1.GetStatus();
   EXPECT_XRDST_OK( *status );
   delete status;
-  
+
   uint64_t  rdoff  = 0;
-  char     *rdbuff = new char[rdsize]; 
+  char     *rdbuff = new char[rdsize];
   uint32_t  bytesrd = 0;
   uint64_t  total_bytesrd = 0;
   do
@@ -579,7 +578,7 @@ void XrdEcTests::ReadVerify( uint32_t rdsize, uint64_t maxrd )
   }
   while( bytesrd == rdsize && total_bytesrd < maxrd );
   delete[] rdbuff;
- 
+
   // close the data object
   XrdCl::SyncResponseHandler handler2;
   reader.Close( &handler2 );

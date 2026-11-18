@@ -7,6 +7,15 @@ find_package(CURL REQUIRED)
 
 add_unit_tests(
   SOURCES
+    ClientConfigTest.cc
+    CopyResponseTest.cc
+    HandlerQueueTest.cc
+    OptionsCacheTest.cc
+    ReadResponseTest.cc
+    RedirectTest.cc
+    SpaceResponseTest.cc
+    TokenTest.cc
+    WebDavParserTest.cc
     XrdClHttpHeaderBuilderAppendMissing.cc
     XrdClHttpHeaderBuilderEntrySeparation.cc
     XrdClHttpHeaderBuilderForbiddenEntry.cc
@@ -19,6 +28,7 @@ add_unit_tests(
   LIBRARIES
     XrdClHttpObj
     XrdCl
+    XrdXml
     CURL::libcurl
   INCLUDE_DIRECTORIES
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -70,3 +80,25 @@ add_unit_tests(worker
   INCLUDE_DIRECTORIES ${PROJECT_SOURCE_DIR}/src
   PROPERTIES TIMEOUT 10
 )
+
+# Per-file credentials coverage uses a disposable localhost HTTP server.
+find_package(Python3 QUIET COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+  add_test(NAME XrdClHttp::FileCredentials
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/FileCredentialsTest.py"
+      --xrdcp $<TARGET_FILE:xrdcp>
+      --plugin $<TARGET_FILE:XrdClHttp-${PLUGIN_VERSION}>)
+  set_tests_properties(XrdClHttp::FileCredentials PROPERTIES TIMEOUT 150)
+
+  if(TARGET xrdcp AND TARGET xrdfs)
+    add_executable(xrdcl-http-upload-buffer UploadBufferDriver.cc)
+    target_link_libraries(xrdcl-http-upload-buffer PRIVATE XrdClHttpObj XrdCl)
+    target_include_directories(xrdcl-http-upload-buffer
+      PRIVATE "${PROJECT_SOURCE_DIR}/src")
+    add_test(NAME XrdClHttp::cli
+      COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/cli.py"
+        "$<TARGET_FILE_DIR:xrdcp>" "$<TARGET_FILE:XrdClHttp-${PLUGIN_VERSION}>"
+        "$<TARGET_FILE:xrdcl-http-upload-buffer>")
+    set_tests_properties(XrdClHttp::cli PROPERTIES TIMEOUT 120)
+  endif()
+endif()

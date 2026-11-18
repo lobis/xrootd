@@ -1,10 +1,13 @@
 add_unit_tests(
   SOURCES
+    XrdClCopyBatchTest.cc
+    XrdClCopyChecksumTest.cc
+    XrdClDirListTest.cc
+    XrdClLocalFileHandlerTest.cc
+    XrdClReadRangesTest.cc
     XrdClEnv.cc
     XrdClPlugInManager.cc
-    XrdClPoller.cc
     XrdClProtocolResp.cc
-    XrdClSocket.cc
     XrdClTPFallBackCopyJob.cc
     XrdClURL.cc
     XrdClUtils.cc
