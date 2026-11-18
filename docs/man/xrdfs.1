@@ -82,7 +82,7 @@ nine-character symbolic mode, such as \fIrwxr-x--x\fR, or an octal mode no
 greater than \fI0777\fR. The mode-first form accepts an octal mode.
 
 .RE
-\fBls\fR \fI[-l]\fR \fI[-u]\fR \fI[-R]\fR \fI[-D]\fR \fI[-Z]\fR \fI[-C]\fR \fI[-h|-H]\fR \fI[-d]\fR \fI[-a]\fR \fI[-1]\fR \fI[--color=never]\fR \fI[--]\fR \fI[dirname]\fR
+\fBls\fR \fI[-l]\fR \fI[-u]\fR \fI[-R]\fR \fI[-D]\fR \fI[-Z]\fR \fI[-C]\fR \fI[-h|-H]\fR \fI[-d]\fR \fI[-a]\fR \fI[-1]\fR \fI[--color=never]\fR \fI[--json]\fR \fI[--]\fR \fI[dirname]\fR
 .RS 3
 Get directory listing.
 .br
@@ -97,6 +97,8 @@ Get directory listing.
 \fI-Z\fR check if file is a ZIP archive and if yes list its content
 .br
 \fI-C\fR checksum every entry
+.br
+\fI--json\fR print metadata in JSON format. Cannot be combined with \fI-u\fR.
 .br
 \fI-h\fR, \fI-H\fR, \fI--human-readable\fR print human-readable sizes
 .br
@@ -146,7 +148,7 @@ permissions for newly created directories
 Move path1 to path2 locally on the same server.
 
 .RE
-\fBstat\fR \fI<path>\fR \fI[<paths>]\fR
+\fBstat\fR \fI[-q query | --json] <path> ...\fR
 .RS 3
 Get info about the file(s) or directory(ies).
 .br
@@ -331,6 +333,21 @@ The explicit codes operate on native XRootD file attributes:
 \fIdel\fR         \fB<name>\fR   Delete extended attribute.
 .br
 \fIlist\fR                 List extended attributes.
+
+.SH JSON METADATA
+With \fB--json\fR, \fBstat\fR writes one JSON object per path in input
+order, and \fBls\fR writes one object per listing.
+Each object has integer \fBversion\fR (currently 1), an \fBentries\fR
+array in server order, and a \fBstatus\fR object with boolean
+\fBok\fR and \fBpartial\fR fields and numeric XrdCl \fBcode\fR and
+\fBnumber\fR fields. A failed operation has an empty entries array.
+A successfully retrieved partial listing has \fBpartial\fR set.
+.PP
+Entries include the path without URL parameters, type, size, epoch
+timestamps in seconds, raw XRootD flags and their names, and POSIX mode,
+permissions, owner, and group when the server supplies them. POSIX modes
+are octal strings. Consumers can derive effective access from the flags.
+Missing optional fields are null.
 
 .SH RETURN CODES
 .RE

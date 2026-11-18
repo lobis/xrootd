@@ -25,6 +25,31 @@ setup() {
     echo "$CONTENT" > "$SERVER_DATA$F"
 }
 
+@test "JSON stat retains metadata and per-path failures" {
+    run --separate-stderr xrdfs stat --json "$URL/$F?authz=fixture" "$URL/$D/missing"
+    assert_failure
+    jq -es '
+        length == 2 and
+        (.[0] | .version == 1 and .status.ok and (.status.partial | not) and
+         (.entries[0] | (.path | endswith("/file")) and .size == 17 and
+          (.flags | type) == "number" and (.flag_names | type) == "array")) and
+        (.[1] | (.status.ok | not) and .entries == [])
+    ' <<< "$output"
+}
+
+@test "JSON listing identifies files and empty results" {
+    mkdir "$SERVER_DATA$D/empty"
+    run -0 xrdfs ls --json "$URL/$D"
+    jq -e '
+        .version == 1 and .status.ok and (.status.partial | not) and
+        any(.entries[]; (.path | endswith("/file")) and .type == "file") and
+        any(.entries[]; (.path | endswith("/empty")) and .type == "directory")
+    ' <<< "$output"
+
+    run -0 xrdfs ls --json "$URL/$D/empty"
+    jq -e '.status.ok and (.status.partial | not) and .entries == []' <<< "$output"
+}
+
 #
 # global options
 #

@@ -27,6 +27,7 @@
 #include "XrdCl/XrdClCopyProcess.hh"
 #include "XrdCl/XrdClDefaultEnv.hh"
 #include "XrdCl/XrdClFSExecutor.hh"
+#include "XrdCl/XrdClFSMetadata.hh"
 #include "XrdCl/XrdClFile.hh"
 #include "XrdCl/XrdClFileSystem.hh"
 #include "XrdCl/XrdClFileSystemOperations.hh"
@@ -553,16 +554,18 @@ XRootDStatus DoLS( FileSystem                      *fs,
   bool        hascks   = false;
   bool        human    = false;
   bool        directory = false;
+  bool        json = false;
   uint64_t base        = 1024;
   std::string path;
   DirListFlags::Flags flags = DirListFlags::Locate | DirListFlags::Merge;
 
-  enum { ColorOption = 256 };
+  enum { ColorOption = 256, JsonOption };
   static const option options[] = {
     { "long",           no_argument,       nullptr, 'l' },
     { "human-readable", no_argument,       nullptr, 'h' },
     { "directory",      no_argument,       nullptr, 'd' },
     { "all",            no_argument,       nullptr, 'a' },
+    { "json",           no_argument,       nullptr, JsonOption },
     { "color",          required_argument, nullptr, ColorOption },
     { nullptr, 0, nullptr, 0 }
   };
@@ -574,6 +577,10 @@ XRootDStatus DoLS( FileSystem                      *fs,
     {
       case 'l':
         stats = true;
+        flags |= DirListFlags::Stat;
+        break;
+      case JsonOption:
+        json = true;
         flags |= DirListFlags::Stat;
         break;
       case 'u':
@@ -615,6 +622,12 @@ XRootDStatus DoLS( FileSystem                      *fs,
   }
   if( !parser.operands.empty() ) path = parser.operands.back();
 
+  if( json && showUrls )
+  {
+    log->Error( AppMsg, "Invalid listing options." );
+    return XRootDStatus( stError, errInvalidArgs );
+  }
+
   if( showUrls )
     // we don't merge the duplicate entries
     // in case we print the full URL
@@ -627,7 +640,7 @@ XRootDStatus DoLS( FileSystem                      *fs,
   {
     XRootDStatus pathSt = BuildPath( newPath, env, path, "Listing" );
     if( !pathSt.IsOK() )
-      return pathSt;
+      return json ? FSMetadata::Print( pathSt ) : pathSt;
   }
 
   //----------------------------------------------------------------------------
@@ -641,13 +654,17 @@ XRootDStatus DoLS( FileSystem                      *fs,
   if( !st.IsOK() )
   {
     log->Error( AppMsg, "Unable to stat the path: %s", st.ToStr().c_str() );
-    return st;
+    return json ? FSMetadata::Print( st ) : st;
   }
 
   if( directory ||
       (!info->TestFlags( StatInfo::IsDir ) &&
        !( flags & DirListFlags::Zip )) )
   {
+    if( json )
+      return FSMetadata::Print( st, nlohmann::json::array(
+        { FSMetadata::Entry( FSMetadata::PathOnly( newPath ), *info ) } ) );
+
     if( stats )
       PrintDirListStatInfo( info, false, 0, 0, 0, human, base );
 
@@ -672,7 +689,24 @@ XRootDStatus DoLS( FileSystem                      *fs,
   if( !st.IsOK() )
   {
     log->Error( AppMsg, "Unable to list the path: %s", st.ToStr().c_str() );
-    return st;
+    return json ? FSMetadata::Print( st ) : st;
+  }
+
+  if( json )
+  {
+    std::unique_ptr<DirectoryList> ownedList( list );
+    nlohmann::json entries = nlohmann::json::array();
+    std::string parent = FSMetadata::PathOnly( list->GetParentName() );
+    if( parent.empty() || parent.back() != '/' ) parent += '/';
+    for( auto it = list->Begin(); it != list->End(); ++it )
+    {
+      const auto *entry = (*it)->GetStatInfo();
+      if( entry )
+        entries.push_back( FSMetadata::Entry( parent + (*it)->GetName(), *entry ) );
+      else
+        st.code = suPartial;
+    }
+    return FSMetadata::Print( st, std::move( entries ) );
   }
 
   if( st.code == suPartial )
@@ -1286,6 +1320,7 @@ XRootDStatus DoStat( FileSystem                      *fs,
 
   std::vector<std::string> paths;
   std::string query;
+  bool json = false;
 
   for( uint32_t i = 1; i < args.size(); ++i )
   {
@@ -1302,9 +1337,14 @@ XRootDStatus DoStat( FileSystem                      *fs,
         return XRootDStatus( stError, errInvalidArgs );
       }
     }
+    else if( args[i] == "--json" )
+      json = true;
     else
       paths.emplace_back( args[i] );
   }
+
+  if( json && ( paths.empty() || !query.empty() ) )
+    return XRootDStatus( stError, errInvalidArgs );
 
   std::vector<XrdCl::Pipeline> stats;
   std::vector<std::tuple<std::future<StatInfo>, std::string>> results;
@@ -1313,7 +1353,7 @@ XRootDStatus DoStat( FileSystem                      *fs,
     std::string fullPath;
     XRootDStatus pathSt = BuildPath( fullPath, env, path, "Stating" );
     if( !pathSt.IsOK() )
-      return pathSt;
+      return json ? FSMetadata::Print( pathSt ) : pathSt;
     std::future<XrdCl::StatInfo> ftr;
     stats.emplace_back( XrdCl::Stat( fs, fullPath ) >> ftr );
     results.emplace_back( std::move( ftr ), std::move( fullPath ) );
@@ -1332,10 +1372,18 @@ XRootDStatus DoStat( FileSystem                      *fs,
   {
     auto &ftr      = std::get<0>( tpl );
     auto &fullPath = std::get<1>( tpl );
-    std::cout << std::endl;
+    if( !json ) std::cout << std::endl;
     try
     {
       XrdCl::StatInfo info( ftr.get() );
+      if( json )
+      {
+        XRootDStatus result = FSMetadata::Print( XRootDStatus(),
+          nlohmann::json::array( { FSMetadata::Entry(
+            FSMetadata::PathOnly( fullPath ), info ) } ) );
+        if( !result.IsOK() ) st = result;
+        continue;
+      }
       std::string flags;
 
       if( info.TestFlags( StatInfo::XBitSet ) )
@@ -1392,6 +1440,7 @@ XRootDStatus DoStat( FileSystem                      *fs,
     catch( XrdCl::PipelineException &ex )
     {
       st = ex.GetError();
+      if( json ) FSMetadata::Print( st );
       log->Error( AppMsg, "Unable stat %s: %s", fullPath.c_str(), st.ToStr().c_str() );
     }
   }
@@ -2540,7 +2589,7 @@ XRootDStatus PrintHelp( FileSystem *, Env *,
   printf( "     Modify permissions using symbolic or octal modes.\n\n"       );
 
   printf( "   ls [-l] [-u] [-R] [-D] [-Z] [-C] [-h|-H] [-d] [-a] [-1]\n"   );
-  printf( "      [--color=never] [--] [dirname]\n"                          );
+  printf( "      [--color=never] [--json] [--] [dirname]\n"                          );
   printf( "     Get directory listing.\n"                                     );
   printf( "     -l|--long stat every entry and print long listing\n"          );
   printf( "     -u print paths as URLs\n"                                     );
@@ -2553,6 +2602,7 @@ XRootDStatus PrintHelp( FileSystem *, Env *,
   printf( "     -a|--all include entries whose names begin with a dot\n"      );
   printf( "     -1 print one entry per line\n"                                );
   printf( "     --color=never disable colored output\n"                       );
+  printf( "     --json metadata schema 1 (cannot be combined with -u)\n"   );
   printf( "     -- stop option parsing, allowing a dash-prefixed path\n\n"    );
 
   printf( "   locate [-n] [-r] [-d] [-m] [-i] [-p] <path>\n"                  );
@@ -2572,7 +2622,7 @@ XRootDStatus PrintHelp( FileSystem *, Env *,
   printf( "   mv <path1> <path2>\n"                                           );
   printf( "     Move path1 to path2 locally on the same server.\n\n"          );
 
-  printf( "   stat [-q query] <path>\n"                                       );
+  printf( "   stat [-q query | --json] <path>...\n"                            );
   printf( "     Get info about the file or directory.\n"                      );
   printf( "     -q query optional flag query parameter that makes\n"          );
   printf( "              xrdfs return error code to the shell if the\n"       );
