@@ -77,6 +77,7 @@ BuildRequires:	python3-sphinx
 BuildRequires:	attr
 BuildRequires:	coreutils
 BuildRequires:	curl
+BuildRequires:	diffutils
 BuildRequires:	jq
 BuildRequires:	krb5-server
 BuildRequires:	krb5-workstation
@@ -84,6 +85,8 @@ BuildRequires:	openssl
 BuildRequires:	procps-ng
 BuildRequires:	python3-pytest
 BuildRequires:	sqlite
+BuildRequires:	unzip
+BuildRequires:	zip
 %if 0%{?fedora}
 BuildRequires:	util-linux-script
 %else

@@ -1,10 +1,9 @@
 add_unit_tests(
   SOURCES
     XrdClEnv.cc
+    XrdClLocalFileHandler.cc
     XrdClPlugInManager.cc
-    XrdClPoller.cc
     XrdClProtocolResp.cc
-    XrdClSocket.cc
     XrdClTPFallBackCopyJob.cc
     XrdClURL.cc
     XrdClUtils.cc
