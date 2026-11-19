@@ -27,6 +27,7 @@
 #include <XrdCl/XrdClFileSystem.hh>
 #include <XrdCl/XrdClLog.hh>
 #include <XrdCl/XrdClPlugInInterface.hh>
+#include <XrdCl/XrdClThirdPartyCopyPlugIn.hh>
 #include <XrdCl/XrdClURL.hh>
 
 #include <shared_mutex>
@@ -39,13 +40,17 @@ namespace XrdCl {
 
 class Log;
 
+class PropertyList;
+
 }
 
 namespace XrdClHttp {
 
 class HandlerQueue;
+class CurlOperation;
 
-class Filesystem final : public XrdCl::FileSystemPlugIn {
+class Filesystem final : public XrdCl::FileSystemPlugIn,
+                         public XrdCl::ThirdPartyCopyPlugIn {
 public:
     Filesystem(const std::string &, std::shared_ptr<HandlerQueue> queue, XrdCl::Log *log);
 
@@ -70,6 +75,13 @@ public:
                                       XrdCl::ResponseHandler   *handler,
                                       time_t                    timeout) override;
 
+    virtual XrdCl::XRootDStatus Prepare(
+        const std::vector<std::string> &fileList,
+        XrdCl::PrepareFlags::Flags      flags,
+        uint8_t                         priority,
+        XrdCl::ResponseHandler         *handler,
+        time_t                          timeout) override;
+
     virtual XrdCl::XRootDStatus Rm(const std::string      &path,
                                    XrdCl::ResponseHandler *handler,
                                    time_t                  timeout) override;
@@ -90,7 +102,17 @@ public:
                                       XrdCl::ResponseHandler  *handler,
                                       time_t                   timeout) override;
 
+    virtual XrdCl::XRootDStatus ThirdPartyCopy( const std::string            &source,
+                                                const std::string            &dest,
+                                                const XrdCl::PropertyList    *properties,
+                                                XrdCl::ProgressHandler       *progress_handler,
+                                                time_t                        timeout = 0 ) override;
+
 private:
+    XrdCl::XRootDStatus QueueOperation(
+        std::unique_ptr<CurlOperation> operation,
+        const char *description);
+
     // Return a function pointer to the connection callout
     // Returns nullptr if this file isn't using the callout
     CreateConnCalloutType GetConnCallout() const;

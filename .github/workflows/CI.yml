@@ -46,7 +46,6 @@ jobs:
           fuse3-dev \
           g++ \
           git \
-          gtest-dev \
           json-c-dev \
           krb5 \
           krb5-dev \
@@ -63,14 +62,18 @@ jobs:
           py3-setuptools \
           py3-wheel \
           python3-dev \
+          pytest \
           readline-dev \
           sudo \
           util-linux-dev \
           uuidgen \
+          util-linux \
+          unzip \
+          zip \
           zlib-dev
 
     - name: Clone repository
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
       with:
         fetch-depth: 0
 
@@ -102,9 +105,10 @@ jobs:
         dnf install -y dnf-plugins-core epel-release git rpmdevtools sudo
         dnf install -y epel-rpm-macros
         dnf config-manager --set-enabled powertools
+        dnf install -y gtest-devel
 
     - name: Clone repository
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
       with:
         fetch-depth: 0
 
@@ -140,7 +144,7 @@ jobs:
         dnf config-manager --set-enabled crb
 
     - name: Clone repository
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
       with:
         fetch-depth: 0
 
@@ -176,7 +180,7 @@ jobs:
         dnf config-manager --set-enabled crb
 
     - name: Clone repository
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
       with:
         fetch-depth: 0
 
@@ -219,7 +223,7 @@ jobs:
       run: dnf install -y dnf-plugins-core git ninja-build rpmdevtools ${{ matrix.compiler }}
 
     - name: Clone repository
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
       with:
         fetch-depth: 0
 
@@ -245,7 +249,7 @@ jobs:
 
     strategy:
       matrix:
-        os: [ '24.04', '24.04-arm' ]
+        os: [ '26.04', '26.04-arm' ]
         compiler: [ 'gcc', 'clang' ]
         config: [ 'Debug', 'Release' ]
       fail-fast: false
@@ -265,7 +269,7 @@ jobs:
         sudo apt install -y build-essential devscripts equivs git
 
     - name: Clone repository
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
       with:
         fetch-depth: 0
 
@@ -282,32 +286,40 @@ jobs:
       run: |
         sudo python3 -m pip install \
           --target /usr/lib/python3/dist-packages \
-          --use-pep517 --verbose build/python
+          --verbose build/python/dist/*.whl
 
     - name: Run post-install tests
       run: |
         tests/post-install.sh
         tests/check-headers.sh
 
+    - name: Build Python bindings standalone against installed XRootD
+      run: |
+        sudo apt install -y python3-venv
+        python3 -m venv /tmp/standalone
+        /tmp/standalone/bin/pip install --verbose ./python
+        /tmp/standalone/bin/python -c \
+          'from XRootD import client; print(client.FileSystem("root://localhost:1094"))'
+
   macos:
     name: macOS
-    runs-on: macos-26
+    runs-on: macos-latest
 
     env:
       CC: clang
       CXX: clang++
       CMAKE_ARGS: "-DPython_FIND_UNVERSIONED_NAMES=FIRST"
-      CMAKE_PREFIX_PATH: /usr/local/opt/openssl@3
+      CMAKE_PREFIX_PATH: /usr/local/opt/openssl@4
 
     steps:
-    - name: Workaround for issue 1772
-      run: sudo sed -i -e "s/localhost/localhost $(hostname)/g" /etc/hosts
-
     - name: Install dependencies with Homebrew
       run: brew install googletest libzip nlohmann-json python-setuptools
 
+    - name: Install Python dependencies with pip
+      run: python3 -m pip install --user --break-system-packages pytest
+
     - name: Clone repository
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
       with:
         fetch-depth: 0
 

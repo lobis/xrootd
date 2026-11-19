@@ -40,6 +40,9 @@
 #include <iostream>
 #include <iomanip>
 #include <limits>
+#include <string>
+
+using namespace std::string_literals;
 
 //------------------------------------------------------------------------------
 // Progress notifier
@@ -260,8 +263,18 @@ class ProgressDisplay: public XrdCl::CopyProgressHandler
       if( checkSum.empty() )
         return;
       std::string::size_type i = checkSum.find( ':' );
-      std::cerr << checkSum.substr( 0, i+1 ) << " ";
-      std::cerr << checkSum.substr( i+1, checkSum.length()-i ) << " ";
+      std::string type  = checkSum.substr( 0, i );
+      std::string value = checkSum.substr( i+1, checkSum.length()-i );
+
+      //------------------------------------------------------------------------
+      // The comparison uses adler32 and crc32 without leading zeros (see
+      // Utils::NormalizeChecksum), but print all 8 digits, as xrdadler32 and
+      // the servers do
+      //------------------------------------------------------------------------
+      if( ( type == "adler32" || type == "crc32" ) && value.length() < 8 )
+        value.insert( 0, 8 - value.length(), '0' );
+
+      std::cerr << type << ": " << value << " ";
 
       if( url->IsLocalFile() )
         std::cerr << url->GetPath() << " ";
@@ -507,16 +520,19 @@ int main( int argc, char **argv )
   bool         preserveXAttr = false;
   bool         rmOnBadCksum  = false;
   bool         continue_     = false;
-  bool         recurse       = false;
   bool         zipappend     = false;
   bool         doserver      = false;
-  std::string thirdParty = "none";
+  std::string thirdParty     = "none"s;
+  std::string thirdPartyMode = "pull"s;
 
-  if( config.Want( XrdCpConfig::DoPosc ) )      posc       = true;
-  if( config.Want( XrdCpConfig::DoForce ) )     force      = true;
-  if( config.Want( XrdCpConfig::DoCoerce ) )    coerce     = true;
-  if( config.Want( XrdCpConfig::DoTpc ) )       thirdParty = "first";
-  if( config.Want( XrdCpConfig::DoTpcOnly ) )   thirdParty = "only";
+  const std::string thirdPartyTokenFile = config.tcpTokenFile ? config.tcpTokenFile : ""s;
+
+  if( config.Want( XrdCpConfig::DoPosc ) )        posc           = true;
+  if( config.Want( XrdCpConfig::DoForce ) )       force          = true;
+  if( config.Want( XrdCpConfig::DoCoerce ) )      coerce         = true;
+  if( config.Want( XrdCpConfig::DoTpc ) )         thirdParty     = "first"s;
+  if( config.Want( XrdCpConfig::DoTpcOnly ) )     thirdParty     = "only"s;
+  if( config.Want( XrdCpConfig::DoTpcModePush ) ) thirdPartyMode = "push"s;
   if( config.Want( XrdCpConfig::DoZipAppend ) ) zipappend  = true;
   if( config.Want( XrdCpConfig::DoServer ) )    doserver   = true;
   if( config.Want( XrdCpConfig::DoTpcDlgt ) )
@@ -531,11 +547,7 @@ int main( int argc, char **argv )
   else
     DlgEnv::Instance().Disable();
 
-  if( config.Want( XrdCpConfig::DoRecurse ) )
-  {
-    makedir = true;
-    recurse = true;
-  }
+  if( config.Want( XrdCpConfig::DoRecurse ) )     makedir       = true;
   if( config.Want( XrdCpConfig::DoPath    ) )      makedir       = true;
   if( config.Want( XrdCpConfig::DoDynaSrc ) )      dynSrc        = true;
   if( config.Want( XrdCpConfig::DoXAttr ) )        preserveXAttr = true;
@@ -646,6 +658,22 @@ int main( int argc, char **argv )
   if( config.Want( XrdCpConfig::DoZipMtlnCksum ) )
     env->PutInt( "ZipMtlnCksum", 1 );
 
+  //----------------------------------------------------------------------------
+  // Headers to inject into the HTTP requests. These are handed to the XrdClHttp
+  // plug-in verbatim, as a newline separated list; that plug-in owns all of the
+  // parsing and validation of their contents.
+  //----------------------------------------------------------------------------
+  if( !config.HttpHeaders.empty() )
+  {
+    std::string headers;
+    for( auto &header : config.HttpHeaders )
+    {
+      if( !headers.empty() ) headers += '\n';
+      headers += header;
+    }
+    env->PutString( "HttpHeaders", headers );
+  }
+
   int chunkSize = DefaultCPChunkSize;
   env->GetInt( "CPChunkSize", chunkSize );
 
@@ -703,52 +731,67 @@ int main( int argc, char **argv )
   dest += config.dstFile->Path;
 
   //----------------------------------------------------------------------------
-  // We need to check whether our target is a file or a directory:
-  // 1) it's a file, so we can accept only one source
-  // 2) it's a directory, so:
-  //    * we can accept multiple sources
-  //    * we need to append the source name
+  // A destination that ends in / is a directory. Several sources are allowed,
+  // and the source file name is added. root://host/ loses that slash when the
+  // address is parsed, so the slash is read from the text the user typed.
   //----------------------------------------------------------------------------
-  bool targetIsDir  = false;
-  bool targetExists = false;
-  if( config.dstFile->Protocol == XrdCpFile::isDir )
-    targetIsDir = true;
-  else if( config.dstFile->Protocol == XrdCpFile::isXroot ||
-           config.dstFile->Protocol == XrdCpFile::isXroots )
+  bool targetIsDir = config.dstFile->Protocol == XrdCpFile::isDir;
+  if( !targetIsDir &&
+      ( config.dstFile->Protocol == XrdCpFile::isXroot ||
+        config.dstFile->Protocol == XrdCpFile::isXroots ||
+        config.dstFile->Protocol == XrdCpFile::isHttp ||
+        config.dstFile->Protocol == XrdCpFile::isHttps ||
+        config.dstFile->Protocol == XrdCpFile::isS3 ) )
+  {
+    URL target( dest );
+    const std::string path = target.GetPath();
+    if( !path.empty() )
+      targetIsDir = path.back() == '/';
+    else
+    {
+      const std::string spec = config.dstFile->Path;
+      const size_t query = spec.find( '?' );
+      const size_t end = query == std::string::npos ? spec.size() : query;
+      targetIsDir = end > 0 && spec[end - 1] == '/';
+    }
+  }
+
+  // A local directory has already been replaced by the files inside it.
+  // The destination of that copy is a directory.
+  if( !targetIsDir && config.Want( XrdCpConfig::DoRecurse ) )
+  {
+    for( XrdCpFile *file = config.srcFile; file; file = file->Next )
+    {
+      if( strncmp( file->ProtName, "file", 4 ) == 0 &&
+          std::string( file->Path ).size() == size_t( file->Doff + file->Dlen ) )
+      {
+        targetIsDir = true;
+        break;
+      }
+    }
+  }
+
+  // root:// and roots:// may already be a directory even when the path does
+  // not end in /. Ask the server, and add the source file name if it is.
+  // http://, https://, and s3:// are directories only when the path ends in /.
+  if( !targetIsDir &&
+      ( config.dstFile->Protocol == XrdCpFile::isXroot ||
+        config.dstFile->Protocol == XrdCpFile::isXroots ) )
   {
     URL target( dest );
     FileSystem fs( target );
     StatInfo *statInfo = 0;
     XRootDStatus st = fs.Stat( target.GetPathWithParams(), statInfo );
-    if( st.IsOK() )
-    {
-      if( statInfo->TestFlags( StatInfo::IsDir ) )
-        targetIsDir = true;
-      targetExists = true;
-    }
-    else if( st.errNo == kXR_NotFound && makedir )
-    {
-      int n = strlen(config.dstFile->Path);
-      if( config.dstFile->Path[n-1] == '/' )
-        targetIsDir = true;
-    }
+    if( st.IsOK() && statInfo && statInfo->TestFlags( StatInfo::IsDir ) )
+      targetIsDir = true;
     else if( st.errNo == kXR_NotAuthorized )
     {
       log->Error( AppMsg, "%s (destination)", st.ToString().c_str() );
       std::cerr << st.ToStr() << std::endl;
+      delete statInfo;
       return st.GetShellCode();
     }
-
     delete statInfo;
-  }
-
-  if( !targetIsDir && targetExists && !force && !recurse && !zipappend )
-  {
-    XRootDStatus st( stError, errInvalidOp, EEXIST );
-    // Unable to create /tmp/test.txt; file exists
-    log->Error( AppMsg, "%s (destination)", st.ToString().c_str() );
-    std::cerr << "Run: " << st.ToStr() << std::endl;
-    return st.GetShellCode();
   }
 
   //----------------------------------------------------------------------------
@@ -780,6 +823,8 @@ int main( int argc, char **argv )
     if( st.IsOK() && statInfo->TestFlags( StatInfo::IsDir ) )
     {
       remoteSrcIsDir = true;
+      // Each listed file name is added to this destination.
+      targetIsDir = true;
       //------------------------------------------------------------------------
       // Recursively index the remote directory
       //------------------------------------------------------------------------
@@ -861,12 +906,18 @@ int main( int argc, char **argv )
       // get the source directory
       std::string srcDir( sourceFile->Path, sourceFile->Doff );
       // remove the trailing slash
-      if( srcDir[srcDir.size() - 1] == '/' )
-        srcDir = srcDir.substr( 0, srcDir.size() - 1 );
+      if( !srcDir.empty() && srcDir.back() == '/' )
+        srcDir.pop_back();
       size_t diroff = srcDir.rfind( '/' );
-      // if there is no '/' it means a directory name has been given as relative path
-      if( diroff == std::string::npos ) diroff = 0;
-      target += '/';
+      // A relative name has no slash, so the whole name is kept. Otherwise move
+      // past the slash in front of the directory name. Keeping it would write
+      // two slashes into the destination.
+      if( diroff == std::string::npos )
+        diroff = 0;
+      else
+        ++diroff;
+      if( target.empty() || target.back() != '/' )
+        target += '/';
       target += sourceFile->Path + diroff;
       // remove the filename from destination path as it will be appended later anyway
       target = target.substr( 0 , target.rfind('/') );
@@ -881,6 +932,7 @@ int main( int argc, char **argv )
     properties.Set( "makeDir",         makedir                );
     properties.Set( "dynamicSource",   dynSrc                 );
     properties.Set( "thirdParty",      thirdParty             );
+    properties.Set( "thirdPartyMode",  thirdPartyMode         );
     properties.Set( "checkSumMode",    checkSumMode           );
     properties.Set( "checkSumType",    checkSumType           );
     properties.Set( "checkSumPreset",  checkSumPreset         );
@@ -906,6 +958,8 @@ int main( int argc, char **argv )
     if( xcp )
       properties.Set( "nbXcpSources",  nbSources              );
 
+    if( !thirdPartyTokenFile.empty() )
+      properties.Set( "thirdPartyTokenFile",  thirdPartyTokenFile  );
 
     XRootDStatus st = process.AddJob( properties, results );
     if( !st.IsOK() )

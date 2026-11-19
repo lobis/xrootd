@@ -440,9 +440,11 @@ File* Cache::GetFile(const std::string& path, IO* io, long long off, long long f
       int res = io->Fstat(st);
       if (res < 0) {
          errno = res;
+         filesize = -1;
          TRACE(Error, "GetFile, could not get valid stat");
       } else if (res > 0) {
          errno = ENOTSUP;
+         filesize = -1;
          TRACE(Error, "GetFile, stat returned positive value, this should NOT happen here");
       } else {
          filesize = st.st_size;
@@ -1163,7 +1165,8 @@ int Cache::Prepare(const char *curl, int oflags, mode_t mode)
    }
 
    struct stat sbuff;
-   if (m_oss->Stat(i_name.c_str(), &sbuff) == XrdOssOK)
+   if (m_oss->Stat(i_name.c_str(), &sbuff) == XrdOssOK &&
+       m_oss->Stat(f_name.c_str(), &sbuff) == XrdOssOK)
    {
 
       if (m_configuration.m_httpcc && !is_http_cache_valid(f_name, i_name, url))
@@ -1267,6 +1270,7 @@ int Cache::UnlinkFile(const std::string& f_name, bool fail_if_open)
    ActiveMap_i  it;
    File        *file = 0;
    long long    st_blocks_to_purge = 0;
+   bool         file_existed = false;
    {
       XrdSysCondVarHelper lock(&m_active_cond);
 
@@ -1299,11 +1303,14 @@ int Cache::UnlinkFile(const std::string& f_name, bool fail_if_open)
    }
 
    if (file) {
+      file_existed = true;
       RemoveWriteQEntriesFor(file);
    } else {
       struct stat f_stat;
-      if (m_oss->Stat(f_name.c_str(), &f_stat) == XrdOssOK)
+      if (m_oss->Stat(f_name.c_str(), &f_stat) == XrdOssOK) {
+         file_existed = true;
          st_blocks_to_purge = f_stat.st_blocks;
+      }
    }
 
    std::string i_name = f_name + Info::s_infoExtension;
@@ -1312,7 +1319,9 @@ int Cache::UnlinkFile(const std::string& f_name, bool fail_if_open)
    int f_ret = m_oss->Unlink(f_name.c_str());
    int i_ret = m_oss->Unlink(i_name.c_str());
 
-   if (st_blocks_to_purge)
+   // Count a removal for any file that existed, even with zero blocks, and never
+   // for an absent one.
+   if (file_existed)
       m_res_mon->register_file_purge(f_name, st_blocks_to_purge);
 
    TRACE(Debug, trc_pfx << f_name << ", f_ret=" << f_ret << ", i_ret=" << i_ret);

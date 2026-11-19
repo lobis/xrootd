@@ -12,6 +12,7 @@ add_library(XrdClHttpObj OBJECT
   XrdClHttpFactory.cc        XrdClHttpFactory.hh
   XrdClHttpFile.cc           XrdClHttpFile.hh
   XrdClHttpFilesystem.cc     XrdClHttpFilesystem.hh
+  XrdClHttpHeaderBuilder.cc  XrdClHttpHeaderBuilder.hh
   XrdClHttpOpChecksum.cc
   XrdClHttpOpCopy.cc
   XrdClHttpOpDelete.cc
@@ -25,9 +26,13 @@ add_library(XrdClHttpObj OBJECT
   XrdClHttpOpReadV.cc
   XrdClHttpOps.cc            XrdClHttpOps.hh
   XrdClHttpOpStat.cc
+  XrdClHttpOpTape.cc
   XrdClHttpOptionsCache.cc   XrdClHttpOptionsCache.hh
   XrdClHttpParseTimeout.cc   XrdClHttpParseTimeout.hh
+  XrdClHttpTape.cc           XrdClHttpTape.hh
+  XrdClHttpTokenFileParser.cc XrdClHttpTokenFileParser.hh
   XrdClHttpUtil.cc           XrdClHttpUtil.hh
+                           XrdClHttpVerb.hh
   XrdClHttpWorker.hh
 )
 
@@ -41,17 +46,17 @@ target_link_libraries(XrdClHttpObj
     Threads::Threads
 )
 
-set_target_properties(XrdClHttpObj PROPERTIES POSITION_INDEPENDENT_CODE ON)
+set_target_properties(XrdClHttpObj
+  PROPERTIES
+    CXX_VISIBILITY_PRESET hidden
+    VISIBILITY_INLINES_HIDDEN TRUE
+    POSITION_INDEPENDENT_CODE TRUE
+)
 
 set(XrdClHttp "XrdClHttp-${PLUGIN_VERSION}")
 
 add_library(${XrdClHttp} MODULE)
 target_link_libraries(${XrdClHttp} PRIVATE XrdClHttpObj)
-
-if(NOT APPLE)
-  target_link_options(${XrdClHttp} PRIVATE
-    "-Wl,--version-script=${CMAKE_CURRENT_SOURCE_DIR}/configs/export-lib-symbols")
-endif()
 
 install(TARGETS ${XrdClHttp} LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
 

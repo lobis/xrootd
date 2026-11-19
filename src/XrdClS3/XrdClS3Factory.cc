@@ -18,6 +18,8 @@
 /* specific prior written permission of the institution or contributor.       */
 /******************************************************************************/
 
+#include "XrdVersion.hh"
+
 #include "XrdClS3Factory.hh"
 #include "XrdClS3File.hh"
 #include "XrdClS3Filesystem.hh"
@@ -425,13 +427,25 @@ Factory::GenerateHttpUrl(const std::string &s3_url, std::string &https_url, std:
     std::string region = m_region;
     if ((bucket == m_endpoint) || m_endpoint.empty()) {
         endpoint = bucket;
-        auto old_loc = loc + 1;
-        loc = s3_url.find('/', loc + 1);
         if (loc == std::string::npos) {
             err_msg = "Provided S3 URL does not contain a bucket in path";
             return false;
         }
-        bucket = s3_url.substr(old_loc, loc - old_loc);
+        auto old_loc = loc + 1;
+        loc = s3_url.find('/', old_loc);
+        if (loc == std::string::npos) {
+            bucket = s3_url.substr(old_loc);
+            auto query = bucket.find('?');
+            if (query != std::string::npos) {
+                bucket.erase(query);
+            }
+            if (bucket.empty()) {
+                err_msg = "Provided S3 URL does not contain a bucket in path";
+                return false;
+            }
+        } else {
+            bucket = s3_url.substr(old_loc, loc - old_loc);
+        }
     } else {
         auto authority = ExtractHostname(s3_url);
         std::string test_endpoint = "." + endpoint;
@@ -506,7 +520,7 @@ Factory::GenerateV4Signature(const std::string &url, const std::string &verb, st
 
     // The canonical headers must include the Host header, so add that
     // now if we don't have it.
-    if (std::find_if(headers.begin(), headers.end(), 
+    if (std::find_if(headers.begin(), headers.end(),
                         [](const auto &pair) { return pair.first == "Host"; }) == headers.end()) {
         auto host = ExtractHostname(url);
         if (host.empty()) {
@@ -851,7 +865,7 @@ Factory::TrimView(const std::string_view input_view) {
 
 extern "C"
 {
-    void *XrdClGetPlugIn(const void*)
+    XrdEXPORT void *XrdClGetPlugIn(const void*)
     {
         return static_cast<void*>(new Factory());
     }

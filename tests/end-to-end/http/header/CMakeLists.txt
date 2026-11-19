@@ -1,0 +1,6 @@
+add_bats_tests(env.bats)
+add_bats_tests(inject.bats)
+add_bats_tests(log.bats)
+add_bats_tests(option.bats)
+add_bats_tests(protocol.bats)
+add_bats_tests(reject.bats)

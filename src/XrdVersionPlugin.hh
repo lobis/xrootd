@@ -29,7 +29,7 @@
 /* be used to endorse or promote products derived from this software without  */
 /* specific prior written permission of the institution or contributor.       */
 /******************************************************************************/
-  
+
 /* The following section defines the versioning rules for plugins. The rules are
    applied by 'XrdSysPlugin.cc'. The rules defined by the XrdVERSIONPLUGIN_RULE
    macro (see below) are used to initialize a data the following data structure.
@@ -134,6 +134,8 @@
         XrdVERSIONPLUGIN_Rule(Required,  6,  0, XrdSecProtocolsssObject       )\
         XrdVERSIONPLUGIN_Rule(DoNotChk,  6,  0, XrdSecProtocolunixInit        )\
         XrdVERSIONPLUGIN_Rule(Required,  6,  0, XrdSecProtocolunixObject      )\
+        XrdVERSIONPLUGIN_Rule(DoNotChk,  6,  0, XrdSecProtocolztnInit         )\
+        XrdVERSIONPLUGIN_Rule(Required,  6,  0, XrdSecProtocolztnObject       )\
         XrdVERSIONPLUGIN_Rule(Required,  6,  0, XrdSfsGetFileSystem           )\
         XrdVERSIONPLUGIN_Rule(Required,  6,  0, XrdSfsGetFileSystem2          )\
         XrdVERSIONPLUGIN_Rule(Required,  6,  0, XrdSysAddXAttrObject          )\
@@ -183,6 +185,7 @@
          "libXrdCmsRedirectLocal.so", \
          "libXrdCryptossl.so",       \
          "libXrdHttp.so",            \
+         "libXrdHttpTapeApi.so",     \
          "libXrdHttpTPC.so",         \
          "libXrdHttpCors.so",         \
          "libXrdMacaroons.so",       \
@@ -200,6 +203,7 @@
          "libXrdSecpwd.so",          \
          "libXrdSecsss.so",          \
          "libXrdSecunix.so",         \
+         "libXrdSecztn.so",          \
          "libXrdSsi.so",             \
          "libXrdSsiLog.so",          \
          "libXrdThrottle.so",        \
@@ -243,6 +247,7 @@
         XrdVERSIONPLUGIN_Mapd(gsi-authzfun,     XrdSecgsiAuthzFun             )\
         XrdVERSIONPLUGIN_Mapd(gsi-gmapfun,      XrdSecgsiGMAPFun              )\
         XrdVERSIONPLUGIN_Mapd(gsi-vomsfun,      XrdSecgsiVOMSFun              )\
+        XrdVERSIONPLUGIN_Mapd(sec.entitylib,    SecEntityPin                  )\
         XrdVERSIONPLUGIN_Mapd(sec.protocol-gsi, XrdSecProtocolgsiObject       )\
         XrdVERSIONPLUGIN_Mapd(sec.protocol-krb5,XrdSecProtocolkrb5Object      )\
         XrdVERSIONPLUGIN_Mapd(sec.protocol-pwd, XrdSecProtocolpwdObject       )\

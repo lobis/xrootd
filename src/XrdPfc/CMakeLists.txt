@@ -28,7 +28,8 @@ add_library(${XrdPfc} MODULE
   XrdPfcPurge.cc
                             XrdPfcPurgePin.hh
   XrdPfcResourceMonitor.cc  XrdPfcResourceMonitor.hh
-                            XrdPfcStats.hh
+                            XrdPfcStableChunkVector.hh
+  XrdPfcStats.hh
                             XrdPfcTypes.hh
 )
 
@@ -37,11 +38,8 @@ install(
     XrdPfc.hh
     XrdPfcDirStateBase.hh
     XrdPfcDirStatePurgeshot.hh
-    XrdPfcFile.hh
-    XrdPfcInfo.hh
     XrdPfcPathParseTools.hh
     XrdPfcPurgePin.hh
-    XrdPfcStats.hh
     XrdPfcTypes.hh
   DESTINATION
     ${CMAKE_INSTALL_INCLUDEDIR}/xrootd/XrdPfc

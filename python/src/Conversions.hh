@@ -125,13 +125,22 @@ namespace PyXRootD
   {
       static PyObject* Convert( XrdCl::StatInfo *info )
       {
-        return Py_BuildValue("{sNsNsNsNsN}",
+        return Py_BuildValue("{sNsNsNsNsNsNsNsNsNsNsNsNsNsNsN}",
             "id",         Py_BuildValue("s", info->GetId().c_str()),
-            "size",       Py_BuildValue("k", info->GetSize()),
+            "size",       Py_BuildValue("K", info->GetSize()),
             "flags",      Py_BuildValue("I", info->GetFlags()),
-            "modtime",    Py_BuildValue("k", info->GetModTime()),
-            "modtimestr", Py_BuildValue("s",
-                                        info->GetModTimeAsString().c_str()));
+            "mtime",      Py_BuildValue("K", info->GetModTime()),
+            "modtime",    Py_BuildValue("K", info->GetModTime()),
+            "modtimestr", Py_BuildValue("s", info->GetModTimeAsString().c_str()),
+            "ctime",      Py_BuildValue("K", info->GetChangeTime()),
+            "atime",      Py_BuildValue("K", info->GetAccessTime()),
+            "mode",       Py_BuildValue("s", info->GetModeAsString().c_str()),
+            "modeoctstr", Py_BuildValue("s", info->GetModeAsOctString().c_str()),
+            "owner",      Py_BuildValue("s", info->GetOwner().c_str()),
+            "group",      Py_BuildValue("s", info->GetGroup().c_str()),
+            "extended",   PyBool_FromLong(info->ExtendedFormat()),
+            "haschecksum", PyBool_FromLong(info->HasChecksum()),
+            "checksum",   Py_BuildValue("s", info->GetChecksum().c_str()));
       }
   };
 
@@ -139,7 +148,7 @@ namespace PyXRootD
   {
       static PyObject* Convert( XrdCl::StatInfoVFS *info )
       {
-        return Py_BuildValue( "{sksksksksbsb}",
+        return Py_BuildValue( "{sKsKsKsKsbsb}",
             "nodes_rw",            info->GetNodesRW(),
             "nodes_staging",       info->GetNodesStaging(),
             "free_rw",             info->GetFreeRW(),
@@ -275,7 +284,7 @@ namespace PyXRootD
 
           PyList_SET_ITEM( pychunks, i,
               Py_BuildValue( "{sNsNsO}",
-                  "offset", Py_BuildValue( "k", chunk.offset ),
+                  "offset", Py_BuildValue( "K", chunk.offset ),
                   "length", Py_BuildValue( "I", chunk.length ),
                   "buffer", buffer ) );
           Py_DECREF( buffer );
@@ -323,7 +332,7 @@ namespace PyXRootD
           key = "size";
           if(result->HasProperty(key))
           {
-            uint64_t s;
+            unsigned long long s;
             result->Get(key, s);
             kO = Py_BuildValue("s", key);
             vO = Py_BuildValue("K", s);

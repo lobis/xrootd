@@ -32,7 +32,10 @@ namespace
 ResourceMonitor::ResourceMonitor(XrdOss& oss) :
    m_fs_state(* new DataFsState),
    m_oss(oss)
-{}
+{
+   // XXXX This should come from config. Also: N2N?
+   m_protected_top_dirs.insert("pfc-stats");
+}
 
 ResourceMonitor::~ResourceMonitor()
 {
@@ -97,7 +100,8 @@ void ResourceMonitor::cross_check_or_process_oob_lfn(const std::string &lfn, FsT
    std::string dir = (pos == std::string::npos) ? "" : lfn.substr(0, pos);
 
    XrdOssDF *dhp = m_oss.newDir(trc_pfx);
-   if (dhp->Opendir(dir.c_str(), fst.default_env()) == XrdOssOK)
+   bool opened = (dhp->Opendir(dir.c_str(), fst.default_env()) == XrdOssOK);
+   if (opened)
    {
       fst.slurp_dir_ll(*dhp, ds->m_depth, dir.c_str(), trc_pfx);
 
@@ -108,11 +112,14 @@ void ResourceMonitor::cross_check_or_process_oob_lfn(const std::string &lfn, FsT
          if (it->second.has_data && it->second.has_cinfo) {
             here.m_StBlocks += it->second.stat_data.st_blocks;
             here.m_NFiles   += 1;
+            seed_last_times_from_cinfo(here, it->second.stat_cinfo);
          }
       }
    }
    delete dhp;
-   ds->m_scanned = true;
+   // Only a directory that was read counts as scanned, else its files are skipped.
+   if (opened)
+      ds->m_scanned = true;
 }
 
 void ResourceMonitor::scan_dir_and_recurse(FsTraversal &fst)
@@ -140,6 +147,7 @@ void ResourceMonitor::scan_dir_and_recurse(FsTraversal &fst)
          if (it->second.has_data && it->second.has_cinfo) {
             here.m_StBlocks += it->second.stat_data.st_blocks;
             here.m_NFiles   += 1;
+            seed_last_times_from_cinfo(here, it->second.stat_cinfo);
          }
       }
       fst.m_dir_state->m_scanned = true;
@@ -177,7 +185,7 @@ bool ResourceMonitor::perform_initial_scan()
 
    DirState   *root_ds = m_fs_state.get_root();
    FsTraversal fst(m_oss);
-   fst.m_protected_top_dirs.insert("pfc-stats"); // XXXX This should come from config. Also: N2N?
+   fst.m_protected_top_dirs = m_protected_top_dirs;
 
    if ( ! fst.begin_traversal(root_ds, "/"))
       return false;
@@ -257,17 +265,7 @@ int ResourceMonitor::process_queues()
       DirState *last_existing_ds = nullptr;
       DirState *ds = m_fs_state.find_dirstate_for_lfn(at.m_filename, &last_existing_ds);
       at.m_dir_state = ds;
-      ds->m_here_stats.m_NFilesOpened += 1;
-
-      // If this is a new file figure out how many new parent dirs got created along the way.
-      if ( ! i.record.m_existing_file) {
-         ds->m_here_stats.m_NFilesCreated += 1;
-         DirState *pp = ds;
-         while (pp != last_existing_ds) {
-            pp = pp->get_parent();
-            pp->m_here_stats.m_NDirectoriesCreated += 1;
-         }
-      }
+      note_file_open(ds, last_existing_ds, i.record.m_existing_file);
 
       ds->m_here_usage.m_LastOpenTime = i.record.m_open_time;
    }
@@ -296,12 +294,11 @@ int ResourceMonitor::process_queues()
       ds->m_here_stats.m_NFilesClosed += 1;
       ds->m_here_usage.m_LastCloseTime = i.record.m_close_time;
 
-      at.clear();
    }
-   { // Release the AccessToken slots under lock.
+   { // Under the lock: clear() writes fields register_file_update_stats() uses.
       XrdSysMutexHelper _lock(&m_queue_mutex);
       for (auto &i : m_file_close_q.read_queue())
-         m_access_tokens_free_slots.push_back(i.id);
+         m_access_tokens.release(i.id);
    }
 
    for (auto &i : m_file_purge_q1.read_queue())
@@ -317,7 +314,12 @@ int ResourceMonitor::process_queues()
       // i.id: directory-path, i.record: PurgeRecord
       DirState *ds = m_fs_state.get_root()->find_path(i.id, -1, false, false);
       if ( ! ds) {
-         TRACE(Error, trc_pfx << "DirState not found for directory path '" << i.id << "'.");
+         if (is_in_protected_top_dir(i.id)) {
+            TRACE(Debug, trc_pfx << "no DirState for '" << i.id
+                  << "', as expected under a protected top directory.");
+         } else {
+            TRACE(Error, trc_pfx << "DirState not found for directory path '" << i.id << "'.");
+         }
          // find_path can return the last dir found ... but this clearly isn't a valid purge record.
          continue;
       }
@@ -330,7 +332,12 @@ int ResourceMonitor::process_queues()
       // i.id: LFN, i.record: size of file in st_blocks
       DirState *ds = m_fs_state.get_root()->find_path(i.id, -1, true, false);
       if ( ! ds) {
-         TRACE(Error, trc_pfx << "DirState not found for LFN path '" << i.id << "'.");
+         if (is_in_protected_top_dir(i.id)) {
+            TRACE(Debug, trc_pfx << "no DirState for '" << i.id
+                  << "', as expected under a protected top directory.");
+         } else {
+            TRACE(Error, trc_pfx << "DirState not found for LFN path '" << i.id << "'.");
+         }
          continue;
       }
       ds->m_here_stats.m_StBlocksRemoved += i.record;
@@ -355,7 +362,8 @@ void ResourceMonitor::heart_beat()
    const Configuration &conf = Cache::Conf();
 
    const int s_queue_proc_interval   = 10;
-   const int s_sshot_report_interval = conf.m_dirStatsInterval; // 1, 5, 10, 15, 30 or 60 minutes
+   const int s_sshot_report_interval = conf.m_dirStatsInterval; // one of 60, 120, 300,
+                                                                //  600, 900, 1200, 1800, 3600 s
    const int s_purge_check_interval  = 60;
    const int s_purge_report_interval = conf.m_purgeInterval;
    const int s_purge_cold_files_interval = conf.m_purgeInterval * conf.m_purgeAgeBasedPeriod;
@@ -368,6 +376,8 @@ void ResourceMonitor::heart_beat()
    time_t next_purge_check_time      = now + s_purge_check_interval;
    time_t next_purge_report_time     = now + s_purge_report_interval;
    time_t next_purge_cold_files_time = now + s_purge_cold_files_interval;
+
+   long long n_reported_token_failures = 0;
 
    while (true)
    {
@@ -384,8 +394,7 @@ void ResourceMonitor::heart_beat()
 
       // Check if purge has been running and has completed yet.
       // For now this is only used to prevent removal of empty leaf directories
-      // during stat propagation so we do not need to wait for the condition in
-      // the above sleep.
+      // while it runs, so we do not need to wait for the condition in the above sleep.
       if (m_purge_task_active) {
          MutexHolder _lck(m_purge_task_cond);
          if (m_purge_task_complete) {
@@ -399,6 +408,18 @@ void ResourceMonitor::heart_beat()
       int n_processed = process_queues();
       next_queue_proc_time = queue_swap_time + s_queue_proc_interval;
       TRACE(Dump, tpfx << "process_queues -- n_records=" << n_processed);
+
+      {  // Access-token space exhausted -- should be unreachable, so say so loudly.
+         long long taf;
+         { XrdSysMutexHelper _lock(&m_queue_mutex); taf = m_token_alloc_failures; }
+         if (taf > n_reported_token_failures) {
+            TRACE(Error, tpfx << "access-token space exhausted "
+                  << taf - n_reported_token_failures << " time(s) (total " << taf
+                  << "); those files are open but not accounted for. Raise MaxChunks "
+                     "on ResourceMonitor::m_access_tokens.");
+            n_reported_token_failures = taf;
+         }
+      }
 
       // Always update basic info on m_fs_state (space, usage, file_usage).
       update_vs_and_file_usage_info();
@@ -415,19 +436,7 @@ void ResourceMonitor::heart_beat()
       // Update stats in usages if any secondary activity will happen.
       if (do_sshot_report || do_purge_check || do_purge_report || do_purge_cold_files)
       {
-         unlink_func unlink_foo = [&](const std::string &dp)->int {
-            int ret = m_oss.Unlink(dp.c_str());
-            if (ret != 0) {
-               TRACE(Info, tpfx << "Empty dir unlink error: " << ret << " at " << dp);
-            } else {
-               TRACE(Debug, tpfx << "Empty dir unlink success: " << dp);
-            }
-            return ret;
-         };
-
-         // Potentially prune the empty leaf dirs even less frequently, once per hour, maybe?
-         bool purge_leaf_dirs = do_sshot_report && ! m_purge_task_active;
-         m_fs_state.update_stats_and_usages(queue_swap_time, purge_leaf_dirs, unlink_foo);
+         m_fs_state.update_stats_and_usages(queue_swap_time, do_sshot_report);
 
          // This reporting into log/stdout is to be removed.
          // Meaning of conf.is_dir_stat_reporting_on() etc is to be clarified / improved.
@@ -442,7 +451,6 @@ void ResourceMonitor::heart_beat()
             m_fs_state.dump_recursively(store_depth);
          }
 
-         m_fs_state.reset_stats(queue_swap_time);
       }
 
       if (do_sshot_report)
@@ -454,6 +462,7 @@ void ResourceMonitor::heart_beat()
 
          // json dump to std::out for debug purpose
          DataFsSnapshot ss(m_fs_state, m_fs_state.m_sshot_stats_reset_time);
+         ss.m_st_blocks_fuzz = m_fs_state.m_st_blocks_fuzz;
          const DirState &root_ds = *m_fs_state.get_root();
          const int store_depth  =  conf.m_dirStatsStoreDepth;
          const int n_sshot_dirs = root_ds.count_dirs_to_level(store_depth);
@@ -478,6 +487,24 @@ void ResourceMonitor::heart_beat()
          if (do_purge_cold_files) next_purge_cold_files_time = now + s_purge_cold_files_interval;
       }
 
+      // Prune the empty leaves the last snapshot reported, after the purge check, which
+      // needs the tree as propagated, and never while a purge task traverses the
+      // directories: one started above defers this to a later beat.
+      if ( ! m_fs_state.m_reap_candidates.empty() && ! m_purge_task_active)
+      {
+         unlink_func unlink_foo = [&](const std::string &dp)->int {
+            int ret = m_oss.Unlink(dp.c_str());
+            if (ret != 0) {
+               TRACE(Info, tpfx << "Empty dir unlink error: " << ret << " at " << dp);
+            } else {
+               TRACE(Debug, tpfx << "Empty dir unlink success: " << dp);
+            }
+            return ret;
+         };
+         // The residue leaves the tree at the next propagation; keep the total in step.
+         m_current_usage_in_st_blocks -= m_fs_state.reap_empty_leaf_dirs(unlink_foo);
+      }
+
    } // end while forever
 }
 
@@ -490,12 +517,25 @@ void ResourceMonitor::fill_sshot_vec_children(const DirState &parent_ds,
                                               std::vector<DirStateElement> &vec,
                                               int max_depth)
 {
-   int pos = vec.size();
-   int n_children = parent_ds.m_subdirs.size();
+   const int pos0       = (int) vec.size();
+   const int n_children = (int) parent_ds.m_subdirs.size();
 
-   DirStateElement &parent_dse = vec[parent_idx];
-   parent_dse.m_daughters_begin = pos;
-   parent_dse.m_daughters_end   = pos + n_children;
+   // maxdepth 0 is the root alone: a node at max_depth is emitted, its children are not.
+   if (parent_ds.m_depth >= max_depth)
+   {
+      // Truncated here: keep the daughter range at (-1, -1). No children: empty range.
+      if (n_children == 0) {
+         DirStateElement &dse = vec[parent_idx];
+         dse.m_daughters_begin = dse.m_daughters_end = pos0;
+      }
+      return;
+   }
+
+   {  // scoped: the emplace_back loop below can reallocate vec
+      DirStateElement &parent_dse = vec[parent_idx];
+      parent_dse.m_daughters_begin = pos0;
+      parent_dse.m_daughters_end   = pos0 + n_children;
+   }
 
    if (n_children == 0) return;
 
@@ -504,13 +544,11 @@ void ResourceMonitor::fill_sshot_vec_children(const DirState &parent_ds,
       vec.emplace_back( DirStateElement(child, parent_idx) );
    }
 
-   if (parent_ds.m_depth < max_depth)
+   int pos = pos0;
+   for (auto const & [name, child] : parent_ds.m_subdirs)
    {
-      for (auto const & [name, child] : parent_ds.m_subdirs)
-      {
-         fill_sshot_vec_children(child, pos, vec, max_depth);
-         ++pos;
-      }
+      fill_sshot_vec_children(child, pos, vec, max_depth);
+      ++pos;
    }
 }
 
@@ -519,12 +557,25 @@ void ResourceMonitor::fill_pshot_vec_children(const DirState &parent_ds,
                                               std::vector<DirPurgeElement> &vec,
                                               int max_depth)
 {
-   int pos = vec.size();
-   int n_children = parent_ds.m_subdirs.size();
+   const int pos0       = (int) vec.size();
+   const int n_children = (int) parent_ds.m_subdirs.size();
 
-   DirPurgeElement &parent_dpe = vec[parent_idx];
-   parent_dpe.m_daughters_begin = pos;
-   parent_dpe.m_daughters_end   = pos + n_children;
+   // maxdepth 0 is the root alone: a node at max_depth is emitted, its children are not.
+   if (parent_ds.m_depth >= max_depth)
+   {
+      // Truncated here: keep the daughter range at (-1, -1). No children: empty range.
+      if (n_children == 0) {
+         DirPurgeElement &dse = vec[parent_idx];
+         dse.m_daughters_begin = dse.m_daughters_end = pos0;
+      }
+      return;
+   }
+
+   {  // scoped: the emplace_back loop below can reallocate vec
+      DirPurgeElement &parent_dse = vec[parent_idx];
+      parent_dse.m_daughters_begin = pos0;
+      parent_dse.m_daughters_end   = pos0 + n_children;
+   }
 
    if (n_children == 0) return;
 
@@ -533,13 +584,11 @@ void ResourceMonitor::fill_pshot_vec_children(const DirState &parent_ds,
       vec.emplace_back( DirPurgeElement(child, child.m_here_usage, child.m_recursive_subdir_usage, parent_idx) );
    }
 
-   if (parent_ds.m_depth < max_depth)
+   int pos = pos0;
+   for (auto const & [name, child] : parent_ds.m_subdirs)
    {
-      for (auto const & [name, child] : parent_ds.m_subdirs)
-      {
-         fill_pshot_vec_children(child, pos, vec, max_depth);
-         ++pos;
-      }
+      fill_pshot_vec_children(child, pos, vec, max_depth);
+      ++pos;
    }
 }
 
@@ -748,12 +797,27 @@ void ResourceMonitor::perform_purge_check(bool purge_cold_files, int tl)
    //     deletion -- eg, by comparing stat time of cinfo + doing the is-active / is-purge-protected.
 
    const DirState &root_ds = *m_fs_state.get_root();
-   const int n_calc_dirs  = 1 + root_ds.m_here_usage.m_NDirectories + root_ds.m_recursive_subdir_usage.m_NDirectories;
-#ifdef RM_DEBUG
+
+   // Size from the tree itself; the usage counters can be off (#2808).
    const int n_pshot_dirs = root_ds.count_dirs_to_level(9999);
+
+   // Report a counters-vs-tree mismatch when it appears or changes.
+   const int n_calc_dirs = 1 + root_ds.m_here_usage.m_NDirectories
+                             + root_ds.m_recursive_subdir_usage.m_NDirectories;
    dprintf("purge dir count recursive=%d vs from_usage=%d\n", n_pshot_dirs, n_calc_dirs);
-#endif
-   ps.m_dir_vec.reserve(n_calc_dirs);
+   const int discrepancy = n_calc_dirs - n_pshot_dirs;
+   if (discrepancy != m_dir_count_discrepancy)
+   {
+      if (discrepancy != 0) {
+         TRACE(Error, trc_pfx << "directory count mismatch: usage counters " << n_calc_dirs
+               << ", tree " << n_pshot_dirs << ", previous difference " << m_dir_count_discrepancy);
+      } else {
+         TRACE(Info, trc_pfx << "directory count consistent again: " << n_pshot_dirs);
+      }
+      m_dir_count_discrepancy = discrepancy;
+   }
+
+   ps.m_dir_vec.reserve(n_pshot_dirs);
    ps.m_dir_vec.emplace_back( DirPurgeElement(root_ds, root_ds.m_here_usage, root_ds.m_recursive_subdir_usage, -1) );
    fill_pshot_vec_children(root_ds, 0, ps.m_dir_vec, 9999);
 

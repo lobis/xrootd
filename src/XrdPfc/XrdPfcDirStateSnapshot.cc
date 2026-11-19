@@ -1,6 +1,7 @@
 #include "XrdPfcDirStateSnapshot.hh"
 #include "XrdPfcPathParseTools.hh"
 #include "XrdPfc.hh"
+#include "XrdPfcInfo.hh"
 #include "XrdPfcTrace.hh"
 
 #include "XrdOuc/XrdOucJson.hh"
@@ -37,11 +38,11 @@ PFC_DEFINE_TYPE_NON_INTRUSIVE(DirStats,
 PFC_DEFINE_TYPE_NON_INTRUSIVE(DirUsage,
     m_LastOpenTime, m_LastCloseTime, m_StBlocks, m_NFilesOpen, m_NFiles, m_NDirectories)
 PFC_DEFINE_TYPE_NON_INTRUSIVE(DirStateElement,
-   m_dir_name, m_stats, m_usage,
+   m_dir_name, m_stats, m_usage, m_st_blocks_fuzz,
    m_parent, m_daughters_begin, m_daughters_end)
 PFC_DEFINE_TYPE_NON_INTRUSIVE(DataFsSnapshot, 
    m_sshot_stats_reset_time, m_usage_update_time, m_disk_total, m_disk_used, m_file_usage, m_meta_total, m_meta_used,
-   m_dir_states)
+   m_st_blocks_fuzz, m_dir_states)
 }
 /*
 namespace
@@ -76,7 +77,7 @@ void DataFsSnapshot::write_json_file(const std::string &file_path, XrdOss& oss, 
 
    const char* size_str = "524288";
    myEnv.Put("oss.asize",  size_str); // advisory size
-   myEnv.Put("oss.cgroup", conf.m_data_space.c_str()); // AMT: data or metadata space
+   myEnv.Put("oss.cgroup", conf.m_data_space.c_str());
 
    mode_t mode = 0644;
 
@@ -119,14 +120,16 @@ void DataFsSnapshot::write_json_file(const std::string &file_path, XrdOss& oss, 
    myFile->Write(os.str().c_str(), 0, os.str().size());
    myFile->Close();     delete myFile;
 
-   // Create the info file.
+   // The info file goes in the meta space, as in File::Open().
 
    std::string cinfo_path(file_path + Info::s_infoExtension);
+
+   myEnv.Put("oss.asize", "64k");
+   myEnv.Put("oss.cgroup", conf.m_meta_space.c_str());
 
    if ((cret = oss.Create(myUser, cinfo_path.c_str(), mode, myEnv, XRDOSS_mkpath)) != XrdOssOK)
    {
       TRACE(Error, "Create failed for info file " << cinfo_path << ERRNO_AND_ERRSTR(-cret));
-      myFile->Close(); delete myFile;
       return;
    }
 
@@ -135,7 +138,6 @@ void DataFsSnapshot::write_json_file(const std::string &file_path, XrdOss& oss, 
    {
       TRACE(Error, "Open failed for info file " << cinfo_path << ERRNO_AND_ERRSTR(-cret));
       delete myInfoFile;
-      myFile->Close(); delete myFile;
       return;
    }
 

@@ -22,8 +22,101 @@
 #include "XrdClHttpFilesystem.hh"
 #include "XrdClHttpOps.hh"
 #include "XrdClHttpResponses.hh"
+#include "XrdClHttpTokenFileParser.hh"
+
+#include "XrdCl/XrdClAnyObject.hh"
+#include "XrdCl/XrdClDefaultEnv.hh"
+#include "XrdCl/XrdClPropertyList.hh"
+#include "XProtocol/XProtocol.hh"
+
+#include <algorithm>
+#include <cerrno>
+#include <condition_variable>
+#include <chrono>
+#include <exception>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <string>
 
 using namespace XrdClHttp;
+using namespace std::string_literals;
+
+namespace
+{
+
+// Blocks the calling thread until the operation it is given to completes.
+class SyncResponseHandler final : public XrdCl::ResponseHandler
+{
+public:
+    // The operation gives the ownership of both objects to this handler. The
+    // result of the operation comes from the operation itself, thus this
+    // handler reads neither of them and releases them immediately.
+    void HandleResponse(XrdCl::XRootDStatus *status,
+                        XrdCl::AnyObject    *response) override
+    {
+        if (status != nullptr)
+        {
+            const std::unique_ptr<XrdCl::XRootDStatus> owned_status{status};
+        }
+
+        if (response != nullptr)
+        {
+            const std::unique_ptr<XrdCl::AnyObject> owned_response{response};
+        }
+
+        {
+            const std::lock_guard<std::mutex> lock{mutex};
+            is_ready = true;
+        }
+
+        is_ready_changed.notify_all();
+    }
+
+    // Return false when the wait takes more than the timeout.
+    bool wait(std::chrono::seconds timeout = std::chrono::seconds(0))
+    {
+        std::unique_lock<std::mutex> lock{mutex};
+
+        bool ready = true;
+
+        if (timeout.count() > 0)
+            ready = is_ready_changed.wait_for(lock, timeout, [this]{ return is_ready; });
+        else
+            is_ready_changed.wait(lock, [this]{ return is_ready; });
+
+        is_ready = false;
+
+        return ready;
+    }
+
+private:
+    std::mutex mutex{};
+    std::condition_variable is_ready_changed{};
+    bool is_ready{false};
+};
+
+// Adds fixed headers, such as the Authorization header of one endpoint, to
+// the headers of a request.
+class ExtraHeaderCallout final : public XrdClHttp::HeaderCallout
+{
+public:
+    explicit ExtraHeaderCallout(HeaderList extra) : extra(std::move(extra)) {}
+
+    std::shared_ptr<HeaderList> GetHeaders(const std::string &,
+                                           const std::string &,
+                                           const HeaderList &headers) override
+    {
+        auto result = std::make_shared<HeaderList>(headers);
+        result->insert(result->end(), extra.begin(), extra.end());
+        return result;
+    }
+
+private:
+    const HeaderList extra;
+};
+
+}
 
 Filesystem::Filesystem(const std::string &url, std::shared_ptr<HandlerQueue> queue, XrdCl::Log *log)
     : m_queue(queue),
@@ -42,6 +135,24 @@ Filesystem::Filesystem(const std::string &url, std::shared_ptr<HandlerQueue> que
 Filesystem::~Filesystem() noexcept {}
 
 XrdCl::XRootDStatus
+Filesystem::QueueOperation(std::unique_ptr<CurlOperation> operation,
+                           const char *description)
+{
+    try
+    {
+        m_queue->Produce(std::move(operation));
+    }
+    catch(const std::exception &ex)
+    {
+        m_logger->Warning(kLogXrdClHttp,
+            "Failed to add %s to queue: %s", description, ex.what());
+        return XrdCl::XRootDStatus(XrdCl::stError, XrdCl::errOSError,
+                                  EIO, ex.what());
+    }
+    return XrdCl::XRootDStatus();
+}
+
+XrdCl::XRootDStatus
 Filesystem::DirList(const std::string          &path,
                     XrdCl::DirListFlags::Flags  flags,
                     XrdCl::ResponseHandler     *handler,
@@ -52,23 +163,12 @@ Filesystem::DirList(const std::string          &path,
     auto full_url = GetCurrentURL(path);
 
     m_logger->Debug(kLogXrdClHttp, "Filesystem::DirList path %s", path.c_str());
-    std::unique_ptr<XrdClHttp::CurlListdirOp> listdirOp(
-        new XrdClHttp::CurlListdirOp(
-            handler, full_url,
-            m_url.GetHostName() + ":" + std::to_string(m_url.GetPort()),
-            SendResponseInfo(), ts, m_logger,
-            GetConnCallout(), m_header_callout.load(std::memory_order_acquire)
-        )
-    );
-
-    try {
-        m_queue->Produce(std::move(listdirOp));
-    } catch (...) {
-        m_logger->Warning(kLogXrdClHttp, "Failed to add dirlist op to queue");
-        return XrdCl::XRootDStatus(XrdCl::stError, XrdCl::errOSError);
-    }
-
-    return XrdCl::XRootDStatus();
+    auto listdirOp = std::make_unique<XrdClHttp::CurlListdirOp>(
+        handler, full_url,
+        m_url.GetHostName() + ":" + std::to_string(m_url.GetPort()),
+        SendResponseInfo(), ts, m_logger,
+        GetConnCallout(), m_header_callout.load(std::memory_order_acquire));
+    return QueueOperation(std::move(listdirOp), "directory list operation");
 }
 
 CreateConnCalloutType
@@ -138,20 +238,33 @@ XrdCl::XRootDStatus Filesystem::MkDir(const std::string        &path,
     auto full_url = GetCurrentURL(path);
     m_logger->Debug(kLogXrdClHttp, "Filesystem::MkDir path %s", full_url.c_str());
 
-    std::unique_ptr<CurlMkcolOp> mkdirOp(
-        new CurlMkcolOp(
-            handler, full_url, ts, m_logger, SendResponseInfo(), GetConnCallout(),
-            m_header_callout.load(std::memory_order_acquire)
-        )
-    );
-    try {
-        m_queue->Produce(std::move(mkdirOp));
-    } catch (...) {
-        m_logger->Warning(kLogXrdClHttp, "Failed to add filesystem mkdir op to queue");
-        return XrdCl::XRootDStatus(XrdCl::stError, XrdCl::errOSError);
+    auto mkdirOp = std::make_unique<CurlMkcolOp>(
+        handler, full_url, ts, m_logger, SendResponseInfo(), GetConnCallout(),
+        m_header_callout.load(std::memory_order_acquire));
+    return QueueOperation(std::move(mkdirOp), "filesystem mkdir operation");
+}
+
+XrdCl::XRootDStatus Filesystem::Prepare(
+    const std::vector<std::string> &fileList,
+    XrdCl::PrepareFlags::Flags      flags,
+    uint8_t                         priority,
+    XrdCl::ResponseHandler         *handler,
+    time_t                          timeout)
+{
+    (void)priority;
+
+    if(fileList.empty())
+    {
+        return XrdCl::XRootDStatus(XrdCl::stError, XrdCl::errInvalidArgs,
+            EINVAL, "missing prepare file list");
     }
 
-    return XrdCl::XRootDStatus();
+    const auto ts = XrdClHttp::Factory::GetHeaderTimeoutWithDefault(timeout);
+    auto tapeOp = std::make_unique<CurlTapePrepareOp>(
+        handler, m_url.GetURL(), fileList, flags, ts, m_logger,
+        GetConnCallout(),
+        m_header_callout.load(std::memory_order_acquire));
+    return QueueOperation(std::move(tapeOp), "Tape prepare operation");
 }
 
 XrdCl::XRootDStatus Filesystem::Query(XrdCl::QueryCode::Code  queryCode,
@@ -159,70 +272,69 @@ XrdCl::XRootDStatus Filesystem::Query(XrdCl::QueryCode::Code  queryCode,
     XrdCl::ResponseHandler  *handler,
     time_t                   timeout)
 {
-    auto ts = XrdClHttp::Factory::GetHeaderTimeoutWithDefault(timeout);
+    const auto ts = XrdClHttp::Factory::GetHeaderTimeoutWithDefault(timeout);
+    std::unique_ptr<CurlOperation> operation;
+    const char *description = nullptr;
 
-    if (queryCode == XrdCl::QueryCode::Checksum)
+    switch(queryCode)
     {
-        auto url = GetCurrentURL(arg.ToString());
-        m_logger->Debug(kLogXrdClHttp, "XrdClHttp::Filesystem::Query checksum path %s", url.c_str());
-
-        XrdClHttp::ChecksumType preferred = XrdClHttp::ChecksumType::kCRC32C;
-        XrdCl::URL url_obj;
-        url_obj.FromString(url);
-        auto iter = url_obj.GetParams().find("cks.type");
-        if (iter != url_obj.GetParams().end())
+        case XrdCl::QueryCode::Prepare:
+        case XrdCl::QueryCode::Opaque:
+            operation = std::make_unique<CurlTapeQueryOp>(
+                handler, m_url.GetURL(), queryCode, arg, ts, m_logger,
+                GetConnCallout(),
+                m_header_callout.load(std::memory_order_acquire));
+            description = "Tape query operation";
+            break;
+        case XrdCl::QueryCode::Checksum:
         {
-            preferred = XrdClHttp::GetTypeFromString(iter->second);
-            if (preferred == XrdClHttp::ChecksumType::kUnknown)
+            const auto url = GetCurrentURL(arg.ToString());
+            m_logger->Debug(kLogXrdClHttp,
+                "XrdClHttp::Filesystem::Query checksum path %s", url.c_str());
+
+            XrdClHttp::ChecksumType preferred =
+                XrdClHttp::ChecksumType::kAll;
+            XrdCl::URL urlObj;
+            urlObj.FromString(url);
+            const auto iter = urlObj.GetParams().find("cks.type");
+            if(iter != urlObj.GetParams().end())
             {
-                m_logger->Error(kLogXrdClHttp, "Unknown checksum type %s", iter->second.c_str());
-                preferred = XrdClHttp::ChecksumType::kCRC32C;
+                preferred = XrdClHttp::GetTypeFromString(iter->second);
+                if(preferred == XrdClHttp::ChecksumType::kUnknown)
+                {
+                    m_logger->Error(kLogXrdClHttp,
+                        "Unknown checksum type %s", iter->second.c_str());
+                    return XrdCl::XRootDStatus(XrdCl::stError,
+                        XrdCl::errInvalidArgs, EINVAL,
+                        "unknown checksum type '" + iter->second + "'");
+                }
             }
-        }
-        // On miss, queue a checksum operation
-        std::unique_ptr<CurlChecksumOp> cksumOp(
-            new CurlChecksumOp(
+            operation = std::make_unique<CurlChecksumOp>(
                 handler, url, preferred, ts, m_logger, SendResponseInfo(),
-                GetConnCallout(), m_header_callout.load(std::memory_order_acquire)
-            )
-        );
-        try
-        {
-            m_queue->Produce(std::move(cksumOp));
+                GetConnCallout(),
+                m_header_callout.load(std::memory_order_acquire));
+            description = "checksum operation";
+            break;
         }
-        catch (...)
+        case XrdCl::QueryCode::XAttr:
         {
-            m_logger->Warning(kLogXrdClHttp, "Failed to add checksum operation to queue");
-            return XrdCl::XRootDStatus(XrdCl::stError, XrdCl::errOSError);
+            const std::string path = arg.ToString();
+            m_logger->Debug(kLogXrdClHttp,
+                "XrdClHttp::Filesystem::Query xattr full_url %s, path %s",
+                m_url.GetURL().c_str(), path.c_str());
+            operation = std::make_unique<CurlQueryOp>(
+                handler, path, ts, m_logger, SendResponseInfo(),
+                GetConnCallout(), queryCode,
+                m_header_callout.load(std::memory_order_acquire));
+            description = "xattr query operation";
+            break;
         }
+        default:
+            return XrdCl::XRootDStatus(
+                XrdCl::stError, XrdCl::errNotImplemented);
     }
-    else if (queryCode == XrdCl::QueryCode::XAttr)
-    {
-        std::string path = arg.ToString();
-        std::string full_url = m_url.GetURL();
-        m_logger->Debug(kLogXrdClHttp, "XrdClHttp::Filesystem::Query xattr full_url %s, path %s", full_url.c_str(), path.c_str());
-        full_url = m_url.GetURL();
-        std::unique_ptr<CurlQueryOp> queryOp(
-            new CurlQueryOp(
-                handler, path, ts, m_logger,SendResponseInfo(),
-                GetConnCallout(), queryCode, m_header_callout.load(std::memory_order_acquire)
-            )
-        );
-        try
-        {
-            m_queue->Produce(std::move(queryOp));
-        }
-        catch (...)
-        {
-            m_logger->Warning(kLogXrdClHttp, "Failed to add xattr query operation to queue");
-            return XrdCl::XRootDStatus(XrdCl::stError, XrdCl::errOSError);
-        }
-    }
-    else
-    {
-        return XrdCl::XRootDStatus(XrdCl::stError, XrdCl::errNotImplemented);
-    }
-    return XrdCl::XRootDStatus();
+
+    return QueueOperation(std::move(operation), description);
 }
 
 XrdCl::XRootDStatus
@@ -235,20 +347,10 @@ Filesystem::Rm(const std::string      &path,
     auto full_url = GetCurrentURL(path);
     m_logger->Debug(kLogXrdClHttp, "Filesystem::Rm path %s", full_url.c_str());
 
-    std::unique_ptr<CurlDeleteOp> deleteOp(
-        new CurlDeleteOp(
-            handler, full_url, ts, m_logger, SendResponseInfo(),
-            GetConnCallout(), m_header_callout.load(std::memory_order_acquire)
-        )
-    );
-    try {
-        m_queue->Produce(std::move(deleteOp));
-    } catch (...) {
-        m_logger->Warning(kLogXrdClHttp, "Failed to add filesystem delete op to queue");
-        return XrdCl::XRootDStatus(XrdCl::stError, XrdCl::errOSError);
-    }
-
-    return XrdCl::XRootDStatus();
+    auto deleteOp = std::make_unique<CurlDeleteOp>(
+        handler, full_url, ts, m_logger, SendResponseInfo(),
+        GetConnCallout(), m_header_callout.load(std::memory_order_acquire));
+    return QueueOperation(std::move(deleteOp), "filesystem delete operation");
 }
 
 XrdCl::XRootDStatus
@@ -291,18 +393,180 @@ Filesystem::Stat(const std::string      &path,
     auto full_url = GetCurrentURL(path);
     m_logger->Debug(kLogXrdClHttp, "Filesystem::Stat path %s", full_url.c_str());
 
-    std::unique_ptr<CurlStatOp> statOp(
-        new CurlStatOp(
-            handler, full_url, ts, m_logger, SendResponseInfo(),
-            GetConnCallout(), m_header_callout.load(std::memory_order_acquire)
-        )
-    );
-    try {
-        m_queue->Produce(std::move(statOp));
-    } catch (...) {
-        m_logger->Warning(kLogXrdClHttp, "Failed to add filesystem stat op to queue");
-        return XrdCl::XRootDStatus(XrdCl::stError, XrdCl::errOSError);
+    auto statOp = std::make_unique<CurlStatOp>(
+        handler, full_url, ts, m_logger, SendResponseInfo(),
+        GetConnCallout(), m_header_callout.load(std::memory_order_acquire));
+    return QueueOperation(std::move(statOp), "filesystem stat operation");
+}
+
+// Returns true if the URL uses the http or the https protocol. A third party
+// copy is possible only between these two protocols.
+static bool is_http_url( const std::string &url )
+{
+    const std::string protocol = XrdCl::URL(url).GetProtocol();
+    return protocol == "http" || protocol == "https" || protocol == "dav" || protocol == "davs";
+}
+
+// The operations a third party copy runs. The unit tests replace them by
+// declaring XrdClHttp::StatOp and XrdClHttp::CopyOp before they include this
+// file, because the lookup of the unqualified name stops at namespace
+// XrdClHttp.
+namespace XrdClHttp
+{
+    namespace ThirdPartyCopyOpTypes
+    {
+        using StatOp = CurlStatOp;
+        using CopyOp = CurlCopyOp;
     }
+}
+
+using namespace XrdClHttp::ThirdPartyCopyOpTypes;
+
+// Inside namespace XrdClHttp for the same name lookup of StatOp as above.
+namespace XrdClHttp
+{
+// Stat the URL with the given extra headers. Returns the size, or nothing when
+// the stat fails, does not finish in time, or cannot be queued.
+static std::optional<std::size_t> stat_size(HandlerQueue              &queue,
+                                            const std::string         &url,
+                                            const CurlCopyOp::Headers &hdrs,
+                                            time_t                     timeout,
+                                            XrdCl::Log                *log,
+                                            const char                *what)
+{
+    try
+    {
+        const auto callout = std::make_shared<ExtraHeaderCallout>(hdrs);
+        const auto rh = std::make_shared<SyncResponseHandler>();
+        const auto op = std::make_shared<StatOp>(rh.get(), url, timespec{timeout, 0}, log, true, nullptr, callout.get());
+
+        // The queue may run the operation after this function returns, thus
+        // the operation keeps its handler and header callout alive.
+        queue.Produce(std::shared_ptr<StatOp>(op.get(), [callout, rh, op](auto){}));
+
+        if (!rh->wait(std::chrono::seconds(timeout)))
+            log->Warning(kLogXrdClHttp, "Failed to stat the %s: Operation timed out", what);
+        else if (!op->IsDone() || op->HasFailed())
+            log->Debug(kLogXrdClHttp, "Failed to stat the %s", what);
+        else
+            return static_cast<std::size_t>(op->GetStatInfo().first);
+    }
+    catch (const std::exception &e) {
+        log->Warning(kLogXrdClHttp, "Failed to stat the %s - %s", what, e.what());
+    }
+
+    return std::nullopt;
+}
+}
+
+XrdCl::XRootDStatus Filesystem::ThirdPartyCopy( const std::string            &source,
+                                                const std::string            &dest,
+                                                const XrdCl::PropertyList    *properties,
+                                                XrdCl::ProgressHandler       *progress_handler,
+                                                time_t                        timeout )
+{
+    XrdCl::Log *const log = XrdCl::DefaultEnv::GetLog();
+    log->Debug(kLogXrdClHttp, "XrdClHttp::ThirdPartyCopy src %s dst %s", source.c_str(), dest.c_str());
+
+    if (!is_http_url(source) || !is_http_url(dest))
+    {
+        log->Error(kLogXrdClHttp, "Third party copy can only be done between http(s) protocols");
+        return XrdCl::XRootDStatus(XrdCl::stError, XrdCl::errInvalidArgs, 0,
+                                   "Third party copy can only be done between http(s) protocols");
+    }
+
+    TpcMode mode = TpcMode::Pull;
+    int number_of_streams = 1;
+    time_t init_timeout = 0;
+    time_t tpc_timeout = 0;
+    std::string token_file;
+    bool force_overwrite = false;
+
+    if (properties)
+    {
+        mode = properties->Get<std::string>("thirdPartyMode") != "push" ? TpcMode::Pull : TpcMode::Push;
+        properties->Get("initTimeout", init_timeout);
+        properties->Get("tpcTimeout", tpc_timeout);
+        token_file = properties->Get<std::string>("thirdPartyTokenFile");
+        properties->Get("force", force_overwrite);
+    }
+
+    // The tpcTimeout property takes precedence over the timeout argument.
+    if (tpc_timeout == 0)
+        tpc_timeout = timeout;
+
+    if (auto env = XrdCl::DefaultEnv::GetEnv(); env)
+        env->GetInt("SubStreamsPerChannel", number_of_streams);
+
+    CurlCopyOp::Headers headers;
+    CurlCopyOp::Headers src_hdrs;
+    CurlCopyOp::Headers dst_hdrs;
+
+    if (!token_file.empty() && !ParseTokenFile(token_file, src_hdrs, dst_hdrs))
+        return XrdCl::XRootDStatus(XrdCl::stError, XrdCl::errAuthFailed, 0,
+                                   "Failed to parse the token file '" + token_file + "'");
+
+    const auto is_unsecure = [] (const CurlCopyOp::Headers &hdrs, const std::string &url)
+    {
+        return XrdCl::URL(url).GetProtocol() != "https"s &&
+               std::any_of(hdrs.begin(), hdrs.end(),
+                           [] (const auto &header) { return header.first == "Authorization"s; });
+    };
+
+    if (is_unsecure(src_hdrs, source) || is_unsecure(dst_hdrs, dest))
+    {
+        log->Error(kLogXrdClHttp, "Refusing to send an Authorization header over an unencrypted http URL");
+        return XrdCl::XRootDStatus(XrdCl::stError, XrdCl::errInvalidArgs, 0,
+                                   "Refusing to send an Authorization header over an unencrypted http URL");
+    }
+
+    // In push mode the source writes the destination with a PUT, which may
+    // replace an existing file whatever the Overwrite header says. Thus check
+    // the destination first, as the destination server may not honor it.
+    if (mode == TpcMode::Push && !force_overwrite &&
+        stat_size(*m_queue, dest, dst_hdrs, init_timeout, log, "destination"))
+    {
+        log->Error(kLogXrdClHttp, "The destination %s exists", dest.c_str());
+        return XrdCl::XRootDStatus(XrdCl::stError, XrdCl::errErrorResponse, kXR_ItExists,
+                                   "The destination exists; use --force to replace it");
+    }
+
+    headers.emplace_back("X-Number-Of-Streams"s, std::to_string(number_of_streams));
+
+    // The destination headers reach the destination in both modes: directly
+    // in pull mode, with the TransferHeader prefix in push mode.
+    dst_hdrs.emplace_back("Overwrite"s, force_overwrite ? "T"s : "F"s);
+
+    std::size_t size = 0;
+
+    if (progress_handler)
+    {
+        size = stat_size(*m_queue, source, src_hdrs, init_timeout, log, "source").value_or(0);
+        progress_handler->HandleProgress(0, size);
+    }
+
+    const auto rh = std::make_shared<SyncResponseHandler>();
+    const auto op = std::make_shared<CopyOp>(rh.get(), source, src_hdrs, dest, dst_hdrs, headers,
+                                             mode, timespec{tpc_timeout, 0}, log, nullptr);
+    op->SetProgressHandler(progress_handler);
+
+    try
+    {
+        m_queue->Produce(std::shared_ptr<CopyOp>(op.get(), [rh, op](auto){}));
+    }
+    catch (const std::exception &e) {
+        log->Warning(kLogXrdClHttp, "Failed to add copy op to queue - %s", e.what());
+        return XrdCl::XRootDStatus(XrdCl::stError, XrdCl::errInternal);
+    }
+
+    if (!rh->wait(std::chrono::seconds(tpc_timeout)))
+        return XrdCl::XRootDStatus(XrdCl::stError, XrdCl::errOperationExpired, 0, "Operation expired: Operation timed out"s);
+
+    if (op->IsDone() && !op->IsSentSuccessfully())
+        return XrdCl::XRootDStatus(XrdCl::stError, XrdCl::errPipelineFailed, 0, op->GetSendingFailureMessage());
+
+    if (progress_handler && size > 0)
+        progress_handler->HandleProgress(size, size);
 
     return XrdCl::XRootDStatus();
 }

@@ -32,9 +32,9 @@
  * @brief  Main request/response class, handling the logical status of the communication
  * @author Fabrizio Furano
  * @date   Nov 2012
- * 
- * 
- * 
+ *
+ *
+ *
  */
 #include "XrdVersion.hh"
 #include "XrdHttpReq.hh"
@@ -50,8 +50,8 @@
 #include "Xrd/XrdLink.hh"
 #include "XrdXrootd/XrdXrootdBridge.hh"
 #include "Xrd/XrdBuffer.hh"
-#include <algorithm> 
-#include <functional> 
+#include <algorithm>
+#include <functional>
 #include <cctype>
 #include <locale>
 #include <string>
@@ -145,8 +145,8 @@ int XrdHttpReq::parseLine(char *line, int len) {
     // Trim left
     while ( (!isgraph(*val) || (!*val)) && (val < line+len)) val++;
 
-    // We memorize the headers also as a string                                                                                                                                              
-    // because external plugins may need to process it differently                                                                                                                          
+    // We memorize the headers also as a string
+    // because external plugins may need to process it differently
     std::string ss = val;
     if(ss.length() >= 2 && ss.substr(ss.length() - 2, 2) != "\r\n") {
       request = rtMalformed;
@@ -154,12 +154,12 @@ int XrdHttpReq::parseLine(char *line, int len) {
     }
     trim(ss);
     allheaders[key] = ss;
-	  
+	
     // Here we are supposed to initialize whatever flag or variable that is needed
     // by looking at the first token of the line
     // The token is key
     // The value is val
-    
+
     // Screen out the needed header lines
     if (!strcasecmp(key, "connection")) {
 
@@ -396,7 +396,7 @@ int XrdHttpReq::parseFirstLine(char *line, int len) {
     } else {
       request = rtUnknown;
     }
-    
+
     requestverb = key;
 
     // The last token should be the protocol.  If it is HTTP/1.0, then
@@ -470,7 +470,7 @@ int XrdHttpReq::ReqReadV(const XrdHttpIOList &cl) {
 
   if (j > 0) {
 
-    // Prepare a request header 
+    // Prepare a request header
 
     memset(&xrdreq, 0, sizeof (xrdreq));
 
@@ -544,8 +544,8 @@ int XrdHttpReq::File(XrdXrootd::Bridge::Context &info, //!< the result context
 
   if (readRangeHandler.NotifyReadResult(dlen, nullptr, start, finish) < 0)
     return false;
-  
-    
+
+
   return true;
 };
 
@@ -556,13 +556,13 @@ bool XrdHttpReq::Done(XrdXrootd::Bridge::Context & info) {
   xrdresp = kXR_ok;
 
   this->iovN = 0;
-  
+
   int r = PostProcessHTTPReq(true);
   // Beware, we don't have to reset() if the result is 0
   if (r) reset();
-  if (r < 0) return false; 
-  
-  
+  if (r < 0) return false;
+
+
   return true;
 };
 
@@ -592,7 +592,7 @@ bool XrdHttpReq::Error(XrdXrootd::Bridge::Context &info, //!< the result context
   // generate a directory listing (if configured).
   if ((request == rtGET) && (xrdreq.header.requestid == ntohs(kXR_open)) && (xrderrcode == kXR_isDirectory))
     return true;
-  
+
   return rc == 0;
 };
 
@@ -603,7 +603,6 @@ bool XrdHttpReq::Redir(XrdXrootd::Bridge::Context &info, //!< the result context
 
 
 
-  char buf[512];
   char hash[512];
   hash[0] = '\0';
 
@@ -621,21 +620,16 @@ bool XrdHttpReq::Redir(XrdXrootd::Bridge::Context &info, //!< the result context
     prot->SendSimpleResp(502, nullptr, nullptr, "Invalid redirect host", 0, false);
     return keepalive;
   }
-  
-  if (prot->isdesthttps)
-    redirdest = "Location: https://";
-  else
-    redirdest = "Location: http://";
-  
-  // port < 0 signals switch to full URL
-  if (port < 0)
-  {
-    if (strncmp(hname, "file://", 7) == 0)
-    {
-      TRACE(REQ, " XrdHttpReq::Redir Switching to file:// ");
-      redirdest = "Location: "; // "file://" already contained in hname
-    }
+
+  // port < 0 means XRootD URL-form redirect: hname is a full scheme://… URL
+  // (host+port+path).
+  // Do not prefix http(s):// and do not append the original resource
+  // otherwise, that would produce https://https://…/pfn/lfn.
+  const bool fullUrl = (port < 0);
+  if (fullUrl) {
+    TRACE(REQ, " XrdHttpReq::Redir using absolute URL: " << hname);
   }
+
   // Beware, certain Ofs implementations (e.g. EOS) add opaque data directly to the host name
   // This must be correctly treated here and appended to the opaque info
   // that we may already have
@@ -643,32 +637,41 @@ bool XrdHttpReq::Redir(XrdXrootd::Bridge::Context &info, //!< the result context
   char *vardata = 0;
   if (pp) {
     *pp = '\0';
-    redirdest += hname;
     vardata = pp+1;
     int varlen = strlen(vardata);
-    
+
     //Now extract the remaining, vardata points to it
     while(*vardata == '&' && varlen) {vardata++; varlen--;}
-    
-    // Put the question mark back where it was
+  }
+
+  // If the destination speaks cleartext HTTP, it needs the
+  // secret hash to reconstruct authorization info.
+  const bool destHttpCleartext =
+      fullUrl ? (strncmp(hname, "http://", 7) == 0) : (!prot->isdesthttps);
+
+  std::string urlHashPath;
+  {
+    const std::string encodedResource =
+        fullUrl ? std::string() : encode_str(resource.c_str());
+    redirdest = httpBuildRedirectLocation(prot->isdesthttps, port, hname,
+                                          encodedResource.c_str()).c_str();
+
+    // Derive the token path while hname is still truncated at '?', so the CGI
+    // stays out of the hash and both ends digest the same string.
+    if (fullUrl && destHttpCleartext)
+      urlHashPath = httpCollapseSlashes(decode_str(httpPathFromAbsoluteUrl(hname)));
+  }
+
+  // Restore '?' so later uses of hname see the original string.
+  if (pp)
     *pp = '?';
-  }
-  else
-    redirdest += hname;
 
-  if (port > 0) {
-    sprintf(buf, ":%d", port);
-    redirdest += buf;
-  }
-
-  redirdest += encode_str(resource.c_str()).c_str();
-  
   // Here we put back the opaque info, if any
   if (vardata) {
     redirdest += "?&";
     redirdest += encode_opaque(vardata).c_str();
   }
-  
+
   // Shall we put also the opaque data of the request? Maybe not
   //int l;
   //if (opaque && opaque->Env(l))
@@ -676,11 +679,12 @@ bool XrdHttpReq::Redir(XrdXrootd::Bridge::Context &info, //!< the result context
 
 
   time_t timenow = 0;
-  if (!prot->isdesthttps && prot->ishttps) {
+  if (destHttpCleartext && prot->ishttps) {
+    const char *hashPath = urlHashPath.empty() ? resource.c_str() : urlHashPath.c_str();
     // If the destination is not https, then we suppose that it
     // will need this token to fill its authorization info
     timenow = time(0);
-    calcHashes(hash, this->resource.c_str(), (kXR_int16) request,
+    calcHashes(hash, hashPath, (kXR_int16) request,
             &prot->SecEntity,
             timenow,
             prot->secretkey);
@@ -694,14 +698,14 @@ bool XrdHttpReq::Redir(XrdXrootd::Bridge::Context &info, //!< the result context
   if (!prot->strp_cgi_params.empty()) {
     stripCgi(redirdest, prot->strp_cgi_params); /* appendOpaque() may have added credentials */
   }
-  
+
   TRACE(REQ, " XrdHttpReq::Redir Redirecting to " << redirdest.c_str());
 
   if (request != rtGET)
     prot->SendSimpleResp(307, NULL, (char *) redirdest.c_str(), 0, 0, keepalive);
   else
     prot->SendSimpleResp(302, NULL, (char *) redirdest.c_str(), 0, 0, keepalive);
-  
+
   bool ret_keepalive = keepalive; // reset() clears keepalive
   reset();
   return ret_keepalive;
@@ -755,7 +759,7 @@ void XrdHttpReq::appendOpaque(XrdOucString &s, XrdSecEntity *secent, char *hash,
         s += "&xrdhttphost=";
         s += encode_str(secent->host).c_str();
       }
-      
+
       if (secent->moninfo) {
         s += "&xrdhttpdn=";
         s += encode_str(secent->moninfo).c_str();
@@ -765,24 +769,24 @@ void XrdHttpReq::appendOpaque(XrdOucString &s, XrdSecEntity *secent, char *hash,
         s += "&xrdhttprole=";
         s += encode_str(secent->role).c_str();
       }
-      
+
       if (secent->grps) {
         s += "&xrdhttpgrps=";
         s += encode_str(secent->grps).c_str();
       }
-      
+
       if (secent->endorsements) {
         s += "&xrdhttpendorsements=";
         s += encode_str(secent->endorsements).c_str();
       }
-      
+
       if (secent->credslen) {
         s += "&xrdhttpcredslen=";
         char buf[16];
         sprintf(buf, "%d", secent->credslen);
         s += encode_str(buf).c_str();
       }
-      
+
       if (secent->credslen) {
         if (secent->creds) {
           s += "&xrdhttpcreds=";
@@ -800,14 +804,14 @@ void XrdHttpReq::appendOpaque(XrdOucString &s, XrdSecEntity *secent, char *hash,
 // Sanitize the resource from the http[s]://[host]/ questionable prefix
 // https://github.com/xrootd/xrootd/issues/1675
 void XrdHttpReq::sanitizeResourcePfx() {
-  
+
   if (resource.beginswith("https://")) {
     // Find the slash that follows the hostname, and keep it
     int p = resource.find('/', 8);
     resource.erasefromstart(p);
     return;
   }
-  
+
   if (resource.beginswith("http://")) {
     // Find the slash that follows the hostname, and keep it
     int p = resource.find('/', 7);
@@ -837,28 +841,19 @@ void XrdHttpReq::parseResource(char *res) {
 
   // Look for the first '?'
   char *p = strchr(res, '?');
-  
+
   // Not found, then it's just a filename
   if (!p) {
     resource.assign(res, 0);
-    
+
     // Some poor client implementations may inject a http[s]://[host]/ prefix
     // to the resource string. Here we choose to ignore it as a protection measure
-    sanitizeResourcePfx();  
+    sanitizeResourcePfx();
 
-    std::string resourceDecoded = decode_str(resource.c_str());
-    resource = resourceDecoded.c_str();
+    const std::string resourceDecoded = decode_str(resource.c_str());
     resourceplusopaque = resourceDecoded.c_str();
+    resource = httpCollapseSlashes(resourceDecoded).c_str();
 
-    
-    // Sanitize the resource string, removing double slashes
-    int pos = 0;
-    do { 
-      pos = resource.find("//", pos);
-      if (pos != STR_NPOS)
-        resource.erase(pos, 1);
-    } while (pos != STR_NPOS);
-    
     return;
   }
 
@@ -866,21 +861,13 @@ void XrdHttpReq::parseResource(char *res) {
 
   int cnt = p - res; // Number of chars to copy
   resource.assign(res, 0, cnt - 1);
-  
+
   // Some poor client implementations may inject a http[s]://[host]/ prefix
   // to the resource string. Here we choose to ignore it as a protection measure
-  sanitizeResourcePfx();  
-  
-  resource = decode_str(resource.c_str()).c_str();
-      
-  // Sanitize the resource string, removing double slashes
-  int pos = 0;
-  do { 
-    pos = resource.find("//", pos);
-    if (pos != STR_NPOS)
-      resource.erase(pos, 1);
-  } while (pos != STR_NPOS);
-  
+  sanitizeResourcePfx();
+
+  resource = httpCollapseSlashes(decode_str(resource.c_str())).c_str();
+
   resourceplusopaque = resource;
   // Whatever comes after is opaque data to be parsed
   if (strlen(p) > 1) {
@@ -1097,12 +1084,12 @@ int XrdHttpReq::ProcessHTTPReq() {
                       return retval;
                     }
                   }
-                  
+
                 }
 
 
           }
-      
+
       // The reqstate parameter basically moves us through a simple state machine.
       // To optimize things, we start off by opening the file; if it turns out to be a directory, then
       // we close the file handle and switch to doing a HTML-based rendering of the directory.  This
@@ -1254,13 +1241,13 @@ int XrdHttpReq::ProcessHTTPReq() {
 
             long l;
             long long offs;
-            
+
             // --------- READ
             memset(&xrdreq, 0, sizeof (xrdreq));
             xrdreq.read.requestid = htons(kXR_read);
             memcpy(xrdreq.read.fhandle, fhandle, 4);
             xrdreq.read.dlen = 0;
-            
+
             offs = readChunkList[0].offset;
             l = readChunkList[0].size;
 
@@ -1279,7 +1266,7 @@ int XrdHttpReq::ProcessHTTPReq() {
             }
 
 
-            
+
             if (l <= 0) {
               if (l < 0) {
                 TRACE(ALL, " Data sizes mismatch.");
@@ -1299,7 +1286,7 @@ int XrdHttpReq::ProcessHTTPReq() {
               ss << "Requested range " << l << "@" << offs << " is past the end of file (" << filesize << ")";
               return sendFooterError(ss.str());
             }
-            
+
             if (!prot->Bridge->Run((char *) &xrdreq, 0, 0)) {
               generateWebdavErrMsg();
               return sendFooterError("Could not run read request on the bridge");
@@ -1319,7 +1306,7 @@ int XrdHttpReq::ProcessHTTPReq() {
           // We want to be invoked again after this request is finished
           return 0;
         } // case 3+
-        
+
       } // switch (reqstate)
 
 
@@ -1340,7 +1327,11 @@ int XrdHttpReq::ProcessHTTPReq() {
         l = resourceplusopaque.length() + 1;
         xrdreq.open.dlen = htonl(l);
         xrdreq.open.mode = htons(kXR_ur | kXR_uw | kXR_gw | kXR_gr | kXR_or);
-        if (! XrdHttpProtocol::usingEC) 
+        // 'Overwrite: F' (e.g. forwarded by a TPC push) forbids replacing
+        // an existing file; the open then fails with kXR_ItExists (409).
+        auto overwrite = XrdOucTUtils::caseInsensitiveFind(allheaders, "overwrite");
+        bool noOverwrite = overwrite != allheaders.end() && overwrite->second == "F";
+        if (! XrdHttpProtocol::usingEC && ! noOverwrite)
           xrdreq.open.options = htons(kXR_mkpath | kXR_open_wrto | kXR_delete);
         else
           xrdreq.open.options = htons(kXR_mkpath | kXR_open_wrto | kXR_new);
@@ -1729,7 +1720,7 @@ int XrdHttpReq::ProcessHTTPReq() {
       xrdreq.mv.requestid = htons(kXR_mv);
       xrdreq.mv.arg1len = htons(resourceplusopaque.length());
       xrdreq.mv.dlen = htonl(l);
-      
+
       if (!prot->Bridge->Run((char *) &xrdreq, (char *) mv_args.c_str(), l)) {
         prot->SendSimpleResp(500, NULL, NULL, (char *) "Could not run request.", 0, false);
         return -1;
@@ -1759,7 +1750,7 @@ XrdHttpReq::PostProcessChecksum(std::string &digest_header) {
     }
 
     TRACEI(REQ, "Checksum for HEAD " << resource.c_str() << " "
-               << reinterpret_cast<char *>(iovP[0].iov_base) << "=" 
+               << reinterpret_cast<char *>(iovP[0].iov_base) << "="
                << reinterpret_cast<char *>(iovP[iovN-1].iov_base));
 
     std::string cksumType {reinterpret_cast<char *>(iovP[0].iov_base),iovP[0].iov_len};
@@ -2280,7 +2271,7 @@ int XrdHttpReq::PostProcessHTTPReq(bool final_) {
               httpStatusCode = rrerror.httpRetCode;
               httpErrorBody = rrerror.errMsg;
             }
-              
+
             if (m_transfer_encoding_chunked && m_trailer_headers) {
               std::string trailer = "X-Transfer-Status: " + std::to_string(httpStatusCode) + ": " + httpErrorBody + "\r\n";
 
@@ -2414,7 +2405,7 @@ int XrdHttpReq::PostProcessHTTPReq(bool final_) {
           if (iovN > 0) {
 
             // Now parse the stat info
-            TRACEI(REQ, "Stat for removal " << resource.c_str() 
+            TRACEI(REQ, "Stat for removal " << resource.c_str()
                      << " stat=" << (char *) iovP[0].iov_base);
 
             long dummyl;
@@ -2458,7 +2449,7 @@ int XrdHttpReq::PostProcessHTTPReq(bool final_) {
           DirListInfo e;
           e.size = 0;
           e.flags = 0;
-          
+
           // Now parse the answer building the entries vector
           if (iovN > 0) {
             e.path = resource.c_str();
@@ -2480,15 +2471,15 @@ int XrdHttpReq::PostProcessHTTPReq(bool final_) {
 
               std::string p;
               stringresp += "<D:response xmlns:lp1=\"DAV:\" xmlns:lp2=\"http://apache.org/dav/props/\" xmlns:lp3=\"LCGDM:\">\n";
-              
+
               char *estr = escapeXML(e.path.c_str());
-              
+
               stringresp += "<D:href>";
               stringresp += estr;
               stringresp += "</D:href>\n";
-              
+
               free(estr);
-              
+
               stringresp += "<D:propstat>\n<D:prop>\n";
 
               // Now add the properties that we have to add
@@ -2577,7 +2568,7 @@ int XrdHttpReq::PostProcessHTTPReq(bool final_) {
 
               if (e.path.length() && (e.path != ".") && (e.path != "..")) {
                 /* The entry is filled.
-          
+
                   <D:response xmlns:lp1="DAV:" xmlns:lp2="http://apache.org/dav/props/" xmlns:lp3="LCGDM:">
                       <D:href>/dpm/cern.ch/home/testers2.eu-emi.eu/</D:href>
                       <D:propstat>
@@ -2596,17 +2587,17 @@ int XrdHttpReq::PostProcessHTTPReq(bool final_) {
 
                 std::string p = resource.c_str();
                 if (*p.rbegin() != '/') p += "/";
-                
+
                 p += e.path;
-                
+
                 stringresp += "<D:response xmlns:lp1=\"DAV:\" xmlns:lp2=\"http://apache.org/dav/props/\" xmlns:lp3=\"LCGDM:\">\n";
-                
+
                 char *estr = escapeXML(p.c_str());
                 stringresp += "<D:href>";
                 stringresp += estr;
                 stringresp += "</D:href>\n";
                 free(estr);
-                
+
                 stringresp += "<D:propstat>\n<D:prop>\n";
 
 

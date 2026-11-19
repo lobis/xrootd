@@ -2,12 +2,17 @@
 #define __XRDPFC_RESOURCEMONITOR_HH__
 
 #include "XrdPfcStats.hh"
+#include "XrdPfcStableChunkVector.hh"
+#include "XrdPfcDirStateBase.hh"
+
+#include <sys/stat.h>
 
 #include "XrdSys/XrdSysPthread.hh"
 
+#include <list>
+#include <set>
 #include <string>
 #include <vector>
-#include <list>
 
 class XrdOss;
 
@@ -83,8 +88,10 @@ class ResourceMonitor
          m_dir_state = nullptr;
       }
    };
-   std::vector<AccessToken> m_access_tokens;
-   std::vector<int>         m_access_tokens_free_slots;
+   // Stable addresses: process_queues() uses AccessToken& without m_queue_mutex.
+   // 4096 * 1024 tokens, one per open file. acquire() and release() run under
+   // m_queue_mutex, in the same critical section as the queue push.
+   StableChunkPool<AccessToken, 12, 1024> m_access_tokens;
 
    struct OpenRecord {
       time_t m_open_time;
@@ -110,6 +117,8 @@ class ResourceMonitor
    // DirPurge queue -- not needed? But we do need last-change timestamp in DirState.
 
    long long    m_current_usage_in_st_blocks = 0;  // aggregate disk usage by files
+   int          m_dir_count_discrepancy = 0;       // last reported usage-vs-tree mismatch
+   long long    m_token_alloc_failures = 0;        // token space exhausted, under m_queue_mutex
 
    XrdSysMutex  m_queue_mutex;        // mutex shared between queues
    unsigned int m_queue_swap_u1 = 0u; // identifier of current swap cycle
@@ -126,10 +135,28 @@ class ResourceMonitor
       bool              &f_checked;
    };
 
+   // Top-level directories the traversal does not enter, so they have no DirState.
+   std::set<std::string>    m_protected_top_dirs;
+
+   bool is_in_protected_top_dir(const std::string &path) const {
+      size_t b = path.find_first_not_of('/');
+      if (b == std::string::npos) return false;
+      size_t e = path.find('/', b);
+      return m_protected_top_dirs.find(
+                path.substr(b, e == std::string::npos ? std::string::npos : e - b))
+             != m_protected_top_dirs.end();
+   }
+
    XrdSysMutex              m_dir_scan_mutex;
    std::list<LfnCondRecord> m_dir_scan_open_requests;
    int                      m_dir_scan_check_counter = 0;
    bool                     m_dir_scan_in_progress = true;
+
+   //! cinfo mtime cannot tell open from close, so both get it.
+   static void seed_last_times_from_cinfo(DirUsage &u, const struct stat &cinfo_stat) {
+      if (cinfo_stat.st_mtime > u.m_LastOpenTime)  u.m_LastOpenTime  = cinfo_stat.st_mtime;
+      if (cinfo_stat.st_mtime > u.m_LastCloseTime) u.m_LastCloseTime = cinfo_stat.st_mtime;
+   }
 
    void process_inter_dir_scan_open_requests(FsTraversal &fst);
    void cross_check_or_process_oob_lfn(const std::string &lfn, FsTraversal &fst);
@@ -149,22 +176,22 @@ public:
    int register_file_open(const std::string& filename, time_t open_timestamp, bool existing_file) {
       // Simply return a token, we will resolve it in the actual processing of the queue.
       XrdSysMutexHelper _lock(&m_queue_mutex);
-      int token_id;
-      if ( ! m_access_tokens_free_slots.empty()) {
-         token_id = m_access_tokens_free_slots.back();
-         m_access_tokens_free_slots.pop_back();
-         m_access_tokens[token_id].m_filename = filename;
-         m_access_tokens[token_id].m_last_queue_swap_u1 = m_queue_swap_u1 - 1;
-      } else {
-         token_id = (int) m_access_tokens.size();
-         m_access_tokens.push_back({filename, m_queue_swap_u1 - 1});
+      int token_id = m_access_tokens.acquire();
+      if (token_id < 0) {
+         // Unreachable in practice; heart_beat() reports the count.
+         ++m_token_alloc_failures;
+         return -1;
       }
+      AccessToken &at = m_access_tokens[token_id];
+      at.m_filename           = filename;
+      at.m_last_queue_swap_u1 = m_queue_swap_u1 - 1;
 
       m_file_open_q.push(token_id, {open_timestamp, existing_file});
       return token_id;
    }
 
    void register_file_update_stats(int token_id, const Stats& stats) {
+      if (token_id < 0) return;   // register_file_open() could not get a token
       XrdSysMutexHelper _lock(&m_queue_mutex);
       AccessToken &at = token(token_id);
       // Check if this is the first update within this queue swap cycle.
@@ -183,6 +210,7 @@ public:
    }
 
    void register_file_close(int token_id, time_t close_timestamp, const Stats& full_stats) {
+      if (token_id < 0) return;   // register_file_open() could not get a token
       XrdSysMutexHelper _lock(&m_queue_mutex);
       m_file_close_q.push(token_id, {close_timestamp, full_stats});
    }
@@ -247,9 +275,10 @@ public:
    time_t         m_purge_task_end   {0};
    bool           m_purge_task_active   {false}; // from the perspective of heart-beat, set only in heartbeat
    bool           m_purge_task_complete {false}; // from the perspective of the task, reset in heartbeat, set in task
-   // When m_purge_task_active == true, DirState entries are not removed from the tree to
-   // allow purge thread to report cleared files directly via DirState ptr.
-   // Note, DirState removal happens during stat propagation traversal.
+   // When m_purge_task_active == true at the start of a heart_beat(), DirState entries
+   // are not removed from the tree in it, to allow a purge thread to report cleared
+   // files directly via DirState ptr (not used yet: the purge shot is a copy).
+   // Note, DirState removal happens at the end of heart_beat().
 
    // Purge helpers etc.
    void update_vs_and_file_usage_info();

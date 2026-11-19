@@ -42,18 +42,7 @@ namespace PyXRootD
   int InitTypes();
 
   //----------------------------------------------------------------------------
-  //! Convert PyInt to unsigned long (uint64_t)
-  //!
-  //! @param py_val python object to be converted
-  //! @param val converted value
-  //! @param name name of the object
-  //!
-  //! return 0 if successful, otherwise failed
-  //----------------------------------------------------------------------------
-  int PyIntToUlong(PyObject *py_val, unsigned long *val, const char *name);
-
-  //----------------------------------------------------------------------------
-  //! Convert Python object to unsigned long (uint64_t)
+  //! Convert Python object to unsigned long
   //!
   //! @param py_val python object to be converted
   //! @param val converted value
@@ -94,7 +83,18 @@ namespace PyXRootD
   //!
   //! return 0 if successful, otherwise failed
   //----------------------------------------------------------------------------
-  int PyObjToUllong(PyObject *py_val, unsigned PY_LONG_LONG *val, const char *name);
+  int PyObjToUllong(PyObject *py_val, unsigned long long *val, const char *name);
+
+  //----------------------------------------------------------------------------
+  //! Convert Python object to a timeout (time_t), for use with the "O&"
+  //! format of PyArg_ParseTupleAndKeywords
+  //!
+  //! @param py_val python object to be converted
+  //! @param val pointer to the time_t variable for the converted value
+  //!
+  //! return 1 if successful, 0 if failed (with a Python exception set)
+  //----------------------------------------------------------------------------
+  int ConvertTimeout(PyObject *py_val, void *val);
 }
 
 #endif /* UTILS_HH_ */

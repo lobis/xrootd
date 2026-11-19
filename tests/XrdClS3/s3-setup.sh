@@ -1,6 +1,6 @@
 #!/bin/sh
 
-TEST_NAME=$1
+readonly TEST_NAME=$1
 
 if [ -z "$BINARY_DIR" ]; then
   echo "\$BINARY_DIR environment variable is not set; cannot run test"
@@ -19,6 +19,11 @@ if [ ! -d "$SOURCE_DIR" ]; then
   exit 1
 fi
 
+# The teardown reads the test environment file. Remove the one of an earlier
+# run, so that the teardown never acts on the servers or files of that run.
+readonly ENV_FILE="$BINARY_DIR/tests/$TEST_NAME/setup.sh"
+rm -f "$ENV_FILE"
+
 echo "Setting up S3 server for $TEST_NAME test"
 
 if [ -z "$MINIO_BIN" ]; then
@@ -31,7 +36,7 @@ if [ -z "$MC_BIN" ]; then
   exit 1
 fi
 
-XROOTD_BIN="$BINARY_DIR/bin/xrootd"
+readonly XROOTD_BIN="$BINARY_DIR/bin/xrootd"
 echo "XROOTD_BIN=$XROOTD_BIN"
 if [ -z "XROOTD_BIN" ]; then
   echo "xrootd binary not found; cannot run unit test"
@@ -39,7 +44,7 @@ if [ -z "XROOTD_BIN" ]; then
 fi
 
 mkdir -p "$BINARY_DIR/tests/$TEST_NAME"
-RUNDIR=$(mktemp -d -p "$BINARY_DIR/tests/$TEST_NAME" test_run.XXXXXXXX)
+readonly RUNDIR=$(mktemp -d -p "$BINARY_DIR/tests/$TEST_NAME" test_run.XXXXXXXX)
 
 if [ ! -d "$RUNDIR" ]; then
   echo "Failed to create test run directory; cannot run minio"
@@ -53,12 +58,30 @@ cd "$RUNDIR"
 #   Create CA for Minio server to use
 ####
 
-MINIO_DATADIR="$RUNDIR/minio-data"
-MINIO_CLIENTDIR="$RUNDIR/minio-client"
-MINIO_CERTSDIR="$RUNDIR/minio-certs"
-XROOTD_CONFIGDIR="$RUNDIR/xrootd-config"
+readonly MINIO_DATADIR="$RUNDIR/minio-data"
+readonly MINIO_CLIENTDIR="$RUNDIR/minio-client"
+readonly MINIO_CERTSDIR="$RUNDIR/minio-certs"
+readonly XROOTD_CONFIGDIR="$RUNDIR/xrootd-config"
 mkdir -p "$XROOTD_CONFIGDIR"
-XROOTD_RUNDIR=$(mktemp -d -p /tmp xrootd_test.XXXXXXXX)
+# XRootD places unix sockets in the rundir, and their paths must fit in
+# sun_path (104 bytes on macOS). The teardown also sources the path unquoted.
+# Hence, use TMPDIR only when it is a short, absolute path to a directory
+# with no special characters.
+# POSIX test cannot match a character class, so use case for this check.
+RUNDIR_BASE="${TMPDIR%/}"
+case "$RUNDIR_BASE" in
+  ""|[!/]*|*[!A-Za-z0-9/._-]*) RUNDIR_BASE=/tmp ;;
+esac
+[ ${#RUNDIR_BASE} -le 40 ] && [ -d "$RUNDIR_BASE" ] || RUNDIR_BASE=/tmp
+readonly RUNDIR_BASE
+# Record the rundir and each server PID at once, so that the teardown also
+# cleans up after a failed setup.
+if ! XROOTD_RUNDIR=$(mktemp -d "$RUNDIR_BASE/xrootd_test.XXXXXXXX"); then
+  echo "Failed to create the XRootD run directory; cannot run test"
+  exit 1
+fi
+readonly XROOTD_RUNDIR
+echo "XROOTD_RUNDIR=$XROOTD_RUNDIR" > "$ENV_FILE"
 
 mkdir -p "$MINIO_DATADIR"
 mkdir -p "$MINIO_CERTSDIR/ca"
@@ -128,7 +151,7 @@ if [ "$?" -ne 0 ]; then
   exit 1
 fi
 
-HOST="${HOSTNAME:-localhost}"
+readonly HOST="${HOSTNAME:-localhost}"
 
 # Create the host certificate request
 openssl genrsa -out "$MINIO_CERTSDIR/private.key" 4096 >> "$BINARY_DIR/tests/$TEST_NAME/server.log"
@@ -152,14 +175,16 @@ fi
 
 export MINIO_ROOT_USER=minioadmin
 export MINIO_ROOT_PASSWORD=QXDEiQxQw8qY
-MINIO_USER=miniouser
-MINIO_PASSWORD=2Z303QCzRI7s
+readonly MINIO_ROOT_USER MINIO_ROOT_PASSWORD
+readonly MINIO_USER=miniouser
+readonly MINIO_PASSWORD=2Z303QCzRI7s
 printf "%s" "$MINIO_USER" > "$RUNDIR/access_key"
 printf "%s" "$MINIO_PASSWORD" > "$RUNDIR/secret_key"
 
 # Launch minio
 "$MINIO_BIN" --certs-dir "$MINIO_CERTSDIR" server --address "${HOST}:0" "$MINIO_DATADIR" 0<&- >"$BINARY_DIR/tests/$TEST_NAME/server.log" 2>&1 &
-MINIO_PID=$!
+readonly MINIO_PID=$!
+echo "MINIO_PID=$MINIO_PID" >> "$ENV_FILE"
 echo "minio daemon PID: $MINIO_PID"
 sleep 1
 MINIO_URL=$(grep "API: " "$BINARY_DIR/tests/$TEST_NAME/server.log" | tr ':' ' ' | awk '{print $NF}' | tail -n 1)
@@ -176,18 +201,17 @@ while [ -z "$MINIO_URL" ]; do
     exit 1
   fi
 done
-MINIO_PORT=$MINIO_URL
-MINIO_URL=https://${HOST}:$MINIO_URL
+readonly MINIO_PORT=$MINIO_URL
+readonly MINIO_URL=https://${HOST}:$MINIO_URL
 echo "Minio API server started on $MINIO_URL"
 
-cat > "$BINARY_DIR/tests/$TEST_NAME/setup.sh" <<EOF
+cat >> "$ENV_FILE" <<EOF
 MINIO_URL=$MINIO_URL
-MINIO_PID=$MINIO_PID
 ACCESS_KEY_FILE=$RUNDIR/access_key
 SECRET_KEY_FILE=$RUNDIR/secret_key
 X509_CA_FILE=$MINIO_CERTSDIR/CAs/tlsca.pem
 EOF
-echo "Test environment written to $BINARY_DIR/tests/$TEST_NAME/setup.sh"
+echo "Test environment written to $ENV_FILE"
 
 echo "minio logs are available at $BINARY_DIR/tests/$TEST_NAME/server.log"
 
@@ -208,7 +232,7 @@ echo "Hello, World" > "$RUNDIR/hello_world.txt"
 "$MC_BIN" --insecure --config-dir "$MINIO_CLIENTDIR" cp "$RUNDIR/hello_world.txt" userminio/test-bucket/hello_world2.txt
 
 IDX=0
-COUNT=25
+readonly COUNT=25
 while [ $IDX -ne $COUNT ]; do
   if ! dd if=/dev/urandom "of=$RUNDIR/test_file" bs=1024 count=3096 2> /dev/null; then
     echo "Failed to create random file to upload"
@@ -242,7 +266,7 @@ if ! "$BINARY_DIR/bin/xrdscitokens-create-jwks" "$RUNDIR/issuer/issuer_public.pe
 fi
 
 # Prevent the issuer's keys from being cached by an earlier test run
-XDG_CACHE_HOME="$RUNDIR/tmp"
+readonly XDG_CACHE_HOME="$RUNDIR/tmp"
 rm -rf "$XDG_CACHE_HOME"
 mkdir -p "$XDG_CACHE_HOME" || exit 1
 export XDG_CACHE_HOME
@@ -285,6 +309,7 @@ echo "Sample write token available at $RUNDIR/write.token"
 #    Setup the client plugin directory for the PSS to use
 ####
 export XRD_PLUGINCONFDIR="$RUNDIR/client.plugins.d"
+readonly XRD_PLUGINCONFDIR
 mkdir -p "$XRD_PLUGINCONFDIR"
   
 cat > "$XRD_PLUGINCONFDIR/curl-plugin.conf" <<EOF
@@ -321,7 +346,8 @@ fi
 ####
 
 export XROOTD_CONFIG="$XROOTD_CONFIGDIR/xrootd.cfg"
-BUCKET_NAME=test-bucket
+readonly XROOTD_CONFIG
+readonly BUCKET_NAME=test-bucket
 cat > "$XROOTD_CONFIG" <<EOF
 
 all.trace    all
@@ -392,8 +418,15 @@ export XRDCLS3_ACCESSKEYLOCATION="$RUNDIR/access_key"
 export XRDCLS3_SECRETKEYLOCATION="$RUNDIR/secret_key"
 export XRDCLS3_URLSTYLE=path
 export X509_CERT_FILE=$MINIO_CERTSDIR/CAs/tlsca.pem
+# The gateway is an HTTP client of minio and would pick up a grid proxy of
+# the user running the tests from /tmp/x509up_u<uid>, which minio cannot
+# verify. Point it at a path that can never exist instead.
+export X509_USER_PROXY=/dev/null/x509
+readonly XRDCLS3_ACCESSKEYLOCATION XRDCLS3_SECRETKEYLOCATION XRDCLS3_URLSTYLE
+readonly X509_CERT_FILE X509_USER_PROXY
 "$XROOTD_BIN" -c "$XROOTD_CONFIG" -l "$BINARY_DIR/tests/$TEST_NAME/server.log" 0<&- 2>>"$BINARY_DIR/tests/$TEST_NAME/server.log" >>"$BINARY_DIR/tests/$TEST_NAME/server.log" &
-XROOTD_PID=$!
+readonly XROOTD_PID=$!
+echo "XROOTD_PID=$XROOTD_PID" >> "$ENV_FILE"
 echo "xrootd daemon PID: $XROOTD_PID"
 
 XROOTD_URL=$(grep "Xrd_ProtLoad: enabling port" "$BINARY_DIR/tests/$TEST_NAME/server.log" | grep 'for protocol XrdHttp' | awk '{print $7}')
@@ -417,11 +450,10 @@ while [ -z "$XROOTD_URL" ]; do
     exit 1
   fi
 done
-XROOTD_URL="https://${HOST}:$XROOTD_URL/"
+readonly XROOTD_URL="https://${HOST}:$XROOTD_URL/"
 echo "xrootd started at $XROOTD_URL"
 
-cat >> "$BINARY_DIR/tests/$TEST_NAME/setup.sh" <<EOF
-XROOTD_PID=$XROOTD_PID
+cat >> "$ENV_FILE" <<EOF
 XROOTD_URL=$XROOTD_URL
 BUCKET_NAME=$BUCKET_NAME
 ORIGIN_URL=$MINIO_URL

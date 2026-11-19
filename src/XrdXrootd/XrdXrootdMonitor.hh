@@ -68,6 +68,7 @@
 #define XROOTD_MON_FSOPS    2
 #define XROOTD_MON_FSSSQ    4
 #define XROOTD_MON_FSXFR    8
+#define XROOTD_MON_FSERR   16
 
 class XrdScheduler;
 class XrdNetMsg;
@@ -114,6 +115,19 @@ inline void              Add_wr(kXR_unt32 dictid,
        void              appID(char *id);
 
        void              Close(kXR_unt32 dictid, long long rTot, long long wTot);
+
+//! Copy text that a record binds to a dictid. At most room-1 characters are
+//! copied, and null bytes fill the rest of the room.
+//!
+//! @param buff  Pointer to the room in the record.
+//! @param room  Size of the room, in bytes.
+//! @param text  Pointer to the text.
+//! @param tLen  Length of the text, as given by strlen().
+//!
+//! @return The number of characters copied, not counting the null bytes.
+//
+static int               CopyText(char *buff, int room,
+                                  const char *text, int tLen);
 
        void              Disc(kXR_unt32 dictid, int csec, char Flags=0);
 
@@ -236,6 +250,11 @@ static XrdXrootdMonitor *altMon;
                          XrdXrootdMonitor();
 
 static const int         rdrMax = 8;
+
+//! The largest UDP payload over IPv4: 65535 bytes less the 20-byte IP header
+//! and the 8-byte UDP header. A larger datagram cannot be sent.
+//
+static constexpr int     maxDgram = 65507;
 
 private:
                         ~XrdXrootdMonitor(); 

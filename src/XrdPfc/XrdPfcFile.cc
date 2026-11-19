@@ -469,6 +469,7 @@ bool File::Open(XrdOucCacheIO *inputIO)
       TRACEF(Error, tpfx << "Open failed " << ERRNO_AND_ERRSTR(-res));
       errno = -res;
       delete m_data_file; m_data_file = 0;
+      if ( ! data_existed) myOss.Unlink(m_filename.c_str());
       return false;
    }
 
@@ -479,6 +480,7 @@ bool File::Open(XrdOucCacheIO *inputIO)
       TRACE(Error, tpfx << "Create failed for info file " << ifn << ERRNO_AND_ERRSTR(-res));
       errno = -res;
       m_data_file->Close(); delete m_data_file; m_data_file = 0;
+      if ( ! data_existed) myOss.Unlink(m_filename.c_str());
       return false;
    }
 
@@ -489,6 +491,10 @@ bool File::Open(XrdOucCacheIO *inputIO)
       errno = -res;
       delete m_info_file; m_info_file = 0;
       m_data_file->Close(); delete m_data_file;   m_data_file   = 0;
+      // Remove only what this call created, so a failed open leaves no
+      // uncounted data/cinfo pair behind.
+      if ( ! info_existed) myOss.Unlink(ifn.c_str());
+      if ( ! data_existed) myOss.Unlink(m_filename.c_str());
       return false;
    }
 
@@ -513,6 +519,16 @@ bool File::Open(XrdOucCacheIO *inputIO)
          if (data_existed)
             Cache::ResMon().register_file_purge(m_filename, data_stat.st_blocks);
       }
+   }
+   else if (info_existed)
+   {
+      // The info file is about to be rewritten, so the cached blocks are lost:
+      // reset it like a rejected file.
+      TRACEF(Warning, tpfx << "Reading existing info file failed, resetting info file, truncating data file.");
+      m_cfi.ResetAllAccessStats();
+      m_data_file->Ftruncate(0);
+      if (data_existed)
+         Cache::ResMon().register_file_purge(m_filename, data_stat.st_blocks);
    }
 
    if ( ! initialize_info_file && m_cfi.GetCkSumState() != conf.get_cs_Chk())
@@ -548,6 +564,11 @@ bool File::Open(XrdOucCacheIO *inputIO)
       m_cfi.Write(m_info_file, ifn.c_str());
       m_info_file->Fsync();
       cache()->WriteFileSizeXAttr(m_info_file->getFD(), m_file_size);
+      // There is still a chance we had an orphaned data-file.
+      if (data_existed && ! info_existed) {
+         m_data_file->Ftruncate(0);
+         // Resource-monitor does not count orphaned files (planned for 6.x) so no register_purge().
+      }
 
       if (cache()->RefConfiguration().m_httpcc)
       {
@@ -588,7 +609,23 @@ bool File::Open(XrdOucCacheIO *inputIO)
    }
 
    m_cfi.WriteIOStatAttach();
-   m_state_cond.Lock();
+
+   // An open file must have a token, else its usage is never accounted.
+   m_resmon_token = Cache::ResMon().register_file_open(m_filename, time(0), ! initialize_info_file);
+   if (m_resmon_token < 0)
+   {
+      TRACEF(Error, tpfx << "no resource-monitor token available, not caching it; "
+                            "this indicates a token leak in XrdPfc, please report it.");
+      m_info_file->Close(); delete m_info_file; m_info_file = nullptr;
+      m_data_file->Close(); delete m_data_file; m_data_file = nullptr;
+      // Remove only what this call created.
+      if ( ! info_existed) myOss.Unlink(ifn.c_str());
+      if ( ! data_existed) myOss.Unlink(m_filename.c_str());
+      errno = EMFILE;
+      return false;
+   }
+
+   // No m_state_cond: no other thread uses these members until GetFile() publishes the File.
    m_block_size = m_cfi.GetBufferSize();
    m_num_blocks = m_cfi.GetNBlocks();
    m_prefetch_state = (m_cfi.IsComplete()) ? kComplete : kStopped; // Will engage in AddIO().
@@ -599,13 +636,10 @@ bool File::Open(XrdOucCacheIO *inputIO)
    m_data_file->Fstat(&data_stat);
    m_st_blocks = data_stat.st_blocks;
 
-   m_resmon_token = Cache::ResMon().register_file_open(m_filename, time(0), data_existed);
    constexpr long long MB = 1024 * 1024;
    m_resmon_report_threshold = std::min(std::max(10 * MB, m_file_size / 20), 500 * MB);
    // m_resmon_report_threshold_scaler; // something like 10% of original threshold, to adjust
    // actual threshold based on return values from register_file_update_stats().
-
-   m_state_cond.UnLock();
 
    return true;
 }
@@ -845,7 +879,7 @@ int File::ReadBlocksFromDisk(std::vector<XrdOucIOVec>& ioVec, int expected_size)
 int File::Read(IO *io, char* iUserBuff, long long iUserOff, int iUserSize, ReadReqRH *rh)
 {
    // rrc_func is ONLY called from async processing.
-   // If this function returns anything other than -EWOULDBLOCK, rrc_func needs to be called by the caller.
+   // If this function returns anything other than kReadPending, rrc_func needs to be called by the caller.
    // This streamlines implementation of synchronous IO::Read().
 
    TRACEF(Dump, "Read() sid: " << Xrd::hex1 << rh->m_seq_id << " size: " << iUserSize);
@@ -956,9 +990,9 @@ int File::ReadOpusCoalescere(IO *io, const XrdOucIOVec *readV, int readVnum,
          BlockMap_i bi = m_block_map.find(block_idx);
 
          // overlap and read
-         long long off;     // offset in user buffer
-         long long blk_off; // offset in block
-         int       size;    // size to copy
+         long long off = 0;     // offset in user buffer
+         long long blk_off = 0; // offset in block
+         int       size = 0;    // size to copy
 
          overlap(block_idx, m_block_size, iUserOff, iUserSize, off, blk_off, size);
 
@@ -1142,7 +1176,7 @@ int File::ReadOpusCoalescere(IO *io, const XrdOucIOVec *readV, int readVnum,
       else
       {
          m_state_cond.UnLock();
-         return -EWOULDBLOCK;
+         return kReadPending;
       }
    }
    else

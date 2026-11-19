@@ -165,7 +165,7 @@ namespace XrdCl
         uint16_t ret    = 0;
         size_t   minval = std::numeric_limits<size_t>::max();
 
-        for( uint16_t i = 0; i < connected.size() && i < strmqueues.size(); ++i )
+        for( size_t i = 0; i < connected.size() && i < strmqueues.size(); ++i )
         {
           if( !connected[i] ) continue;
 
@@ -235,7 +235,6 @@ namespace XrdCl
       openFiles(0),
       waitBarrier(0),
       protection(0),
-      protRespBody(0),
       protRespSize(0),
       encrypted(false),
       istpc(false)
@@ -277,7 +276,7 @@ namespace XrdCl
     uint32_t                           openFiles;
     time_t                             waitBarrier;
     XrdSecProtect                     *protection;
-    ServerResponseBody_Protocol       *protRespBody;
+    std::vector<char>                  protRespBuff;
     unsigned int                       protRespSize;
     std::unique_ptr<StreamSelector>    strmSelector;
     bool                               encrypted;
@@ -356,6 +355,10 @@ namespace XrdCl
     ServerResponseHeader* rsphdr = (ServerResponseHeader*)message.GetBuffer();
     bodySize = rsphdr->dlen;
 
+    if( bodySize > std::numeric_limits<uint32_t>::max() - 8 )
+      return XRootDStatus( stError, errInvalidMessage, 0,
+                           "Response body too large." );
+
     if( message.GetSize() < bodySize + 8 )
       message.ReAllocate( bodySize + 8 );
 
@@ -392,12 +395,19 @@ namespace XrdCl
     //--------------------------------------------------------------------------
 
     uint32_t bodySize = rsphdr->dlen;
+    if( bodySize > std::numeric_limits<uint32_t>::max() - 8 )
+      return XRootDStatus( stError, errInvalidMessage, 0,
+                          "kXR_status: response body too large." );
     if( bodySize+8 < sizeof( ServerResponseStatus ) )
       return XRootDStatus( stError, errInvalidMessage, 0,
                           "kXR_status: invalid message size." );
 
     ServerResponseStatus *rspst = (ServerResponseStatus*)message.GetBuffer();
-    bodySize += rspst->bdy.dlen;
+    uint32_t moreSize = static_cast<uint32_t>( rspst->bdy.dlen );
+    if( moreSize > std::numeric_limits<uint32_t>::max() - 8 - bodySize )
+      return XRootDStatus( stError, errInvalidMessage, 0,
+                           "kXR_status: response body too large." );
+    bodySize += moreSize;
 
     if( message.GetSize() < bodySize + 8 )
       message.ReAllocate( bodySize + 8 );
@@ -1649,6 +1659,7 @@ namespace XrdCl
   {
     XRootDChannelInfo *info = 0;
     channelData.Get( info );
+    if( !info ) return NoAction;
     XrdSysMutexHelper scopedLock( info->mutex );
     Log *log = DefaultEnv::GetLog();
 
@@ -1764,6 +1775,7 @@ namespace XrdCl
     // only those.
     XRootDChannelInfo *info = 0;
     channelData.Get( info );
+    if( !info ) return;
     XrdSysMutexHelper scopedLock( info->mutex );
     ClientRequest *req = (ClientRequest*)msg->GetBuffer();
     uint16_t reqid = ntohs( req->header.requestid );
@@ -2125,9 +2137,12 @@ namespace XrdCl
 
     if( rsp->hdr.dlen > 8 )
     {
-      info->protRespBody = new ServerResponseBody_Protocol();
-      info->protRespBody->flags = rsp->body.protocol.flags;
-      info->protRespBody->pval  = rsp->body.protocol.pval;
+      info->protRespBuff.assign( sizeof( ServerResponseBody_Protocol ), 0 );
+      info->protRespSize = 0;
+      ServerResponseBody_Protocol *protRespBody =
+        reinterpret_cast<ServerResponseBody_Protocol*>( info->protRespBuff.data() );
+      protRespBody->flags = rsp->body.protocol.flags;
+      protRespBody->pval  = rsp->body.protocol.pval;
 
       char*  bodybuff = reinterpret_cast<char*>( &rsp->body.protocol.secreq );
       size_t bodysize = rsp->hdr.dlen - 8;
@@ -2214,10 +2229,25 @@ namespace XrdCl
     // Parse security requirements
     //--------------------------------------------------------------------------
     XrdProto::secReqs *secreq = reinterpret_cast<XrdProto::secReqs*>( bodybuff );
-    if( bodysize >= 6 /*XrdProto::secReqs*/ && secreq->theTag == 'S' )
+    static const size_t secHdrLen = sizeof( XrdProto::secReqs ) -
+                                    sizeof( ServerResponseSVec_Protocol );
+    if( bodysize >= secHdrLen && secreq->theTag == 'S' )
     {
-      memcpy( &info->protRespBody->secreq, secreq, bodysize );
-      info->protRespSize = bodysize + 8 /*pval & flags*/;
+      //------------------------------------------------------------------------
+      // Copy only the header and the secvsz entries of the security vector,
+      // the server may send fewer bytes than declared or trailing garbage
+      //------------------------------------------------------------------------
+      size_t secsize = secHdrLen + secreq->secvsz *
+                                   sizeof( ServerResponseSVec_Protocol );
+      if( bodysize < secsize )
+        return XRootDStatus( stError, errDataError, 0, "Received incomplete "
+                             "protocol response." );
+
+      size_t respsize = kXR_ShortProtRespLen + secsize;
+      if( info->protRespBuff.size() < respsize )
+        info->protRespBuff.resize( respsize, 0 );
+      memcpy( info->protRespBuff.data() + kXR_ShortProtRespLen, secreq, secsize );
+      info->protRespSize = respsize;
     }
 
     return XRootDStatus();
@@ -2289,26 +2319,33 @@ namespace XrdCl
     int timeZone = XrdSysTimer::TimeZone();
     char *hostName = XrdNetUtils::MyHostName();
     std::string countryCode = Utils::FQDNToCC( hostName );
-    char *cgiBuffer = new char[1024 + info->logintoken.size()];
     std::string appName;
     std::string monInfo;
+    std::string clientSite;
     env->GetString( "AppName", appName );
     env->GetString( "MonInfo", monInfo );
-    if( info->logintoken.empty() )
+    env->GetString( "ClientSite", clientSite );
+
+    std::string cgi = "xrd.cc=" + countryCode +
+                      "&xrd.tz=" + std::to_string( timeZone ) +
+                      "&xrd.appname=" + appName +
+                      "&xrd.info=" + monInfo +
+                      "&xrd.hostname=" + hostName +
+                      "&xrd.rn=" XrdVERSION;
+
+    if( !clientSite.empty() )
     {
-      snprintf( cgiBuffer, 1024,
-                "xrd.cc=%s&xrd.tz=%d&xrd.appname=%s&xrd.info=%s&"
-                "xrd.hostname=%s&xrd.rn=%s", countryCode.c_str(), timeZone,
-                appName.c_str(), monInfo.c_str(), hostName, XrdVERSION );
+      clientSite.resize( std::min<size_t>( clientSite.size(), 63 ) );
+      for( char &c : clientSite )
+        if( !isalnum( (unsigned char)c ) && !strchr( "_-:", c ) )
+          c = '.';
+      cgi += "&xrd.site=" + clientSite;
     }
-    else
-    {
-      snprintf( cgiBuffer, 1024,
-                "xrd.cc=%s&xrd.tz=%d&xrd.appname=%s&xrd.info=%s&"
-                "xrd.hostname=%s&xrd.rn=%s&%s", countryCode.c_str(), timeZone,
-                appName.c_str(), monInfo.c_str(), hostName, XrdVERSION, info->logintoken.c_str() );
-    }
-    uint16_t cgiLen = strlen( cgiBuffer );
+
+    if( !info->logintoken.empty() )
+      cgi += "&" + info->logintoken;
+
+    uint32_t cgiLen = cgi.size();
     free( hostName );
 
     //--------------------------------------------------------------------------
@@ -2389,16 +2426,15 @@ namespace XrdCl
     buffer.resize( 8, 0 );
     std::copy( buffer.begin(), buffer.end(), (char*)loginReq->username );
 
-    msg->Append( cgiBuffer, cgiLen, 24 );
+    msg->Append( cgi.c_str(), cgiLen, 24 );
 
     log->Debug( XRootDTransportMsg, "[%s] Sending out kXR_login request, "
                 "username: %s, cgi: %s, dual-stack: %s, private IPv4: %s, "
                 "private IPv6: %s", hsData->streamName.c_str(),
-                loginReq->username, cgiBuffer, dualStack ? "true" : "false",
+                loginReq->username, cgi.c_str(), dualStack ? "true" : "false",
                 privateIPv4 ? "true" : "false",
                 privateIPv6 ? "true" : "false" );
 
-    delete [] cgiBuffer;
     MarshallRequest( msg );
     return msg;
   }
@@ -2581,9 +2617,11 @@ namespace XrdCl
         //----------------------------------------------------------------------
         // Do we need protection?
         //----------------------------------------------------------------------
-        if( info->protRespBody )
+        if( !info->protRespBuff.empty() )
         {
-          int rc = XrdSecGetProtection( info->protection, *info->authProtocol, *info->protRespBody, info->protRespSize );
+          ServerResponseBody_Protocol *protRespBody =
+            reinterpret_cast<ServerResponseBody_Protocol*>( info->protRespBuff.data() );
+          int rc = XrdSecGetProtection( info->protection, *info->authProtocol, *protRespBody, info->protRespSize );
           if( rc > 0 )
           {
             log->Debug( XRootDTransportMsg,
@@ -2813,12 +2851,8 @@ namespace XrdCl
       CleanUpAuthentication( info );
     }
 
-    if( info->protRespBody )
-    {
-      delete info->protRespBody;
-      info->protRespBody = 0;
-      info->protRespSize = 0;
-    }
+    info->protRespBuff.clear();
+    info->protRespSize = 0;
 
     return Status();
   }

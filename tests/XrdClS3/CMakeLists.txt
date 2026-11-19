@@ -64,55 +64,50 @@ add_executable(xrdcl-s3-test
   DirListTest.cc
 )
 
-add_executable(xrdcl-s3-unittest
-  UrlParseTest.cc
-)
-
 target_link_libraries(xrdcl-s3-test XrdClS3Obj XrdClHttpTransferTest GTest::gtest_main)
-target_link_libraries(xrdcl-s3-unittest XrdClS3Obj GTest::gtest_main)
 
-if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU"
-  AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9.1)
-  target_link_libraries(xrdcl-s3-unittest stdc++fs)
-endif()
+# X509_USER_PROXY points at a path that can never exist, so that a grid
+# proxy belonging to the user running the tests is never presented to minio,
+# which cannot verify it.
 
 gtest_add_tests(TARGET xrdcl-s3-test TEST_LIST S3Tests)
 set_tests_properties(${S3Tests}
   PROPERTIES
-    FIXTURES_REQUIRED XrdClS3::s3
-    ENVIRONMENT "XRD_LOGLEVEL=Debug;ENV_FILE=${CMAKE_BINARY_DIR}/tests/s3/setup.sh;XRD_PLUGINCONFDIR=${CMAKE_BINARY_DIR}/tests/s3/client.plugins.d"
+    FIXTURES_REQUIRED XrdClS3.s3
+    ENVIRONMENT "XRD_LOGLEVEL=Debug;ENV_FILE=${CMAKE_BINARY_DIR}/tests/s3/setup.sh;XRD_PLUGINCONFDIR=${CMAKE_BINARY_DIR}/tests/s3/client.plugins.d;X509_USER_PROXY=/dev/null/x509"
 )
+
 
 ######################################
 # Integration tests.
 ######################################
-add_test(NAME XrdClS3::s3::setup
+add_test(NAME XrdClS3.s3.setup
   COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/s3-setup.sh" s3)
 
-set_tests_properties(XrdClS3::s3::setup
+set_tests_properties(XrdClS3.s3.setup
   PROPERTIES
-    FIXTURES_SETUP XrdClS3::s3
+    FIXTURES_SETUP XrdClS3.s3
     ENVIRONMENT "OPENSSL_BIN=${OPENSSL_BIN};BINARY_DIR=${CMAKE_BINARY_DIR};MC_BIN=${MC_BIN};MINIO_BIN=${MINIO_BIN};SOURCE_DIR=${CMAKE_SOURCE_DIR}"
 )
 
-add_test(NAME XrdClS3::s3::teardown
+add_test(NAME XrdClS3.s3.teardown
   COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/s3-teardown.sh" s3)
 
-set_tests_properties(XrdClS3::s3::teardown
+set_tests_properties(XrdClS3.s3.teardown
   PROPERTIES
-    FIXTURES_CLEANUP XrdClS3::s3
+    FIXTURES_CLEANUP XrdClS3.s3
     ENVIRONMENT "BINARY_DIR=${CMAKE_BINARY_DIR}"
 )
 
-add_test(NAME XrdClS3::s3::test
+add_test(NAME XrdClS3.s3.test
   COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/s3-test.sh" s3)
 
 list(APPEND S3_TEST_LOGS ${CMAKE_CURRENT_BINARY_DIR}/tests/s3/minio.log)
 list(APPEND S3_TEST_LOGS ${CMAKE_CURRENT_BINARY_DIR}/tests/s3/client.log)
 
-set_tests_properties(XrdClS3::s3::test
+set_tests_properties(XrdClS3.s3.test
   PROPERTIES
-    FIXTURES_REQUIRED XrdClS3::s3
+    FIXTURES_REQUIRED XrdClS3.s3
     ENVIRONMENT "BINARY_DIR=${CMAKE_BINARY_DIR}"
     ATTACHED_FILES_ON_FAIL "${S3_TEST_LOGS}"
 )

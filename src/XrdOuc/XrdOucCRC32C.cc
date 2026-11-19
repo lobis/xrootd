@@ -45,17 +45,30 @@
                      XrdOucCRC32C.hh with corresponding change to include
                      statement herein. Add required casts to allow C++
                      compilation.
+        28 Oct 2026  Add a hardware version for ARMv8 processors.
  */
 
 #include <pthread.h>
 #include "XrdOuc/XrdOucCRC32C.hh"
 
+/* Little-endian 64-bit ARM processors may provide the ARMv8 crc32c
+   instructions, mandatory since ARMv8.1 and optional in ARMv8.0. */
+#if defined(__aarch64__) && !defined(__AARCH64EB__)
+#define CRC32C_HW_ARM
+#include <arm_acle.h>
+#include <cstring>
+#if !defined(__ARM_FEATURE_CRC32) && defined(__linux__)
+#include <sys/auxv.h>
+#include <asm/hwcap.h>
+#endif
+#endif
+
 /* CRC-32C (iSCSI) polynomial in reversed bit order. */
 #define POLY 0x82f63b78
 
-#ifdef __x86_64__
+#if defined(__x86_64__) || defined(CRC32C_HW_ARM)
 
-/* Hardware CRC-32C for Intel and compatible processors. */
+/* Shift tables shared by the hardware CRC-32C implementations. */
 
 /* Multiply a matrix times a vector over the Galois field of two elements,
    GF(2).  Each element is a bit in an unsigned integer.  mat must have at
@@ -159,6 +172,10 @@ static void crc32c_init_hw(void) {
     crc32c_zeros(crc32c_short, SHORT);
 }
 
+#endif /* __x86_64__ || CRC32C_HW_ARM */
+
+#ifdef __x86_64__
+
 /* Compute CRC-32C using the Intel hardware instruction. */
 static uint32_t crc32c_hw(uint32_t crc, void const *buf, size_t len) {
     /* populate shift tables the first time through */
@@ -168,16 +185,10 @@ static uint32_t crc32c_hw(uint32_t crc, void const *buf, size_t len) {
     crc = ~crc;
     uint64_t crc0 = crc;            /* 64-bits for crc32q instruction */
 
-    /* compute the crc for up to seven leading bytes to bring the data pointer
-       to an eight-byte boundary */
+    /* the crc32 instructions accept unaligned operands, so the data pointer is
+       not first brought to an eight-byte boundary: doing that a byte at a time
+       costs more than it saves */
     unsigned char const *next = (unsigned char const *)buf;
-    while (len && ((uintptr_t)next & 7) != 0) {
-        __asm__("crc32b\t" "(%1), %0"
-                : "=r"(crc0)
-                : "r"(next), "0"(crc0));
-        next++;
-        len--;
-    }
 
     /* compute the crc on sets of LONG*3 bytes, executing three independent crc
        instructions, each on LONG bytes -- this is optimized for the Nehalem,
@@ -234,17 +245,29 @@ static uint32_t crc32c_hw(uint32_t crc, void const *buf, size_t len) {
         len &= 7;
     }
 
-    /* compute the crc for up to seven trailing bytes */
-    while (len) {
+    /* compute the crc for up to seven trailing bytes, four, two and one byte at
+       a time */
+    crc = crc0;
+    if (len & 4) {
+        __asm__("crc32l\t" "(%1), %0"
+                : "=r"(crc)
+                : "r"(next), "0"(crc));
+        next += 4;
+    }
+    if (len & 2) {
+        __asm__("crc32w\t" "(%1), %0"
+                : "=r"(crc)
+                : "r"(next), "0"(crc));
+        next += 2;
+    }
+    if (len & 1) {
         __asm__("crc32b\t" "(%1), %0"
-                : "=r"(crc0)
-                : "r"(next), "0"(crc0));
-        next++;
-        len--;
+                : "=r"(crc)
+                : "r"(next), "0"(crc));
     }
 
     /* return a post-processed crc */
-    return ~crc0;
+    return ~crc;
 }
 
 /* Check for SSE 4.2.  SSE 4.2 was first supported in Nehalem processors
@@ -263,16 +286,137 @@ static uint32_t crc32c_hw(uint32_t crc, void const *buf, size_t len) {
         (have) = (ecx >> 20) & 1; \
     } while (0)
 
-/* Compute a CRC-32C.  If the crc32 instruction is available, use the hardware
-   version.  Otherwise, use the software version. */
-uint32_t crc32c(uint32_t crc, void const *buf, size_t len) {
+static int crc32c_have_sse42(void) {
     int sse42;
-    
+
     SSE42(sse42);
+    return sse42;
+}
+
+/* Compute a CRC-32C.  If the crc32 instruction is available, use the hardware
+   version.  Otherwise, use the software version.  The cpuid check is done only
+   once, since cpuid is slow and traps to the hypervisor in virtual machines. */
+uint32_t crc32c(uint32_t crc, void const *buf, size_t len) {
+    static const int sse42 = crc32c_have_sse42();
+
     return sse42 ? crc32c_hw(crc, buf, len) : crc32c_sw(crc, buf, len);
 }
 
-#else /* !__x86_64__ */
+#elif defined(CRC32C_HW_ARM)
+
+/* The crc32c intrinsics need the crc extension: enable it for the functions
+   using them when it is not enabled for the whole compilation unit. */
+#ifdef __ARM_FEATURE_CRC32
+#define CRC32C_TARGET_CRC
+#else
+#define CRC32C_TARGET_CRC __attribute__((target("+crc")))
+#endif
+
+/* Load eight bytes from a possibly unaligned address. */
+static inline uint64_t crc32c_load64(unsigned char const *next) {
+    uint64_t word;
+    memcpy(&word, next, sizeof(word));
+    return word;
+}
+
+/* Compute CRC-32C using the ARMv8 hardware instructions, with the same
+   three-way parallel scheme as on x86 to hide the latency of the crc32cx
+   instruction. */
+CRC32C_TARGET_CRC
+static uint32_t crc32c_hw(uint32_t crc, void const *buf, size_t len) {
+    /* populate shift tables the first time through */
+    pthread_once(&crc32c_once_hw, crc32c_init_hw);
+
+    uint32_t crc0 = ~crc;
+    unsigned char const *next = (unsigned char const *)buf;
+
+    /* compute the crc on sets of LONG*3 bytes, three independent crc
+       instructions at a time, each on LONG bytes */
+    while (len >= LONG*3) {
+        uint32_t crc1 = 0;
+        uint32_t crc2 = 0;
+        unsigned char const * const end = next + LONG;
+        do {
+            crc0 = __crc32cd(crc0, crc32c_load64(next));
+            crc1 = __crc32cd(crc1, crc32c_load64(next + LONG));
+            crc2 = __crc32cd(crc2, crc32c_load64(next + LONG*2));
+            next += 8;
+        } while (next < end);
+        crc0 = crc32c_shift(crc32c_long, crc0) ^ crc1;
+        crc0 = crc32c_shift(crc32c_long, crc0) ^ crc2;
+        next += LONG*2;
+        len -= LONG*3;
+    }
+
+    /* do the same thing, but now on SHORT*3 blocks for the remaining data less
+       than a LONG*3 block */
+    while (len >= SHORT*3) {
+        uint32_t crc1 = 0;
+        uint32_t crc2 = 0;
+        unsigned char const * const end = next + SHORT;
+        do {
+            crc0 = __crc32cd(crc0, crc32c_load64(next));
+            crc1 = __crc32cd(crc1, crc32c_load64(next + SHORT));
+            crc2 = __crc32cd(crc2, crc32c_load64(next + SHORT*2));
+            next += 8;
+        } while (next < end);
+        crc0 = crc32c_shift(crc32c_short, crc0) ^ crc1;
+        crc0 = crc32c_shift(crc32c_short, crc0) ^ crc2;
+        next += SHORT*2;
+        len -= SHORT*3;
+    }
+
+    /* compute the crc on the remaining eight-byte units less than a SHORT*3
+       block */
+    while (len >= 8) {
+        crc0 = __crc32cd(crc0, crc32c_load64(next));
+        next += 8;
+        len -= 8;
+    }
+
+    /* compute the crc for up to seven trailing bytes, four, two and one byte at
+       a time */
+    if (len & 4) {
+        uint32_t word;
+        memcpy(&word, next, sizeof(word));
+        crc0 = __crc32cw(crc0, word);
+        next += 4;
+    }
+    if (len & 2) {
+        uint16_t half;
+        memcpy(&half, next, sizeof(half));
+        crc0 = __crc32ch(crc0, half);
+        next += 2;
+    }
+    if (len & 1)
+        crc0 = __crc32cb(crc0, *next);
+
+    /* return a post-processed crc */
+    return ~crc0;
+}
+
+/* Check for the crc32c instructions: known at compile time when the crc
+   extension is enabled, otherwise asked from the kernel on Linux. */
+static int crc32c_have_crc(void) {
+#if defined(__ARM_FEATURE_CRC32)
+    return 1;
+#elif defined(__linux__) && defined(HWCAP_CRC32)
+    return (getauxval(AT_HWCAP) & HWCAP_CRC32) != 0;
+#else
+    return 0;
+#endif
+}
+
+/* Compute a CRC-32C.  If the crc32c instructions are available, use the
+   hardware version.  Otherwise, use the software version.  The check is done
+   only once. */
+uint32_t crc32c(uint32_t crc, void const *buf, size_t len) {
+    static const int hw = crc32c_have_crc();
+
+    return hw ? crc32c_hw(crc, buf, len) : crc32c_sw(crc, buf, len);
+}
+
+#else /* !__x86_64__ && !CRC32C_HW_ARM */
 
 uint32_t crc32c(uint32_t crc, void const *buf, size_t len) {
     return crc32c_sw(crc, buf, len);
@@ -428,6 +572,118 @@ uint32_t crc32c_sw(uint32_t crc, void const *buf, size_t len) {
     else
         return crc32c_sw_big(crc, buf, len);
 }
+
+/******************************************************************************/
+/*                        c r c 3 2 c _ c o m b i n e                         */
+/******************************************************************************/
+
+/// merge two CRC32 such that result = crc32(dataB, lengthB, crc32(dataA, lengthA))
+uint32_t crc32c_combine(uint32_t crcA, uint32_t crcB, size_t lengthB)
+{
+  // Original source from Stephan Brumme
+  // https://github.com/stbrumme/crc32
+  // https://create.stephan-brumme.com/crc32/
+  // based on Mark Adler's crc_combine from
+  // https://github.com/madler/pigz/blob/master/pigz.c
+
+  // main idea:
+  // - if you have two equally-sized blocks A and B,
+  //   then you can create a block C = A ^ B
+  //   which has the property crc(C) = crc(A) ^ crc(B)
+  // - if you append length(B) zeros to A and call it A' (think of it as AAAA000)
+  //   and   prepend length(A) zeros to B and call it B' (think of it as 0000BBB)
+  //   then exists a C' = A' ^ B'
+  // - remember: if you XOR someting with zero, it remains unchanged: X ^ 0 = X
+  // - that means C' = A concat B so that crc(A concat B) = crc(C') = crc(A') ^ crc(B')
+  // - the trick is to compute crc(A') based on crc(A)
+  //                       and crc(B') based on crc(B)
+  // - since B' starts with many zeros, the crc of those initial zeros is still zero
+  // - that means crc(B') = crc(B)
+  // - unfortunately the trailing zeros of A' change the crc, so usually crc(A') != crc(A)
+  // - the following code is a fast algorithm to compute crc(A')
+  // - starting with crc(A) and appending length(B) zeros, needing just log2(length(B)) iterations
+  // - the details are explained by the original author at
+  //   https://stackoverflow.com/questions/23122312/crc-calculation-of-a-mostly-static-data-stream/23126768
+  //
+  // notes:
+  // - I squeezed everything into one function to keep global namespace clean (original code two helper functions)
+  // - most original comments are still in place, I added comments where these helper functions where made inline code
+  // - performance-wise there isn't any differenze to the original zlib/pigz code
+
+  // degenerated case
+  if (lengthB == 0)
+    return crcA;
+
+  /// CRC32 => 32 bits
+  const uint32_t CrcBits = 32;
+
+  uint32_t odd [CrcBits]; // odd-power-of-two  zeros operator
+  uint32_t even[CrcBits]; // even-power-of-two zeros operator
+
+  // put operator for one zero bit in odd
+  odd[0] = POLY;          // CRC-32 polynomial
+  for (int i = 1; i < (int)CrcBits; i++)
+    odd[i] = 1 << (i - 1);
+
+  // put operator for two zero bits in even
+  // same as gf2_matrix_square(even, odd);
+  for (int i = 0; i < (int)CrcBits; i++)
+  {
+    uint32_t vec = odd[i];
+    even[i] = 0;
+    for (int j = 0; vec != 0; j++, vec >>= 1)
+      if (vec & 1)
+        even[i] ^= odd[j];
+  }
+  // put operator for four zero bits in odd
+  // same as gf2_matrix_square(odd, even);
+  for (int i = 0; i < (int)CrcBits; i++)
+  {
+    uint32_t vec = even[i];
+    odd[i] = 0;
+    for (int j = 0; vec != 0; j++, vec >>= 1)
+      if (vec & 1)
+        odd[i] ^= even[j];
+  }
+
+  // the following loop becomes much shorter if I keep swapping even and odd
+  uint32_t* a = even;
+  uint32_t* b = odd;
+  // apply secondLength zeros to firstCrc32
+  for (; lengthB > 0; lengthB >>= 1)
+  {
+    // same as gf2_matrix_square(a, b);
+    for (int i = 0; i < (int)CrcBits; i++)
+    {
+      uint32_t vec = b[i];
+      a[i] = 0;
+      for (int j = 0; vec != 0; j++, vec >>= 1)
+        if (vec & 1)
+          a[i] ^= b[j];
+    }
+
+    // apply zeros operator for this bit
+    if (lengthB & 1)
+    {
+      // same as firstCrc32 = gf2_matrix_times(a, firstCrc32);
+      uint32_t sum = 0;
+      for (int i = 0; crcA != 0; i++, crcA >>= 1)
+        if (crcA & 1)
+          sum ^= a[i];
+      crcA = sum;
+    }
+
+    // switch even and odd
+    uint32_t* t = a; a = b; b = t;
+  }
+
+  // return combined crc
+  return crcA ^ crcB;
+}
+
+/******************************************************************************/
+/*                                  m a i n                                   */
+/******************************************************************************/
 
 #ifdef TEST
 

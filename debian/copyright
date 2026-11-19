@@ -92,9 +92,11 @@ Files:
  src/XrdZip/*
  tests/common/*
  tests/XrdCephTests/*
- tests/XrdCl/*
+ tests/unit/XrdCeph/*
+ tests/end-to-end/xrdcl/gtest/*
+ tests/unit/XrdCl/*
  tests/XrdClTests/*
- tests/XrdEc/*
+ tests/unit/XrdEc/*
  tests/XrdEcTests/*
  utils/xrootd-config
 Copyright:
@@ -116,7 +118,7 @@ Files:
  src/XrdCl/XrdClLocalFileHandler.*
  src/XrdCl/XrdClLocalFileTask.*
  src/XrdCms/XrdCmsRedirLocal.*
- tests/XrdClTests/LocalFileHandlerTest.cc
+ tests/unit/XrdCl/XrdClLocalFileHandler.cc
 Copyright:
  2017, 2019 GSI Helmholtzzentrum für Schwerionenforschung GmbH
 License: LGPL-3
