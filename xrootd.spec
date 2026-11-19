@@ -77,6 +77,7 @@ BuildRequires:	python3-sphinx
 BuildRequires:	attr
 BuildRequires:	coreutils
 BuildRequires:	curl
+BuildRequires:	diffutils
 BuildRequires:	jq
 BuildRequires:	krb5-server
 BuildRequires:	krb5-workstation
@@ -84,6 +85,8 @@ BuildRequires:	openssl
 BuildRequires:	procps-ng
 BuildRequires:	python3-pytest
 BuildRequires:	sqlite
+BuildRequires:	unzip
+BuildRequires:	zip
 %if 0%{?fedora}
 BuildRequires:	util-linux-script
 %else
@@ -356,7 +359,7 @@ doxygen Doxyfile
 
 %{__python3} -m pip install \
 	--no-deps --ignore-installed --disable-pip-version-check --verbose \
-	--prefix %{buildroot}%{_prefix} %{_vpath_builddir}/python/dist/*.whl
+	--prefix %{buildroot}%{_prefix} %{_vpath_builddir}/python/native-bindings/dist/*.whl
 
 rm -f %{buildroot}%{python3_sitearch}/xrootd-*.*-info/direct_url.json
 rm -f %{buildroot}%{python3_sitearch}/xrootd-*.*-info/RECORD
