@@ -1,1 +1,3 @@
-add_bats_test(XrdHttp::put-overwrite overwrite.bats)
+add_bats_tests(continue.bats)
+add_bats_tests(overwrite.bats)
+add_bats_tests(size.bats)

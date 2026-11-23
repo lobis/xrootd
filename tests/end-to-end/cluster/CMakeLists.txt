@@ -1,0 +1,10 @@
+add_bats_tests(cluster.bats)
+add_bats_tests(full.bats)
+add_bats_tests(no-cmsd.bats)
+add_bats_tests(suspend.bats)
+
+# The servers set the CA of the scitokens library, which fetches the keys of
+# the issuer over HTTPS, with scitoken_config_set_str
+if(BUILD_SCITOKENS AND HAVE_SCITOKEN_CONFIG_SET_STR)
+  add_bats_tests(tokens.bats)
+endif()
