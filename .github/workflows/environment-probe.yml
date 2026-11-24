@@ -1,0 +1,13 @@
+name: Environment tag probe
+run-name: Tag policy probe ${{ github.ref_name }}
+on:
+  push:
+    tags: ["v6.10.10", "v6.10.10-rc12", "v6.10.x", "v6.10.10-preview"]
+permissions: {}
+jobs:
+  match:
+    runs-on: ubuntu-latest
+    environment: pypi-tag-probe-4d83278b49
+    steps:
+      - name: Environment admitted this tag
+        run: echo environment-admitted
